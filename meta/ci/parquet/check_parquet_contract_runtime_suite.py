@@ -1,7 +1,9 @@
-"""Fail-closed runtime suite for the production Parquet reader contracts.
+"""Certify production Parquet reader contracts from the full test suite.
 
-It validates the selected contract manifest, rejects skips, executes each required
-group, and emits certificate-ready evidence.
+The module validates the selected contract manifest and native/PyArrow readiness,
+then consumes the functional suite's JUnit report.  Certification fails closed
+unless every required node ID appears exactly once, passes, and is not skipped, so CI
+retains durable contract evidence without executing those tests twice.
 """
 
 from __future__ import annotations
@@ -9,9 +11,9 @@ from __future__ import annotations
 import ast
 import json
 import sys
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
 from schema_sanitizer.adapters.parquet.status import (
     parquet_contract_runtime_readiness_status,
@@ -63,7 +65,7 @@ PARQUET_CONTRACT_RUNTIME_TESTS: tuple[str, ...] = tuple(
         for test in PARQUET_CONTRACT_RUNTIME_TEST_GROUPS[group]
     )
 )
-PARQUET_CONTRACT_RUNTIME_CERTIFICATE_VERSION = 1
+PARQUET_CONTRACT_RUNTIME_CERTIFICATE_VERSION = 2
 PARQUET_CONTRACT_RUNTIME_GUARANTEE_GROUPS: dict[str, tuple[str, ...]] = {
     "pipeline_safe_fallback_with_pyarrow": ("safe_pyarrow_fallback",),
     "schema_sanitizer_native_reader": ("schema_sanitizer_native_reader",),
@@ -74,47 +76,6 @@ PARQUET_CONTRACT_RUNTIME_GUARANTEE_GROUPS: dict[str, tuple[str, ...]] = {
         "nested_projection_contracts",
     ),
 }
-
-
-@dataclass(eq=False)
-class _NoSkipPlugin:
-    """Collect selected pytest outcomes and fail if any selected test skips."""
-
-    reports: list[dict[str, Any]] = field(default_factory=list)
-
-    def pytest_runtest_logreport(
-        self, report: Any
-    ) -> None:  # pragma: no cover - exercised by pytest
-        """Capture each selected test's call or skip report for certification."""
-        if report.when != "call" and not report.skipped:
-            return
-        entry: dict[str, Any] = {
-            "nodeid": report.nodeid,
-            "outcome": report.outcome,
-            "when": report.when,
-        }
-        if report.skipped:
-            longrepr = report.longrepr
-            if isinstance(longrepr, tuple) and len(longrepr) >= 3:
-                entry["reason"] = str(longrepr[2])
-            else:
-                entry["reason"] = str(longrepr)
-        self.reports.append(entry)
-
-    @property
-    def skipped(self) -> list[dict[str, Any]]:
-        """Return captured reports whose selected tests were skipped."""
-        return [report for report in self.reports if report.get("outcome") == "skipped"]
-
-    @property
-    def passed(self) -> list[dict[str, Any]]:
-        """Return captured reports whose selected tests passed."""
-        return [report for report in self.reports if report.get("outcome") == "passed"]
-
-    @property
-    def failed(self) -> list[dict[str, Any]]:
-        """Return captured reports whose selected tests failed."""
-        return [report for report in self.reports if report.get("outcome") == "failed"]
 
 
 def _nodeid_parts(nodeid: str) -> tuple[str, str | None]:
@@ -207,6 +168,177 @@ def _report_matches_selected_nodeid(report_nodeid: str, selected_nodeid: str) ->
     return report_nodeid == selected_nodeid or report_nodeid.startswith(f"{selected_nodeid}[")
 
 
+def _xml_local_name(tag: str) -> str:
+    """Return an XML tag name without its optional namespace."""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _junit_testcase_report(testcase: ElementTree.Element) -> dict[str, Any]:
+    """Convert one pytest JUnit testcase element to a normalized report."""
+    classname = str(testcase.get("classname") or "").strip()
+    test_name = str(testcase.get("name") or "").strip()
+    module_path = classname.replace("\\", "/").replace(".", "/").strip("/")
+    if module_path and not module_path.endswith(".py"):
+        module_path += ".py"
+    nodeid = f"{module_path}::{test_name}" if module_path and test_name else ""
+    result_elements = [
+        child for child in testcase if _xml_local_name(child.tag) in {"error", "failure", "skipped"}
+    ]
+    result_names = [_xml_local_name(child.tag) for child in result_elements]
+    if not result_names:
+        outcome = "passed"
+    elif result_names == ["skipped"]:
+        outcome = "skipped"
+    else:
+        outcome = "failed"
+    report: dict[str, Any] = {"nodeid": nodeid, "outcome": outcome}
+    if result_elements:
+        result = result_elements[0]
+        reason = str(result.get("message") or result.text or "").strip()
+        if reason:
+            report["reason"] = reason
+    if len(result_names) > 1:
+        report["malformed_results"] = result_names
+    return report
+
+
+def _junit_suite_count(
+    suite: ElementTree.Element,
+    attribute: str,
+    issues: list[str],
+) -> int | None:
+    """Return one required nonnegative JUnit suite counter."""
+    raw_count = suite.get(attribute)
+    if raw_count is None:
+        issues.append(f"JUnit testsuite is missing required {attribute} count")
+        return None
+    try:
+        count = int(raw_count)
+    except ValueError:
+        issues.append(f"JUnit testsuite has invalid {attribute} count: {raw_count!r}")
+        return None
+    if count < 0:
+        issues.append(f"JUnit testsuite has negative {attribute} count: {count}")
+        return None
+    return count
+
+
+def _load_junit_evidence(path: str | Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Load complete pytest JUnit evidence and fail closed on malformed results."""
+    source = Path(path)
+    issues: list[str] = []
+    reports: list[dict[str, Any]] = []
+    if not source.is_file():
+        issues.append(f"JUnit report does not exist: {source}")
+    else:
+        try:
+            root = ElementTree.parse(source).getroot()
+        except (ElementTree.ParseError, OSError) as exc:
+            issues.append(f"JUnit report is not valid XML: {exc}")
+        else:
+            root_name = _xml_local_name(root.tag)
+            if root_name not in {"testsuite", "testsuites"}:
+                issues.append(f"JUnit report has unsupported root element: {root.tag}")
+            suites = (
+                [root]
+                if root_name == "testsuite"
+                else [child for child in root if _xml_local_name(child.tag) == "testsuite"]
+            )
+            if not suites:
+                issues.append("JUnit report contains no testsuites")
+            processed_testcase_count = 0
+            for suite in suites:
+                nested_suites = [
+                    element
+                    for element in suite.iter()
+                    if element is not suite and _xml_local_name(element.tag) == "testsuite"
+                ]
+                if nested_suites:
+                    issues.append("JUnit report contains unsupported nested testsuites")
+                testcases = [child for child in suite if _xml_local_name(child.tag) == "testcase"]
+                processed_testcase_count += len(testcases)
+                reports.extend(_junit_testcase_report(testcase) for testcase in testcases)
+
+                declared = {
+                    attribute: _junit_suite_count(suite, attribute, issues)
+                    for attribute in ("tests", "failures", "errors", "skipped")
+                }
+                actual = {
+                    "tests": len(testcases),
+                    "failures": sum(
+                        _xml_local_name(child.tag) == "failure"
+                        for testcase in testcases
+                        for child in testcase
+                    ),
+                    "errors": sum(
+                        _xml_local_name(child.tag) == "error"
+                        for testcase in testcases
+                        for child in testcase
+                    ),
+                    "skipped": sum(
+                        _xml_local_name(child.tag) == "skipped"
+                        for testcase in testcases
+                        for child in testcase
+                    ),
+                }
+                for attribute, actual_count in actual.items():
+                    declared_count = declared[attribute]
+                    if declared_count is not None and declared_count != actual_count:
+                        issues.append(
+                            f"JUnit testsuite {attribute} count does not match its testcase "
+                            f"results: declared {declared_count}, found {actual_count}"
+                        )
+                for attribute in ("failures", "errors"):
+                    declared_count = declared[attribute]
+                    if declared_count:
+                        issues.append(f"JUnit testsuite declares {declared_count} {attribute}")
+
+            all_testcase_count = sum(
+                _xml_local_name(element.tag) == "testcase" for element in root.iter()
+            )
+            if processed_testcase_count != all_testcase_count:
+                issues.append("JUnit report contains nested or ungrouped testcases")
+            if not reports:
+                issues.append("JUnit report contains no testcases")
+            for report in reports:
+                if not report.get("nodeid"):
+                    issues.append("JUnit testcase is missing classname or name")
+                if report.get("malformed_results"):
+                    issues.append(
+                        "JUnit testcase has multiple terminal results: "
+                        f"{report.get('nodeid') or '<unknown>'}"
+                    )
+
+    failed_count = sum(report.get("outcome") == "failed" for report in reports)
+    skipped_count = sum(report.get("outcome") == "skipped" for report in reports)
+    evidence: dict[str, Any] = {
+        "satisfied": not issues and failed_count == 0,
+        "issues": list(dict.fromkeys(issues)),
+        "format": "pytest-junit-xml",
+        "testcase_count": len(reports),
+        "passed_count": sum(report.get("outcome") == "passed" for report in reports),
+        "skipped_count": skipped_count,
+        "failed_count": failed_count,
+    }
+    if failed_count:
+        evidence["issues"].append(f"JUnit report contains {failed_count} failed testcases")
+    return evidence, reports
+
+
+def _selected_junit_reports(
+    *, reports: list[dict[str, Any]], selected_tests: list[str]
+) -> list[dict[str, Any]]:
+    """Return only JUnit reports belonging to the selected contract tests."""
+    return [
+        report
+        for report in reports
+        if any(
+            _report_matches_selected_nodeid(str(report.get("nodeid") or ""), selected)
+            for selected in selected_tests
+        )
+    ]
+
+
 def _runtime_suite_group_execution_summary(
     *,
     selected_tests_by_group: dict[str, list[str]],
@@ -220,9 +352,6 @@ def _runtime_suite_group_execution_summary(
     misleading green result where the total pass count looks plausible but one
     contract family did not produce a passing report.
     """
-    passed_reports = [report for report in reports if report.get("outcome") == "passed"]
-    skipped_reports = [report for report in reports if report.get("outcome") == "skipped"]
-    failed_reports = [report for report in reports if report.get("outcome") == "failed"]
     issues: list[str] = []
     passed_by_group: dict[str, list[str]] = {}
     missing_passes_by_group: dict[str, list[str]] = {}
@@ -243,12 +372,26 @@ def _runtime_suite_group_execution_summary(
         group_skipped: list[dict[str, Any]] = []
         group_failed: list[dict[str, Any]] = []
         for selected in selected_tests:
-            if reports_for(selected, passed_reports):
+            selected_reports = reports_for(selected, reports)
+            passed_reports = [
+                report for report in selected_reports if report.get("outcome") == "passed"
+            ]
+            skipped_reports = [
+                report for report in selected_reports if report.get("outcome") == "skipped"
+            ]
+            failed_reports = [
+                report for report in selected_reports if report.get("outcome") == "failed"
+            ]
+            if len(selected_reports) == 1 and len(passed_reports) == 1:
                 group_passed.append(selected)
             else:
                 group_missing.append(selected)
-            group_skipped.extend(reports_for(selected, skipped_reports))
-            group_failed.extend(reports_for(selected, failed_reports))
+            if len(selected_reports) > 1:
+                issues.append(
+                    f"runtime contract selected test appeared more than once in JUnit: {selected}"
+                )
+            group_skipped.extend(skipped_reports)
+            group_failed.extend(failed_reports)
         passed_by_group[group] = group_passed
         missing_passes_by_group[group] = group_missing
         skipped_by_group[group] = group_skipped
@@ -272,10 +415,10 @@ def _runtime_suite_group_execution_summary(
     }
 
 
-def _parse_runtime_suite_args(argv: list[str]) -> tuple[str | None, list[str]]:
-    """Split suite-owned options from extra pytest arguments."""
+def _parse_runtime_suite_args(argv: list[str]) -> tuple[str | None, str | None]:
+    """Parse the certificate and full-suite JUnit evidence paths."""
     certificate_output: str | None = None
-    pytest_args: list[str] = []
+    junit_xml: str | None = None
     index = 0
     while index < len(argv):
         arg = argv[index]
@@ -288,10 +431,19 @@ def _parse_runtime_suite_args(argv: list[str]) -> tuple[str | None, list[str]]:
             certificate_output = arg.split("=", 1)[1]
             if not certificate_output:
                 raise ValueError("--certificate-output requires a path")
+        elif arg == "--junit-xml":
+            index += 1
+            if index >= len(argv):
+                raise ValueError("--junit-xml requires a path")
+            junit_xml = argv[index]
+        elif arg.startswith("--junit-xml="):
+            junit_xml = arg.split("=", 1)[1]
+            if not junit_xml:
+                raise ValueError("--junit-xml requires a path")
         else:
-            pytest_args.append(arg)
+            raise ValueError(f"unknown argument: {arg}")
         index += 1
-    return certificate_output, pytest_args
+    return certificate_output, junit_xml
 
 
 def _selected_groups_satisfied(
@@ -318,20 +470,21 @@ def _runtime_suite_contract_certificate(
     *,
     selection: dict[str, Any] | None,
     readiness: dict[str, Any] | None = None,
+    junit_evidence: dict[str, Any] | None = None,
     group_execution: dict[str, Any] | None = None,
     reports: list[dict[str, Any]] | None = None,
-    pytest_exit_code: int | None = None,
 ) -> dict[str, Any]:
     """Build a durable JSON certificate for the runtime Parquet contracts.
 
     The CLI prints human-readable progress, but release/CI systems need one
     stable artifact they can archive and inspect later. The certificate is
     intentionally fail-closed: any missing stage, readiness failure, pytest
-    failure, selected skip, or missing group pass makes the overall result
+    failure, selected skip, duplicate/missing result, or missing group pass makes the result
     unsatisfied even if an earlier stage succeeded.
     """
     selection = selection or {}
     readiness = readiness or {}
+    junit_evidence = junit_evidence or {}
     group_execution = group_execution or {}
     reports = list(reports or [])
     skipped = [report for report in reports if report.get("outcome") == "skipped"]
@@ -343,10 +496,10 @@ def _runtime_suite_contract_certificate(
         issues.append(f"selection: {issue}")
     for issue in list(readiness.get("issues") or []):
         issues.append(f"readiness: {issue}")
+    for issue in list(junit_evidence.get("issues") or []):
+        issues.append(f"junit: {issue}")
     for issue in list(group_execution.get("issues") or []):
         issues.append(f"execution: {issue}")
-    if pytest_exit_code not in (None, 0):
-        issues.append(f"pytest exited with status {pytest_exit_code}")
     for report in skipped:
         issues.append(f"selected test skipped: {report.get('nodeid')}")
     for report in failed:
@@ -378,10 +531,10 @@ def _runtime_suite_contract_certificate(
     satisfied = bool(
         selection.get("satisfied") is True
         and readiness.get("satisfied") is True
+        and junit_evidence.get("satisfied") is True
         and group_execution.get("satisfied") is True
         and all_selected_passed
         and all_guarantees_satisfied
-        and pytest_exit_code == 0
     )
 
     return {
@@ -393,7 +546,7 @@ def _runtime_suite_contract_certificate(
         "selection": selection,
         "readiness": readiness,
         "execution": {
-            "pytest_exit_code": pytest_exit_code,
+            "evidence": junit_evidence,
             "selected_test_count": selected_test_count,
             "passed_count": len(passed),
             "skipped_count": len(skipped),
@@ -411,9 +564,9 @@ def _write_runtime_suite_certificate(path: str | Path, certificate: dict[str, An
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the selected runtime contract suite and fail closed on skips."""
+    """Certify selected runtime contracts from a complete pytest JUnit report."""
     try:
-        certificate_output, pytest_args = _parse_runtime_suite_args(list(argv or []))
+        certificate_output, junit_xml = _parse_runtime_suite_args(list(argv or []))
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
@@ -430,9 +583,9 @@ def main(argv: list[str] | None = None) -> int:
         certificate = _runtime_suite_contract_certificate(
             selection=selection,
             readiness=None,
+            junit_evidence=None,
             group_execution=None,
             reports=[],
-            pytest_exit_code=None,
         )
         emit_certificate(certificate)
         print("Parquet contract runtime suite selection is invalid:", file=sys.stderr)
@@ -449,9 +602,9 @@ def main(argv: list[str] | None = None) -> int:
         certificate = _runtime_suite_contract_certificate(
             selection=selection,
             readiness=readiness,
+            junit_evidence=None,
             group_execution=None,
             reports=[],
-            pytest_exit_code=None,
         )
         emit_certificate(certificate)
         print("Parquet contract runtime suite cannot run:", file=sys.stderr)
@@ -459,52 +612,67 @@ def main(argv: list[str] | None = None) -> int:
             print(f"- {issue}", file=sys.stderr)
         return 1
 
-    try:
-        import pytest
-    except Exception as exc:  # pragma: no cover - CI dependency guard
+    if not junit_xml:
+        junit_evidence: dict[str, Any] = {
+            "satisfied": False,
+            "issues": ["--junit-xml is required after readiness passes"],
+            "format": "pytest-junit-xml",
+            "testcase_count": 0,
+            "passed_count": 0,
+            "skipped_count": 0,
+            "failed_count": 0,
+        }
         certificate = _runtime_suite_contract_certificate(
             selection=selection,
             readiness=readiness,
+            junit_evidence=junit_evidence,
             group_execution=None,
             reports=[],
-            pytest_exit_code=None,
         )
         emit_certificate(certificate)
-        print(f"pytest is required for the Parquet contract runtime suite: {exc}", file=sys.stderr)
-        return 1
+        print("--junit-xml is required for runtime contract certification", file=sys.stderr)
+        return 2
 
-    plugin = _NoSkipPlugin()
-    selected_tests = tuple(selection["selected_tests"])
-    args = ["-q", "--tb=short", *selected_tests, *pytest_args]
-    exit_code = int(pytest.main(args, plugins=[plugin]))
+    junit_evidence, all_reports = _load_junit_evidence(junit_xml)
+    selected_tests = list(selection["selected_tests"])
+    selected_reports = _selected_junit_reports(
+        reports=all_reports,
+        selected_tests=selected_tests,
+    )
     group_execution = _runtime_suite_group_execution_summary(
         selected_tests_by_group=selection["selected_tests_by_group"],
-        reports=plugin.reports,
+        reports=selected_reports,
     )
+    passed = [report for report in selected_reports if report.get("outcome") == "passed"]
+    failed = [report for report in selected_reports if report.get("outcome") == "failed"]
+    skipped = [report for report in selected_reports if report.get("outcome") == "skipped"]
     summary = {
         "selected_tests": len(selected_tests),
         "selected_tests_by_group": selection["selected_tests_by_group"],
-        "passed": len(plugin.passed),
-        "failed": plugin.failed,
-        "skipped": plugin.skipped,
+        "passed": len(passed),
+        "failed": failed,
+        "skipped": skipped,
         "group_execution": group_execution,
     }
     print(json.dumps({"runtime_contract_suite": summary}, indent=2, sort_keys=True))
     certificate = _runtime_suite_contract_certificate(
         selection=selection,
         readiness=readiness,
+        junit_evidence=junit_evidence,
         group_execution=group_execution,
-        reports=plugin.reports,
-        pytest_exit_code=exit_code,
+        reports=selected_reports,
     )
     emit_certificate(certificate)
-    if plugin.skipped:
+    if skipped:
         print("Parquet contract runtime suite selected tests were skipped:", file=sys.stderr)
-        for report in plugin.skipped:
+        for report in skipped:
             print(f"- {report['nodeid']}: {report.get('reason', 'skipped')}", file=sys.stderr)
         return 1
-    if exit_code != 0:
-        return exit_code
+    if junit_evidence.get("satisfied") is not True:
+        print("Parquet contract runtime JUnit evidence is invalid:", file=sys.stderr)
+        for issue in list(junit_evidence.get("issues") or ["unknown JUnit failure"]):
+            print(f"- {issue}", file=sys.stderr)
+        return 1
     if group_execution.get("satisfied") is not True:
         print(
             "Parquet contract runtime suite did not satisfy every contract group:", file=sys.stderr
@@ -512,10 +680,10 @@ def main(argv: list[str] | None = None) -> int:
         for issue in list(group_execution.get("issues") or ["unknown group execution failure"]):
             print(f"- {issue}", file=sys.stderr)
         return 1
-    if len(plugin.passed) != len(selected_tests):
+    if len(passed) != len(selected_tests):
         print(
             "Parquet contract runtime suite did not execute every selected test; "
-            f"passed {len(plugin.passed)} of {len(selected_tests)}",
+            f"passed {len(passed)} of {len(selected_tests)}",
             file=sys.stderr,
         )
         return 1

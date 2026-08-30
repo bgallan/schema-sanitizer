@@ -28,9 +28,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python -m pip install pip==26.2.1 ninja==1.13.0 cmake==4.3.4 \
-          scikit-build-core==0.11.6
-        python -m pip install --no-deps -r meta/ci/requirements/platform-tests.txt
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m pip install --only-binary=:all: \
+          ninja==1.13.0 cmake==4.3.4 scikit-build-core==0.11.6
+        python -m pip install --no-deps --only-binary=:all: \
+          -r meta/ci/requirements/platform-tests.txt
         python -m pip check
     - name: Build and install instrumented package
       env:

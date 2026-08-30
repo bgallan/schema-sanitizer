@@ -52,7 +52,6 @@ runs:
         python-version: 3.11.9
         cache: pip
         cache-dependency-path: |-
-          meta/ci/requirements/build-tools.txt
           meta/ci/requirements/platform-tests.txt
     - name: Reset generated platform-test paths
       shell: bash
@@ -82,14 +81,14 @@ runs:
         path: wheelhouse
     - name: Install the wheel and functional-suite dependencies
       env:
-        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/platform-tests.txt
       shell: bash
       run: |-
         set -euo pipefail
-        python -m pip install pip==26.2.1
+        python meta/ci/quality/ensure_pinned_pip.py
         python -m pip install \
           --no-deps \
+          --only-binary=:all: \
           --retries 10 \
           --timeout 60 \
           -r meta/ci/requirements/platform-tests.txt \
@@ -128,18 +127,6 @@ runs:
             )
         print(f"concurrency shard CPU capacity: detected={detected}, required={minimum}")
         PY
-    - name: Compile and certify the Parquet runtime
-      if: inputs.shard == 'memory-parquet'
-      env:
-        PLATFORM_ARTIFACT: ${{ inputs.artifact }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        python -m compileall -q src
-        python meta/ci/parquet/check_parquet_contract_runtime.py
-        mkdir -p artifacts
-        python meta/ci/parquet/check_parquet_contract_runtime_suite.py \
-          --certificate-output "artifacts/parquet-contract-runtime-certificate-${PLATFORM_ARTIFACT}.json"
     - name: Record runner CPU environment
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
@@ -149,7 +136,7 @@ runs:
         python meta/ci/quality/record_runner_environment.py
         "artifacts/runner-cpu-${PLATFORM_ARTIFACT}-${TEST_SHARD}.json"
     - name: Record a cross-platform reader scaling measurement
-      if: inputs.shard == 'io-pipeline'
+      if: inputs.shard == 'memory-parquet'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
       shell: bash
@@ -250,3 +237,13 @@ runs:
           --junitxml="artifacts/pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml" \
           "${test_paths[@]}" \
           2>&1 | tee "artifacts/pytest-durations-${PLATFORM_ARTIFACT}-${TEST_SHARD}.log"
+    - name: Certify the Parquet runtime from functional evidence
+      if: inputs.shard == 'memory-parquet'
+      env:
+        PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        python meta/ci/parquet/check_parquet_contract_runtime_suite.py \
+          --junit-xml "artifacts/pytest-${PLATFORM_ARTIFACT}-memory-parquet.xml" \
+          --certificate-output "artifacts/parquet-contract-runtime-certificate-${PLATFORM_ARTIFACT}.json"

@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Callable, Hashable
+from concurrent.futures import Future
 from contextlib import asynccontextmanager
 from time import monotonic, sleep
 from types import SimpleNamespace
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 from schema_sanitizer.api_impl.source_plan.remote import RemoteChunkPrefetchIterator
 from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
@@ -82,6 +84,333 @@ def test_remote_io_coordinator_does_not_lock_on_already_completed_submission(
         assert future.result() == 7
     finally:
         coordinator.close()
+
+
+def test_close_waits_for_governed_terminal_dispatch_without_stealing_work(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A withheld worker times out safely, then its retained callback can retire."""
+    from schema_sanitizer.core_impl.runtime_registry import runtime_service_snapshot
+    from schema_sanitizer.core_impl.terminal_ownership import terminal_ownership_snapshot
+    from schema_sanitizer.remote_impl import io_coordinator as module
+
+    runtime_before = dict(runtime_service_snapshot().service_kinds)
+    terminal_before = dict(terminal_ownership_snapshot().categories)
+    dispatches: list[tuple[Callable[[int], None], int]] = []
+    callback_calls: list[int] = []
+
+    def withhold_dispatch(
+        callback: Callable[[int], None],
+        token: int,
+        *,
+        retained_bytes: int,
+        subsystem: object,
+    ) -> bool:
+        """Claim background publication without executing the queued callback."""
+        assert retained_bytes == 512
+        assert subsystem is module.CleanupSubsystem.REMOTE
+        dispatches.append((callback, token))
+        return True
+
+    monkeypatch.setattr(module, "dispatch_cleanup", withhold_dispatch)
+    coordinator = RemoteIoCoordinator(shutdown_timeout_seconds=0.2)
+
+    async def operation(_context: object) -> int:
+        """Complete one submission before its terminal callback is withheld."""
+        return 1
+
+    future = coordinator.submit(operation)
+    owner = getattr(future, "_schema_sanitizer_remote_submission")
+
+    def terminal_cleanup(_future: Future[object]) -> None:
+        """Record deterministic terminal cleanup on the stand-in worker thread."""
+        callback_calls.append(threading.get_ident())
+
+    owner.add_terminal_callback(terminal_cleanup)
+    assert future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) == 1
+    with pytest.raises(RuntimeError, match="terminal callbacks exceeded their deadline"):
+        coordinator.close()
+
+    assert len(dispatches) == 1
+    assert dispatches[0][1] == id(coordinator)
+    assert not callback_calls
+    assert coordinator._deferred_terminal_callbacks
+    assert coordinator._terminal_callback_owners
+    assert coordinator._thread.is_alive()
+    assert id(coordinator) in module._TERMINAL_RETRY_COORDINATORS
+
+    worker = threading.Thread(
+        target=dispatches[0][0],
+        args=(dispatches[0][1],),
+        name="test-governed-terminal-dispatch",
+    )
+    worker.start()
+    join_thread_or_fail(worker)
+    assert callback_calls == [worker.ident]
+    assert callback_calls != [threading.get_ident()]
+
+    coordinator.close()
+    assert not coordinator._deferred_terminal_callbacks
+    assert not coordinator._failed_terminal_callbacks
+    assert not coordinator._terminal_callback_owners
+    assert not coordinator._thread.is_alive()
+    assert id(coordinator) not in module._TERMINAL_RETRY_COORDINATORS
+    runtime_after = dict(runtime_service_snapshot().service_kinds)
+    terminal_after = dict(terminal_ownership_snapshot().categories)
+    assert runtime_after.get("remote_io_coordinator", 0) <= runtime_before.get(
+        "remote_io_coordinator", 0
+    )
+    assert terminal_after.get("remote_terminal_retry", 0) <= terminal_before.get(
+        "remote_terminal_retry", 0
+    )
+
+
+def test_close_deadline_does_not_wait_inside_a_blocked_terminal_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocked governed callback retains ownership without blocking close itself."""
+    from schema_sanitizer.remote_impl import io_coordinator as module
+
+    callback_started = threading.Event()
+    callback_release = threading.Event()
+    callback_finished = threading.Event()
+    workers: list[threading.Thread] = []
+
+    def dispatch_in_worker(
+        callback: Callable[[int], None],
+        token: int,
+        *,
+        retained_bytes: int,
+        subsystem: object,
+    ) -> bool:
+        """Execute one cleanup-dispatch token on a controlled background worker."""
+        assert retained_bytes == 512
+        assert subsystem is module.CleanupSubsystem.REMOTE
+        worker = threading.Thread(
+            target=callback,
+            args=(token,),
+            name="test-blocked-terminal-dispatch",
+            daemon=True,
+        )
+        workers.append(worker)
+        worker.start()
+        return True
+
+    monkeypatch.setattr(module, "dispatch_cleanup", dispatch_in_worker)
+    coordinator = RemoteIoCoordinator(shutdown_timeout_seconds=0.05)
+
+    async def operation(_context: object) -> int:
+        """Complete one submission before its retained terminal callback blocks."""
+        return 1
+
+    future = coordinator.submit(operation)
+    owner = getattr(future, "_schema_sanitizer_remote_submission")
+
+    def blocked_cleanup(_future: Future[object]) -> None:
+        """Remain blocked until the close deadline has been observed externally."""
+        callback_started.set()
+        if not callback_release.wait(timeout=SCHEDULER_TIMEOUT_SECONDS):
+            raise RuntimeError("test did not release the blocked terminal callback")
+        callback_finished.set()
+
+    try:
+        owner.add_terminal_callback(blocked_cleanup)
+        assert future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) == 1
+        assert callback_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+
+        with pytest.raises(RuntimeError, match="terminal callbacks exceeded their deadline"):
+            coordinator.close()
+
+        assert not callback_finished.is_set()
+        assert coordinator._thread.is_alive()
+        assert coordinator._terminal_callback_owners
+    finally:
+        callback_release.set()
+        for worker in workers:
+            join_thread_or_fail(worker)
+
+    assert callback_finished.is_set()
+    coordinator.close()
+    assert not coordinator._terminal_callback_owners
+    assert not coordinator._thread.is_alive()
+
+
+def test_terminal_drain_failure_is_not_hidden_by_an_operation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A primary task failure carries exactly one note for terminal cleanup timeout."""
+    from schema_sanitizer.remote_impl import io_coordinator as module
+
+    operation_started = threading.Event()
+    owner_holder: dict[str, object] = {}
+    dispatches: list[tuple[Callable[[int], None], int]] = []
+
+    def withhold_dispatch(
+        callback: Callable[[int], None],
+        token: int,
+        *,
+        retained_bytes: int,
+        subsystem: object,
+    ) -> bool:
+        """Retain terminal work until the test has inspected the primary error."""
+        assert retained_bytes == 512
+        assert subsystem is module.CleanupSubsystem.REMOTE
+        dispatches.append((callback, token))
+        return True
+
+    monkeypatch.setattr(module, "dispatch_cleanup", withhold_dispatch)
+    coordinator = RemoteIoCoordinator(shutdown_timeout_seconds=0.2)
+
+    async def operation(_context: object) -> None:
+        """Translate close cancellation into the primary operation failure."""
+        operation_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            owner = owner_holder["owner"]
+            setattr(owner, "operation_error", ValueError("expected active operation failure"))
+
+    future = coordinator.submit(operation)
+    owner = getattr(future, "_schema_sanitizer_remote_submission")
+    owner_holder["owner"] = owner
+    owner.add_terminal_callback(lambda _future: None)
+    assert operation_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+
+    with pytest.raises(ValueError, match="expected active operation failure") as caught:
+        coordinator.close()
+
+    cleanup_notes = [
+        note
+        for note in getattr(caught.value, "__notes__", ())
+        if "terminal callback cleanup also failed" in note
+    ]
+    assert len(cleanup_notes) == 1
+    assert len(dispatches) == 1
+
+    worker = threading.Thread(
+        target=dispatches[0][0],
+        args=(dispatches[0][1],),
+        name="test-terminal-note-dispatch",
+    )
+    worker.start()
+    join_thread_or_fail(worker)
+    coordinator.close()
+    assert future.cancelled()
+
+
+def test_terminal_publication_racing_host_retirement_keeps_its_registry_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Host retirement cannot discard a callback root published at quiescence."""
+    from schema_sanitizer.remote_impl import io_coordinator as module
+
+    dispatches: list[tuple[Callable[[int], None], int]] = []
+    callback_calls: list[int] = []
+    publication_attempted = threading.Event()
+    publishers: list[threading.Thread] = []
+
+    def withhold_dispatch(
+        callback: Callable[[int], None],
+        token: int,
+        *,
+        retained_bytes: int,
+        subsystem: object,
+    ) -> bool:
+        """Accept late terminal work without running it before close returns."""
+        assert retained_bytes == 512
+        assert subsystem is module.CleanupSubsystem.REMOTE
+        dispatches.append((callback, token))
+        return True
+
+    monkeypatch.setattr(module, "dispatch_cleanup", withhold_dispatch)
+    coordinator = RemoteIoCoordinator(shutdown_timeout_seconds=0.1)
+
+    async def operation(_context: object) -> int:
+        """Complete before provider cleanup publishes its late callback."""
+        return 1
+
+    future = coordinator.submit(operation)
+    owner = getattr(future, "_schema_sanitizer_remote_submission")
+    assert future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) == 1
+
+    real_cancel_retry = module.cancel_retry
+    publication_started = False
+
+    def cancel_retry_with_racing_publication(key: Hashable) -> None:
+        """Publish once while host retirement is deciding terminal quiescence."""
+        nonlocal publication_started
+        if key == ("remote-terminal-callback", id(coordinator)) and not publication_started:
+            publication_started = True
+
+            def publish() -> None:
+                """Attempt terminal publication under the coordinator condition lock."""
+                publication_attempted.set()
+
+                def terminal_cleanup(_future: Future[object]) -> None:
+                    """Record execution of the retirement-racing callback."""
+                    callback_calls.append(threading.get_ident())
+
+                owner.add_terminal_callback(terminal_cleanup)
+
+            publisher = threading.Thread(
+                target=publish,
+                name="test-terminal-retirement-publication",
+            )
+            publishers.append(publisher)
+            publisher.start()
+            assert publication_attempted.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+        real_cancel_retry(key)
+
+    monkeypatch.setattr(module, "cancel_retry", cancel_retry_with_racing_publication)
+
+    with pytest.raises(RuntimeError, match="terminal callbacks exceeded their deadline"):
+        coordinator.close()
+
+    assert len(publishers) == 1
+    join_thread_or_fail(publishers[0])
+    assert len(dispatches) == 1
+    assert coordinator._deferred_terminal_callbacks
+    assert coordinator._terminal_callback_owners
+    assert id(coordinator) in module._TERMINAL_RETRY_COORDINATORS
+    assert not coordinator._thread.is_alive()
+
+    retry_drain_started = threading.Event()
+    retry_errors: list[BaseException] = []
+    real_drain = coordinator._drain_terminal_callback_work
+
+    def observed_retry_drain(deadline: float) -> None:
+        """Expose when the retry close is waiting on the retained callback."""
+        retry_drain_started.set()
+        real_drain(deadline)
+
+    monkeypatch.setattr(coordinator, "_drain_terminal_callback_work", observed_retry_drain)
+
+    def retry_close() -> None:
+        """Run the close generation that consumes the late callback completion."""
+        try:
+            coordinator.close()
+        except BaseException as exc:
+            retry_errors.append(exc)
+
+    closer = threading.Thread(target=retry_close, name="test-late-terminal-retry-close")
+    closer.start()
+    assert retry_drain_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+
+    worker = threading.Thread(
+        target=dispatches[0][0],
+        args=(dispatches[0][1],),
+        name="test-late-terminal-dispatch",
+    )
+    worker.start()
+    join_thread_or_fail(worker)
+    join_thread_or_fail(closer)
+
+    assert not retry_errors
+    assert callback_calls == [worker.ident]
+    assert not coordinator._deferred_terminal_callbacks
+    assert not coordinator._failed_terminal_callbacks
+    assert not coordinator._terminal_callback_owners
+    assert id(coordinator) not in module._TERMINAL_RETRY_COORDINATORS
 
 
 def test_remote_io_coordinator_close_has_a_bounded_provider_deadline() -> None:

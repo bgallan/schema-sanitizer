@@ -48,9 +48,11 @@ runs:
         PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
-      run: >-
-        python -m pip install pip==26.2.1
-        abi3audit==0.0.26 cibuildwheel==4.2.0 pytest==9.1.1
+      run: |-
+        set -euo pipefail
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m pip install --only-binary=:all: \
+          abi3audit==0.0.26 cibuildwheel==4.2.0 pytest==9.1.1
     - name: Assert the build environment has no PyArrow
       shell: bash
       run: >-
@@ -86,138 +88,21 @@ runs:
         key: >-
           nuget-cpython-v1-${{ runner.os }}-${{ runner.arch
           }}-python-3.11.9-cibuildwheel-4.2.0-9283876d58c017e0e846f95b490da3bca0fc0a6ee1134b2870677cfb7eec3c67
-    - name: Preseed the pinned Windows NuGet client
+    - name: Install the verified Windows CPython package
       if: runner.os == 'Windows'
       shell: bash
       env:
-        NUGET_SHA256: 992d70cac5b06c38efec91806caba64cdcc07e6d963a0959dbbbaf264d33b800  # pragma: allowlist secret
         PYTHON_NUPKG_SHA256: 9283876d58c017e0e846f95b490da3bca0fc0a6ee1134b2870677cfb7eec3c67  # pragma: allowlist secret
-      run: |
+      run: |-
         set -euo pipefail
-        python - "${NUGET_SHA256}" "${PYTHON_NUPKG_SHA256}" <<'PY'
-        import hashlib
-        import os
-        import shutil
-        import ssl
-        import struct
-        import subprocess
-        import sys
-        import tempfile
-        import time
-        import urllib.request
-        from pathlib import Path
-        import certifi
-        from cibuildwheel.util.file import CIBW_CACHE_PATH
-        nuget_url = 'https://dist.nuget.org/win-x86-commandline/v7.9.0/nuget.exe'
-        python_url = (
-            'https://api.nuget.org/v3-flatcontainer/python/3.11.9/'
-            'python.3.11.9.nupkg'
+        windows_python=$(
+          python meta/ci/native/install_windows_cpython.py "${PYTHON_NUPKG_SHA256}"
         )
-        nuget_expected = sys.argv[1]
-        python_expected = sys.argv[2]
-        CIBW_CACHE_PATH.mkdir(parents=True, exist_ok=True)
-        workspace = Path.cwd().resolve()
-        cache_root = workspace / '.work' / 'cache' / 'nuget'
-        if cache_root.is_symlink() or not cache_root.is_dir():
-            raise SystemExit(f'CPython package-cache root is unsafe: {cache_root}')
-        if cache_root.resolve() != workspace / '.work' / 'cache' / 'nuget':
-            raise SystemExit(f'CPython package-cache root escaped the workspace: {cache_root}')
-        nuget = CIBW_CACHE_PATH / 'nuget.exe'
-        nupkg = cache_root / 'python.3.11.9.nupkg'
-        if nupkg.exists() and nupkg.is_dir() and not nupkg.is_symlink():
-            shutil.rmtree(nupkg)
-        def verified_payload(path, expected):
-            """Return whether a regular file has the exact trusted digest."""
-            if path.is_symlink() or not path.is_file():
-                return False
-            return hashlib.sha256(path.read_bytes()).hexdigest() == expected
-        def download_verified(url, target, expected, description):
-            """Download and atomically install one digest-verified payload."""
-            context = ssl.create_default_context(cafile=certifi.where())
-            payload = None
-            for attempt in range(5):
-                try:
-                    with urllib.request.urlopen(url, context=context, timeout=60) as response:
-                        payload = response.read()
-                    break
-                except OSError:
-                    if attempt == 4:
-                        raise
-                    time.sleep(2 ** attempt)
-            if payload is None:
-                raise SystemExit(f'{description} download returned no payload')
-            actual = hashlib.sha256(payload).hexdigest()
-            if actual != expected:
-                raise SystemExit(
-                    f'{description} SHA-256 mismatch: expected {expected}, got {actual}'
-                )
-            with tempfile.NamedTemporaryFile(dir=target.parent, delete=False) as stream:
-                stream.write(payload)
-                temporary = Path(stream.name)
-            try:
-                os.replace(temporary, target)
-            finally:
-                temporary.unlink(missing_ok=True)
-        if not verified_payload(nuget, nuget_expected):
-            download_verified(nuget_url, nuget, nuget_expected, 'NuGet client')
-        if not verified_payload(nupkg, python_expected):
-            download_verified(python_url, nupkg, python_expected, 'CPython NuGet package')
-        if not verified_payload(nuget, nuget_expected):
-            raise SystemExit(f'pinned NuGet client was not installed safely: {nuget}')
-        if not verified_payload(nupkg, python_expected):
-            raise SystemExit(f'pinned CPython package was not installed safely: {nupkg}')
-        package_root = CIBW_CACHE_PATH / 'nuget-cpython' / 'python.3.11.9'
-        if package_root.is_symlink():
-            package_root.unlink()
-        elif package_root.exists():
-            shutil.rmtree(package_root)
-        package_root.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(
-            [
-                str(nuget),
-                'install',
-                'python',
-                '-Version',
-                '3.11.9',
-                '-Source',
-                str(cache_root.resolve()),
-                '-OutputDirectory',
-                str(package_root.parent),
-                '-NoCache',
-                '-DirectDownload',
-                '-NonInteractive',
-            ],
-            check=True,
-        )
-        executable = package_root / 'tools' / 'python.exe'
-        if executable.is_symlink() or not executable.is_file():
-            raise SystemExit(f'pinned CPython executable is missing or unsafe: {executable}')
-        for candidate in package_root.rglob('*'):
-            if candidate.is_symlink():
-                raise SystemExit(f'pinned CPython package contains a link: {candidate}')
-        with executable.open('rb') as stream:
-            if stream.read(2) != b'MZ':
-                raise SystemExit('pinned CPython executable is not a PE image')
-            stream.seek(0x3C)
-            pe_offset = struct.unpack('<I', stream.read(4))[0]
-            stream.seek(pe_offset)
-            if stream.read(4) != b'PE\0\0' or struct.unpack('<H', stream.read(2))[0] != 0x8664:
-                raise SystemExit('pinned CPython executable is not AMD64')
-        subprocess.run(
-            [
-                str(executable),
-                '-I',
-                '-c',
-                (
-                    "import platform,struct,sys; "
-                    "assert sys.version_info[:3] == (3, 11, 9); "
-                    "assert struct.calcsize('P') == 8; "
-                    "assert platform.machine().upper() == 'AMD64'"
-                ),
-            ],
-            check=True,
-        )
-        PY
+        "${windows_python}" -I -c \
+          "import platform,struct,sys; \
+          assert sys.version_info[:3] == (3, 11, 9); \
+          assert struct.calcsize('P') == 8; \
+          assert platform.machine().upper() == 'AMD64'"
     - name: Prevent Arrow C++ headers
       if: runner.os == 'Linux'
       shell: bash
@@ -350,7 +235,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python -m pip install wheelhouse/*.whl
+        python -m pip install --only-binary=:all: wheelhouse/*.whl
         python - <<'PY'
         from pathlib import Path
         import schema_sanitizer as package
@@ -386,8 +271,8 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python -m pip install pip==26.2.1
-        python -m pip install pyarrow==25.0.1 wheelhouse/*.whl
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m pip install --only-binary=:all: pyarrow==25.0.1 wheelhouse/*.whl
         python -I meta/ci/release/downstream_smoke.py
     - name: Set up CPython 3.13 for stable-ABI functional coverage
       if: inputs.artifact == 'linux'
@@ -401,8 +286,8 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python -m pip install pip==26.2.1
-        python -m pip install pyarrow==25.0.1 wheelhouse/*.whl
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m pip install --only-binary=:all: pyarrow==25.0.1 wheelhouse/*.whl
         python -I meta/ci/release/downstream_smoke.py
     - name: Set up the newest supported Python
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -414,8 +299,8 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python -m pip install pip==26.2.1
-        python -m pip install wheelhouse/*.whl
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m pip install --only-binary=:all: wheelhouse/*.whl
         python -c "import sys, schema_sanitizer as s, schema_sanitizer._core_abi3 as c; print(sys.version.split()[0], s.__version__, c.__file__)"
     - name: Exercise the ABI3 wheel on CPython 3.14
       if: inputs.artifact == 'linux'
@@ -424,7 +309,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python -m pip install pyarrow==25.0.1
+        python -m pip install --only-binary=:all: pyarrow==25.0.1
         python -I meta/ci/release/downstream_smoke.py
     - name: Upload the certified platform wheel
       id: upload-certified-platform-wheel

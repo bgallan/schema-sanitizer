@@ -14,7 +14,8 @@ runs:
         set -euo pipefail
         rm -rf -- .work/virtualenv-seed
         mkdir -p .work/virtualenv-seed
-        python -m pip install pip==26.2.1 build==1.5.0 twine==7.0.0 \
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m pip install --only-binary=:all: build==1.5.0 twine==7.0.0 \
           packaging==26.3 virtualenv==21.7.1
         python -m pip check
         python -m pip download --no-deps --only-binary=:all: \

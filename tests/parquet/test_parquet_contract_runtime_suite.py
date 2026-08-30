@@ -8,9 +8,42 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace
+from xml.etree import ElementTree
 
 import pytest
+
+
+def _write_junit_report(
+    path: Path,
+    nodeids: list[str],
+    *,
+    outcomes: dict[str, str] | None = None,
+) -> None:
+    """Write a compact pytest-compatible JUnit report for the supplied node IDs."""
+    outcomes = outcomes or {}
+    root = ElementTree.Element("testsuites")
+    selected_outcomes = [outcomes.get(nodeid, "passed") for nodeid in nodeids]
+    suite = ElementTree.SubElement(
+        root,
+        "testsuite",
+        tests=str(len(nodeids)),
+        failures=str(selected_outcomes.count("failure")),
+        errors=str(selected_outcomes.count("error")),
+        skipped=str(selected_outcomes.count("skipped")),
+    )
+    for nodeid in nodeids:
+        relative_path, test_name = nodeid.split("::", 1)
+        classname = relative_path.removesuffix(".py").replace("/", ".")
+        testcase = ElementTree.SubElement(
+            suite,
+            "testcase",
+            classname=classname,
+            name=test_name,
+        )
+        outcome = outcomes.get(nodeid, "passed")
+        if outcome != "passed":
+            ElementTree.SubElement(testcase, outcome, message=f"{outcome} by fixture")
+    ElementTree.ElementTree(root).write(path, encoding="utf-8", xml_declaration=True)
 
 
 def test_parquet_contract_runtime_suite_selects_no_skip_runtime_contract_tests() -> None:
@@ -34,46 +67,137 @@ def test_parquet_contract_runtime_suite_selects_no_skip_runtime_contract_tests()
     assert any("projection_permutations" in test for test in selected)
 
 
-def test_parquet_contract_runtime_suite_plugin_detects_selected_skips() -> None:
-    """Verify Parquet contract runtime suite plugin detects selected skips."""
-    from meta.ci.parquet.check_parquet_contract_runtime_suite import _NoSkipPlugin
+def test_parquet_contract_runtime_suite_loads_passes_and_skips_from_junit(
+    tmp_path: Path,
+) -> None:
+    """Verify the certificate reader normalizes pytest JUnit outcomes and node IDs."""
+    from meta.ci.parquet.check_parquet_contract_runtime_suite import _load_junit_evidence
 
-    plugin = _NoSkipPlugin()
-    assert hash(plugin) == object.__hash__(plugin)
-    plugin.pytest_runtest_logreport(
-        SimpleNamespace(
-            nodeid="tests/parquet/test_parquet_native_scalar_cases.py::test_runtime",
-            outcome="skipped",
-            skipped=True,
-            when="setup",
-            longrepr=("file.py", 1, "pyarrow not installed"),
-        )
-    )
-    plugin.pytest_runtest_logreport(
-        SimpleNamespace(
-            nodeid="tests/parquet/test_parquet_native_scalar_cases.py::test_other",
-            outcome="passed",
-            skipped=False,
-            when="call",
-            longrepr=None,
-        )
+    report_path = tmp_path / "pytest.xml"
+    report_path.write_text(
+        """<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite tests="2" failures="0" errors="0" skipped="1">
+  <testcase classname="tests.parquet.test_parquet_native_scalar_cases"
+            name="test_runtime[param]" />
+  <testcase classname="tests.parquet.test_parquet_native_scalar_cases"
+            name="test_other"><skipped message="pyarrow not installed" /></testcase>
+</testsuite></testsuites>
+""",
+        encoding="utf-8",
     )
 
-    assert plugin.skipped == [
+    evidence, reports = _load_junit_evidence(report_path)
+
+    assert evidence == {
+        "satisfied": True,
+        "issues": [],
+        "format": "pytest-junit-xml",
+        "testcase_count": 2,
+        "passed_count": 1,
+        "skipped_count": 1,
+        "failed_count": 0,
+    }
+    assert reports == [
         {
-            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_runtime",
-            "outcome": "skipped",
-            "when": "setup",
-            "reason": "pyarrow not installed",
-        }
-    ]
-    assert plugin.passed == [
+            "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_runtime[param]",
+            "outcome": "passed",
+        },
         {
             "nodeid": "tests/parquet/test_parquet_native_scalar_cases.py::test_other",
+            "outcome": "skipped",
+            "reason": "pyarrow not installed",
+        },
+    ]
+
+
+def test_parquet_contract_runtime_suite_rejects_inconsistent_junit_summary(
+    tmp_path: Path,
+) -> None:
+    """Verify declared failures and inconsistent counts make JUnit evidence invalid."""
+    from meta.ci.parquet.check_parquet_contract_runtime_suite import _load_junit_evidence
+
+    report_path = tmp_path / "pytest.xml"
+    report_path.write_text(
+        """<testsuites><testsuite tests="2" failures="1" errors="0" skipped="0">
+<testcase classname="tests.parquet.test_runtime" name="test_passes" />
+</testsuite></testsuites>""",
+        encoding="utf-8",
+    )
+
+    evidence, reports = _load_junit_evidence(report_path)
+
+    assert evidence["satisfied"] is False
+    assert len(reports) == 1
+    assert any("declares 1 failures" in issue for issue in evidence["issues"])
+    assert any(
+        "tests count" in issue and "declared 2, found 1" in issue for issue in evidence["issues"]
+    )
+    assert any(
+        "failures count" in issue and "declared 1, found 0" in issue for issue in evidence["issues"]
+    )
+
+
+@pytest.mark.parametrize("missing_attribute", ["tests", "failures", "errors", "skipped"])
+def test_parquet_contract_runtime_suite_requires_complete_junit_summary(
+    tmp_path: Path,
+    missing_attribute: str,
+) -> None:
+    """Verify every pytest JUnit suite must declare all four outcome counters."""
+    from meta.ci.parquet.check_parquet_contract_runtime_suite import _load_junit_evidence
+
+    attributes = {
+        "tests": "1",
+        "failures": "0",
+        "errors": "0",
+        "skipped": "0",
+    }
+    del attributes[missing_attribute]
+    root = ElementTree.Element("testsuites")
+    suite = ElementTree.SubElement(root, "testsuite", attributes)
+    ElementTree.SubElement(
+        suite,
+        "testcase",
+        classname="tests.parquet.test_runtime",
+        name="test_passes",
+    )
+    report_path = tmp_path / "pytest.xml"
+    ElementTree.ElementTree(root).write(report_path, encoding="utf-8", xml_declaration=True)
+
+    evidence, reports = _load_junit_evidence(report_path)
+
+    assert evidence["satisfied"] is False
+    assert len(reports) == 1
+    assert any(
+        f"missing required {missing_attribute} count" in issue for issue in evidence["issues"]
+    )
+
+
+def test_parquet_contract_runtime_suite_rejects_inconsistent_skipped_summary(
+    tmp_path: Path,
+) -> None:
+    """Verify a declared skip without a skipped testcase cannot certify."""
+    from meta.ci.parquet.check_parquet_contract_runtime_suite import _load_junit_evidence
+
+    report_path = tmp_path / "pytest.xml"
+    report_path.write_text(
+        """<testsuites><testsuite tests="1" failures="0" errors="0" skipped="1">
+<testcase classname="tests.parquet.test_runtime" name="test_passes" />
+</testsuite></testsuites>""",
+        encoding="utf-8",
+    )
+
+    evidence, reports = _load_junit_evidence(report_path)
+
+    assert evidence["satisfied"] is False
+    assert reports == [
+        {
+            "nodeid": "tests/parquet/test_runtime.py::test_passes",
             "outcome": "passed",
-            "when": "call",
         }
     ]
+    assert any(
+        "skipped count" in issue and "declared 1, found 0" in issue for issue in evidence["issues"]
+    )
 
 
 def test_parquet_contract_runtime_suite_fails_closed_when_readiness_fails(
@@ -336,16 +460,39 @@ def test_parquet_contract_runtime_suite_group_execution_summary_records_skips_an
     assert any("selected test failed" in issue for issue in summary["issues"])
 
 
+def test_parquet_contract_runtime_suite_group_execution_rejects_duplicate_junit_results() -> None:
+    """Verify duplicated selected node IDs cannot satisfy runtime certification."""
+    from meta.ci.parquet.check_parquet_contract_runtime_suite import (
+        _runtime_suite_group_execution_summary,
+    )
+
+    selected = "tests/parquet/test_parquet_native_scalar_cases.py::test_native"
+    report = {"nodeid": selected, "outcome": "passed"}
+
+    summary = _runtime_suite_group_execution_summary(
+        selected_tests_by_group={"schema_sanitizer_native_reader": [selected]},
+        reports=[report, dict(report)],
+    )
+
+    assert summary["satisfied"] is False
+    assert summary["passed_by_group"]["schema_sanitizer_native_reader"] == []
+    assert any("appeared more than once" in issue for issue in summary["issues"])
+
+
 def test_parquet_contract_runtime_suite_parses_certificate_output_arg() -> None:
     """Verify Parquet contract runtime suite parses certificate output arg."""
     from meta.ci.parquet.check_parquet_contract_runtime_suite import _parse_runtime_suite_args
 
-    output, pytest_args = _parse_runtime_suite_args(
-        ["--certificate-output", "artifacts/cert.json", "-k", "nested"]
+    output, junit_xml = _parse_runtime_suite_args(
+        [
+            "--certificate-output",
+            "artifacts/cert.json",
+            "--junit-xml=artifacts/pytest.xml",
+        ]
     )
 
     assert output == "artifacts/cert.json"
-    assert pytest_args == ["-k", "nested"]
+    assert junit_xml == "artifacts/pytest.xml"
 
 
 def test_parquet_contract_runtime_suite_certificate_accepts_full_contract() -> None:
@@ -382,9 +529,9 @@ def test_parquet_contract_runtime_suite_certificate_accepts_full_contract() -> N
     certificate = _runtime_suite_contract_certificate(
         selection=selection,
         readiness=readiness,
+        junit_evidence={"satisfied": True, "issues": []},
         group_execution=group_execution,
         reports=reports,
-        pytest_exit_code=0,
     )
 
     assert certificate["satisfied"] is True
@@ -458,9 +605,9 @@ def test_parquet_contract_runtime_suite_certificate_fails_missing_nested_group()
     certificate = _runtime_suite_contract_certificate(
         selection=selection,
         readiness={"satisfied": True, "issues": []},
+        junit_evidence={"satisfied": True, "issues": []},
         group_execution=group_execution,
         reports=reports,
-        pytest_exit_code=0,
     )
 
     assert certificate["satisfied"] is False
@@ -495,3 +642,67 @@ def test_parquet_contract_runtime_suite_writes_certificate_on_readiness_failure(
     assert certificate["readiness"]["satisfied"] is False
     assert certificate["guarantees"]["pipeline_safe_fallback_with_pyarrow"]["satisfied"] is False
     assert any("PyArrow is required" in issue for issue in certificate["issues"])
+
+
+def test_parquet_contract_runtime_suite_certifies_full_suite_junit_without_rerunning_pytest(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify the CLI certifies selected contracts from the full suite's one test run."""
+    from meta.ci.parquet import check_parquet_contract_runtime_suite as suite
+
+    junit_xml = tmp_path / "pytest-memory-parquet.xml"
+    certificate_output = tmp_path / "certificate.json"
+    selected = list(suite.PARQUET_CONTRACT_RUNTIME_TESTS)
+    _write_junit_report(
+        junit_xml,
+        [
+            *selected,
+            "tests/memory/test_unselected.py::test_full_suite_evidence_is_retained",
+        ],
+    )
+    monkeypatch.setattr(
+        suite,
+        "parquet_contract_runtime_readiness_status",
+        lambda **_: {"satisfied": True, "issues": []},
+    )
+
+    result = suite.main(
+        [
+            "--junit-xml",
+            str(junit_xml),
+            "--certificate-output",
+            str(certificate_output),
+        ]
+    )
+
+    assert result == 0
+    certificate = json.loads(certificate_output.read_text(encoding="utf-8"))
+    assert certificate["schema_version"] == 2
+    assert certificate["satisfied"] is True
+    assert certificate["execution"]["evidence"]["testcase_count"] == len(selected) + 1
+    assert certificate["execution"]["selected_test_count"] == len(selected)
+    assert certificate["execution"]["passed_count"] == len(selected)
+
+
+def test_parquet_contract_runtime_suite_rejects_a_selected_skip_in_junit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Verify a selected skip fails certification even when the JUnit file is valid."""
+    from meta.ci.parquet import check_parquet_contract_runtime_suite as suite
+
+    junit_xml = tmp_path / "pytest-memory-parquet.xml"
+    selected = list(suite.PARQUET_CONTRACT_RUNTIME_TESTS)
+    _write_junit_report(
+        junit_xml,
+        selected,
+        outcomes={selected[0]: "skipped"},
+    )
+    monkeypatch.setattr(
+        suite,
+        "parquet_contract_runtime_readiness_status",
+        lambda **_: {"satisfied": True, "issues": []},
+    )
+
+    assert suite.main(["--junit-xml", str(junit_xml)]) == 1

@@ -62,9 +62,12 @@ runs:
         PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
-      run: >-
-        python -m pip install pip==26.2.1 ninja==1.13.0 cmake==4.3.4
-        scikit-build-core==0.11.6 pytest==9.1.1 pyarrow==25.0.1
+      run: |-
+        set -euo pipefail
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m pip install --only-binary=:all: \
+          ninja==1.13.0 cmake==4.3.4 scikit-build-core==0.11.6 \
+          pytest==9.1.1 pyarrow==25.0.1
     - name: Reset generated sanitizer paths
       shell: bash
       run: |-

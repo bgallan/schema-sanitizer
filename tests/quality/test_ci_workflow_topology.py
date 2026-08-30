@@ -68,7 +68,7 @@ _BUILD_PLATFORMS = _table(
     macOS ARM64 | macos-15 | macos-arm64 | macos-arm64 | arm64
     """,
 )
-_TEST_SHARDS = ("concurrency", "memory-parquet", "io-pipeline")
+_TEST_SHARDS = ("io-pipeline", "memory-parquet", "concurrency")
 _TEST_PLATFORM_JOBS = tuple(
     {
         "job-id": f"platform-tests-{platform['platform-name'].replace('_', '-')}",
@@ -594,7 +594,8 @@ def test_publish_postcondition_revalidates_every_original_manifest_digest() -> N
     assert "timeout-minutes: 75" in verifier
     assert "python-version: 3.13.15" in verifier
     assert "meta/ci/requirements/release-verification.txt" in verifier
-    assert "python -m pip install --no-deps 'pip==26.2.1'" in verifier
+    assert "python meta/ci/quality/ensure_pinned_pip.py" in verifier
+    assert "python -m pip install --no-deps 'pip==26.2.1'" not in verifier
     assert "python -m pip install --no-deps" in verifier
     assert "python -m pip check" in verifier
     assert "pypi_attestations.__version__" in verifier
@@ -1027,9 +1028,10 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     assert "--retries 10" in dependencies[0]
     assert "--timeout 60" in dependencies[0]
     assert "--no-deps" in dependencies[0]
+    assert "--only-binary=:all:" in dependencies[0]
     assert "-r meta/ci/requirements/platform-tests.txt" in dependencies[0]
     assert "python -m pip check" in dependencies[0]
-    assert "meta/ci/requirements/build-tools.txt" in test_action
+    assert "meta/ci/requirements/build-tools.txt" not in test_action
     assert "meta/ci/requirements/platform-tests.txt" in test_action
     assert cibuildwheel["test-requires"] == ["pyarrow==25.0.1"]
     assert cibuildwheel["dependency-versions"] == "meta/ci/requirements/build-tools.txt"
@@ -1077,6 +1079,41 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     assert ci.count("uses: ./.github/actions/test-platform-wheel") == 4
 
 
+def test_ci_bootstraps_pip_conditionally_from_the_exact_wheel() -> None:
+    """Every runner avoids a no-op install but repairs pin drift with a binary wheel."""
+    helper_path = "meta/ci/quality/ensure_pinned_pip.py"
+    helper = (ROOT / helper_path).read_text(encoding="utf-8")
+    callers = {
+        "build-platform-wheel": (_action("build-platform-wheel"), 4),
+        "test-platform-wheel": (_action("test-platform-wheel"), 1),
+        "quality-validation": (_action("quality-validation"), 1),
+        "source-distribution": (_action("source-distribution"), 1),
+        "native-llvm-coverage": (_action("native-llvm-coverage"), 1),
+        "thread-sanitizer": (_action("thread-sanitizer"), 1),
+        "platform-sanitizer": (_action("platform-sanitizer"), 1),
+        "validation-gate": (_job_body(_workflow("ci.yml"), "validation-gate"), 1),
+        "publish-verifier": (_job_body(_workflow("publish.yml"), "verify"), 1),
+    }
+
+    for name, (definition, expected_count) in callers.items():
+        assert definition.count(f"python {helper_path}") == expected_count, name
+        assert "python -m pip install pip==" not in definition, name
+        assert "python -m pip install --no-deps 'pip==" not in definition, name
+    assert 'PIP_VERSION = "26.2.1"' in helper
+    assert '"--no-deps"' in helper
+    assert '"--only-binary=:all:"' in helper
+    assert "os.spawnv(os.P_WAIT" in helper
+    assert "pip bootstrap postcondition failed" in helper
+
+
+def test_packaging_gate_uses_one_exact_runner_native_python() -> None:
+    """The packaging-only tail keeps setup and cache on exact Python 3.13.15."""
+    gate = _job_body(_workflow("ci.yml"), "validation-gate")
+
+    assert gate.count("python-version: 3.13.15") == 2
+    assert "python-version: 3.11.9" not in gate
+
+
 def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
     """Windows release builds reject compiler or redistributable path drift."""
     cibuildwheel = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
@@ -1100,7 +1137,7 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
     )
     assert "Microsoft.VCRedistVersion.default.txt" in build
     assert "Microsoft.VC143.CRT" in build
-    assert "name: Preseed the pinned Windows NuGet client" in build
+    assert "name: Install the verified Windows CPython package" in build
     python_cache = next(
         step
         for step in _step_bodies(build)
@@ -1122,31 +1159,30 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
     )
     assert 'target = cache_root / "python.3.11.9.nupkg"' in build
     assert "target.is_symlink() or target.is_file()" in build
-    assert "https://dist.nuget.org/win-x86-commandline/v7.9.0/nuget.exe" in build
-    nuget_sha256 = "992d70cac5b06c38efec91806caba64cdcc07e6d963a0959dbbbaf264d33b800"  # pragma: allowlist secret
     python_sha256 = "9283876d58c017e0e846f95b490da3bca0fc0a6ee1134b2870677cfb7eec3c67"  # pragma: allowlist secret
-    assert nuget_sha256 in build
     assert python_sha256 in build
-    assert "from cibuildwheel.util.file import CIBW_CACHE_PATH" in build
-    assert "https://api.nuget.org/v3-flatcontainer/python/3.11.9/" in build
-    assert "-Source" in build
-    assert "-NoCache" in build
-    assert "-DirectDownload" in build
-    assert "-NonInteractive" in build
+    assert 'python meta/ci/native/install_windows_cpython.py "${PYTHON_NUPKG_SHA256}"' in build
     assert "platform.machine().upper() == 'AMD64'" in build
-    assert "struct.unpack('<H', stream.read(2))[0] != 0x8664" in build
+    assert "assert struct.calcsize('P') == 8" in build
+    assert "assert sys.version_info[:3] == (3, 11, 9)" in build
+    installer = (ROOT / "meta/ci/native/install_windows_cpython.py").read_text(encoding="utf-8")
+    assert "https://api.nuget.org/v3-flatcontainer/python/3.11.9/" in installer
+    assert "from cibuildwheel.util.file import CIBW_CACHE_PATH" in installer
+    assert "zipfile.ZipFile" in installer
+    assert "duplicate or case-colliding archive member" in installer
+    assert "archive file is also a member parent" in installer
+    assert 'struct.unpack("<H", machine_bytes)[0] != 0x8664' in installer
+    assert "os.replace" in installer
+    assert "extractall" not in installer
+    assert "nuget.exe" not in installer.casefold()
+    assert "NUGET_SHA256" not in build
+    assert "https://dist.nuget.org/" not in build
     assert "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" not in build
     assert "grep -Fq -- 'win-x86-commandline/latest/nuget.exe'" in build
-    invocation = 'python - "${NUGET_SHA256}" "${PYTHON_NUPKG_SHA256}" <<\'PY\''
-    assert invocation in build
-    nuget_script = build.split(f"{invocation}\n", 1)[1].split("\n        PY", 1)[0]
-    assert "nuget_expected = sys.argv[1]" in nuget_script
-    assert "python_expected = sys.argv[2]" in nuget_script
-    compile(textwrap.dedent(nuget_script), "pinned-nuget-bootstrap", "exec")
     assert build.index("name: Restore the verified Windows CPython package") < build.index(
-        "name: Preseed the pinned Windows NuGet client"
+        "name: Install the verified Windows CPython package"
     )
-    assert build.index("name: Preseed the pinned Windows NuGet client") < build.index(
+    assert build.index("name: Install the verified Windows CPython package") < build.index(
         "python -m cibuildwheel"
     )
     assert "grep -Fq -- 'nuget.exe install python'" in build
@@ -1266,7 +1302,8 @@ def test_quality_requirements_are_a_complete_exact_lock() -> None:
     quality = _action("quality-validation")
 
     assert _exact_lock_names(ROOT / "meta/ci/requirements/quality.txt") == _QUALITY_LOCK_NAMES
-    assert "python -m pip install --no-deps -r meta/ci/requirements/quality.txt" in quality
+    assert "python -m pip install --no-deps --only-binary=:all:" in quality
+    assert "-r meta/ci/requirements/quality.txt" in quality
     assert "python -m pip install --no-deps '.[dev]'" in quality
     assert "python -m pip check" in quality
 
@@ -1657,12 +1694,12 @@ def test_native_stress_and_functional_suites_form_an_explicit_partition() -> Non
     )
 
 
-def test_platform_smokes_are_owned_by_their_related_parallel_shards() -> None:
-    """Independent smoke gates run with the functional domain they exercise."""
+def test_platform_smokes_have_stable_balanced_shard_ownership() -> None:
+    """Independent smoke gates retain coverage without extending the longest shard."""
     test_action = _action("test-platform-wheel")
     ownership = {
-        "Compile and certify the Parquet runtime": "memory-parquet",
-        "Record a cross-platform reader scaling measurement": "io-pipeline",
+        "Certify the Parquet runtime from functional evidence": "memory-parquet",
+        "Record a cross-platform reader scaling measurement": "memory-parquet",
         "Cross-platform threading benchmark smoke": "concurrency",
         "Cross-platform native completion stress": "concurrency",
     }
@@ -1670,6 +1707,29 @@ def test_platform_smokes_are_owned_by_their_related_parallel_shards() -> None:
     for name, shard in ownership.items():
         step = next(step for step in _step_bodies(test_action) if f"name: {name}" in step)
         assert f"if: inputs.shard == '{shard}'" in step
+
+
+def test_parquet_certificate_reuses_functional_junit_and_compilation_runs_once() -> None:
+    """Certification consumes full-suite evidence while quality owns syntax compilation."""
+    test_action = _action("test-platform-wheel")
+    quality_action = _action("quality-validation")
+    functional = next(
+        step for step in _step_bodies(test_action) if "name: Run functional test shard" in step
+    )
+    certificate = next(
+        step
+        for step in _step_bodies(test_action)
+        if "name: Certify the Parquet runtime from functional evidence" in step
+    )
+
+    junit_path = "artifacts/pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml"
+    assert junit_path in functional
+    assert '--junit-xml "artifacts/pytest-${PLATFORM_ARTIFACT}-memory-parquet.xml"' in certificate
+    assert test_action.count("check_parquet_contract_runtime_suite.py") == 1
+    assert "check_parquet_contract_runtime.py" not in test_action
+    assert test_action.index(functional) < test_action.index(certificate)
+    assert "python -m compileall" not in test_action
+    assert quality_action.count("python -m compileall -q src") == 1
 
 
 def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive() -> None:
@@ -2531,7 +2591,7 @@ def test_benchmark_matrix_runs_on_supported_platforms() -> None:
         if "name: Record a cross-platform reader scaling measurement" in step
     )
     assert "shell: bash" in reader_step
-    assert "if: inputs.shard == 'io-pipeline'" in reader_step
+    assert "if: inputs.shard == 'memory-parquet'" in reader_step
     assert "if python -I benchmarks/readers/linear_scaling.py \\" in reader_step
     assert 'report.get("failures")' in reader_step
     assert "Non-gating reader timing" in reader_step

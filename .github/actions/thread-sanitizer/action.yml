@@ -22,7 +22,8 @@ runs:
         [[ "$(dpkg-query -W -f='${Version}' g++-14)" == '14.2.0-4ubuntu2~24.04.1' ]]
         [[ "$(gcc-14 -dumpfullversion -dumpversion)" == '14.2.0' ]]
         [[ "$(g++-14 -dumpfullversion -dumpversion)" == '14.2.0' ]]
-        python -m pip install pip==26.2.1 ninja==1.13.0 cmake==4.3.4 \
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m pip install --only-binary=:all: ninja==1.13.0 cmake==4.3.4 \
           pytest==9.1.1 pyarrow==25.0.1
     - name: Configure and build the fully instrumented extension
       shell: bash

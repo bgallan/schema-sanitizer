@@ -800,6 +800,7 @@ class RemoteIoCoordinator:
         close_error: BaseException | None = None
         host_must_remain_live = False
         loop_stop_requested = False
+        terminal_drain_failed = False
         try:
             for future in futures:
                 future.cancel()
@@ -849,7 +850,19 @@ class RemoteIoCoordinator:
             try:
                 self._drain_terminal_callback_work(deadline)
             except BaseException as exc:
-                close_error = close_error or exc
+                terminal_drain_failed = True
+                if close_error is None:
+                    close_error = exc
+                else:
+                    add_bounded_note(
+                        close_error,
+                        "remote-I/O terminal callback cleanup also failed",
+                        exc,
+                    )
+                # Callback work is rooted by the coordinator registry and may
+                # only execute on the governed cleanup dispatcher. Keep that
+                # registry and its host alive for a late worker or retry close.
+                host_must_remain_live = True
 
             if (
                 not host_must_remain_live
@@ -915,10 +928,18 @@ class RemoteIoCoordinator:
                 self._drain_callbackless_submissions(deadline)
             except BaseException as exc:
                 close_error = close_error or exc
-            try:
-                self._drain_terminal_callback_work(deadline)
-            except BaseException as exc:
-                close_error = close_error or exc
+            if not terminal_drain_failed:
+                try:
+                    self._drain_terminal_callback_work(deadline)
+                except BaseException as exc:
+                    if close_error is None:
+                        close_error = exc
+                    else:
+                        add_bounded_note(
+                            close_error,
+                            "remote-I/O terminal callback cleanup also failed",
+                            exc,
+                        )
 
             # A concurrent Future can become done before add_done_callback()
             # returns, and result waiters can wake before its callback finishes.
@@ -1268,8 +1289,17 @@ class RemoteIoCoordinator:
                     _ORPHANED_STARTUPS.add(self)
             else:
                 cancel_retry(("remote-host-resource-release", id(self)))
-                cancel_retry(("remote-terminal-callback", id(self)))
-                _discard_terminal_retry_coordinator(self)
+                with self._close_condition:
+                    if not (
+                        self._terminal_callback_owners
+                        or self._deferred_terminal_callbacks
+                        or self._failed_terminal_callbacks
+                    ):
+                        # Keep the quiescence decision and root retirement under
+                        # the publication lock so a late callback cannot retain
+                        # the coordinator between the check and the discard.
+                        cancel_retry(("remote-terminal-callback", id(self)))
+                        _discard_terminal_retry_coordinator(self)
                 with _ORPHANED_STARTUPS_LOCK:
                     _ORPHANED_STARTUPS.discard(self)
 
@@ -1400,24 +1430,17 @@ class RemoteIoCoordinator:
             self._schedule_terminal_retry_locked()
 
     def _drain_terminal_callback_work(self, deadline: float) -> None:
-        """Wait boundedly while retained callbacks execute off-thread."""
-        while True:
-            with self._close_condition:
-                if self._failed_terminal_callbacks:
-                    owner, callback = self._failed_terminal_callbacks.popleft()
-                elif self._deferred_terminal_callbacks:
-                    owner, callback = self._deferred_terminal_callbacks.popleft()
-                elif not self._terminal_callback_owners:
-                    return
-                else:
-                    remaining = deadline - monotonic()
-                    if remaining <= 0:
-                        raise RuntimeError("remote I/O terminal callbacks exceeded their deadline")
-                    self._close_condition.wait(timeout=min(0.02, remaining))
-                    continue
-            self._dispatch_terminal_callback(owner, callback)
-            if monotonic() >= deadline:
-                raise RuntimeError("remote I/O terminal cleanup callbacks exceeded their deadline")
+        """Wait boundedly for governed terminal-callback workers to reach quiescence."""
+        with self._close_condition:
+            while (
+                self._terminal_callback_owners
+                or self._deferred_terminal_callbacks
+                or self._failed_terminal_callbacks
+            ):
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    raise RuntimeError("remote I/O terminal callbacks exceeded their deadline")
+                self._close_condition.wait(timeout=min(0.02, remaining))
 
     def _bridge_submission_done(self, future: Future[Any], owner: _RemoteIoSubmission) -> None:
         """Use bridge completion only as notification, never as cancel proof."""

@@ -16,10 +16,16 @@ runs:
       run: |-
         set -euo pipefail
         rm -rf -- .work/build
-        python -m pip install pip==26.2.1
-        python -m pip install --no-deps -r meta/ci/requirements/quality.txt
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m pip install --no-deps --only-binary=:all: \
+          -r meta/ci/requirements/quality.txt
         python -m pip install --no-deps '.[dev]'
         python -m pip check
+    - name: Compile every Python package module
+      shell: bash
+      run: |-
+        set -euo pipefail
+        python -m compileall -q src
     - name: Reset the owned pre-commit cache path
       shell: bash
       run: |-

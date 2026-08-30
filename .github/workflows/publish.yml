@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_version:
-        description: Exact meta/VERSION value, for example 0.4.2
+        description: Exact meta/VERSION value, for example 0.4.3
         required: true
         type: string
       confirm_publish:
@@ -214,7 +214,7 @@ jobs:
         run: |-
           set -euo pipefail
           timeout --signal=TERM --kill-after=15s 180s \
-            python -m pip install --no-deps 'pip==26.2.1'
+            python meta/ci/quality/ensure_pinned_pip.py
           timeout --signal=TERM --kill-after=15s 600s \
             python -m pip install --no-deps \
               --requirement meta/ci/requirements/release-verification.txt
