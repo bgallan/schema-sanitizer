@@ -104,9 +104,13 @@ runs:
           > .work/audit/detect-secrets.json
         python meta/ci/quality/check_detect_secrets_report.py \
           .work/audit/detect-secrets.json
-    - name: Benchmark harness smoke
+    - name: Run source quality contracts
       shell: bash
-      run: python -m benchmarks.ingestion.cli --rows 8 --width 2 --repeats 1
+      run: >-
+        pytest -q
+        --durations=20
+        --durations-min=0.05
+        tests/quality
     - name: Collect contextual Python branch coverage
       shell: bash
       run: |-

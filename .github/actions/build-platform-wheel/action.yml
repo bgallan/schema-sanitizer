@@ -266,10 +266,9 @@ runs:
     - name: Build and test the CPython 3.11 ABI3 wheel
       env:
         CIBW_ARCH: ${{ inputs.arch }}
-        CIBW_CONFIG_SETTINGS: cmake.define.SCHEMA_SANITIZER_ENABLE_PCH=ON
-        CIBW_CONFIG_SETTINGS_WINDOWS: >-
+        CIBW_CONFIG_SETTINGS: >-
+          build.verbose=false
           cmake.define.SCHEMA_SANITIZER_ENABLE_PCH=ON
-          cmake.define.SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES=1
         # macOS and Windows inherit these host-absolute constraints without
         # overriding platform-specific cibuildwheel configuration. Linux uses
         # cibuildwheel's copied-project path inside its OCI container.
@@ -279,11 +278,10 @@ runs:
           PIP_BUILD_CONSTRAINT=/project/meta/ci/requirements/build-tools.txt
           PIP_CONSTRAINT=/project/meta/ci/requirements/build-tools.txt
         # cibuildwheel Linux builds run in a container; explicitly propagate
-        # the deterministic timestamp and bounded/non-interactive pip policy.
+        # the deterministic timestamp and non-interactive pip policy.
         CIBW_ENVIRONMENT_PASS_LINUX: >-
-          CMAKE_BUILD_PARALLEL_LEVEL SOURCE_DATE_EPOCH
-          PIP_DISABLE_PIP_VERSION_CHECK PIP_NO_INPUT PIP_RETRIES PIP_TIMEOUT
-          PYTHONHASHSEED PYTHONUTF8 TZ
+          SOURCE_DATE_EPOCH PIP_DISABLE_PIP_VERSION_CHECK PIP_NO_INPUT
+          PIP_RETRIES PIP_TIMEOUT PYTHONHASHSEED PYTHONUTF8 TZ
       shell: bash
       run: |-
         set -euo pipefail
@@ -292,11 +290,8 @@ runs:
         SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
         [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
         export SOURCE_DATE_EPOCH
-        CMAKE_BUILD_PARALLEL_LEVEL="$(
-          python -c 'from meta.ci.quality.record_runner_environment import bounded_build_parallelism; print(bounded_build_parallelism())'
-        )"
-        [[ "${CMAKE_BUILD_PARALLEL_LEVEL}" =~ ^[1-4]$ ]]
-        export CMAKE_BUILD_PARALLEL_LEVEL
+        # Ninja receives no ambient cap; the Windows config reintroduces one lane.
+        unset CMAKE_BUILD_PARALLEL_LEVEL
         python -m cibuildwheel --output-dir wheelhouse --archs "${CIBW_ARCH}" \
           2>&1 | tee .work/cibuildwheel.log
         if grep -Fq -- 'Exception ignored in:' .work/cibuildwheel.log; then
@@ -338,7 +333,7 @@ runs:
           'CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files/Microsoft Visual Studio/2022/Enterprise'
           'CMAKE_GENERATOR_PLATFORM:INTERNAL=x64'
           'CMAKE_GENERATOR_TOOLSET:INTERNAL=v143,host=x64'
-          'SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES:STRING=1'
+          'SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES:STRING=auto'
         )
         for entry in "${expected[@]}"; do
           grep -Fx -- "${entry}" "${cache}" >/dev/null || {

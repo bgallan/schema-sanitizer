@@ -154,18 +154,18 @@ one requires an explicitly reviewed explanation.
 | `integrations/bigquery/sidecar.py` | 75% |
 | `integrations/bigquery/registry.py` | 48% |
 
-The platform jobs also execute the complete pytest suite against the installed
-artifact, rather than an import from `src/`, on:
+The platform jobs also execute the complete installed-wheel functional suite,
+rather than an import from `src/`, on:
 
 | Runner | Release platform | Native safety coverage |
 |---|---|---|
-| Ubuntu 24.04 / Linux x86-64 | `manylinux_2_27_x86_64.manylinux_2_28_x86_64` | Full wheel suite, focused extension ASan/UBSan, libFuzzer, LLVM coverage, and GCC TSan. |
-| Windows Server 2022 / AMD64 | `win_amd64` | Full wheel suite and MSVC ASan parser fuzzing. |
-| macOS 15 / x86-64 | `macosx_11_0_x86_64` | Full wheel suite, ASan/UBSan parser fuzzing, and fixed-round concurrency probes. |
-| macOS 15 / ARM64 | `macosx_11_0_arm64` | Full wheel suite, ASan/UBSan parser fuzzing, and fixed-round concurrency probes. |
+| Ubuntu 24.04 / Linux x86-64 | `manylinux_2_27_x86_64.manylinux_2_28_x86_64` | Installed-wheel functional suite, focused extension ASan/UBSan, libFuzzer, LLVM coverage, and GCC TSan. |
+| Windows Server 2022 / AMD64 | `win_amd64` | Installed-wheel functional suite and MSVC ASan parser fuzzing. |
+| macOS 15 / x86-64 | `macosx_11_0_x86_64` | Installed-wheel functional suite, ASan/UBSan parser fuzzing, and fixed-round concurrency probes. |
+| macOS 15 / ARM64 | `macosx_11_0_arm64` | Installed-wheel functional suite, ASan/UBSan parser fuzzing, and fixed-round concurrency probes. |
 
 Each wheel is built for CPython 3.11 with the stable ABI (`cp311-abi3`). The
-complete suite runs on the same CPython 3.11 patch and the same fully locked
+complete functional suite runs on the same CPython 3.11 patch and the same fully locked
 adapter versions on all four platforms, so timing and behavior comparisons do
 not silently mix direct, transitive, or interpreter upgrades. Those test locks
 live in `meta/ci/requirements/platform-tests.txt`, which is also the setup-Python
@@ -216,18 +216,19 @@ four platforms:
 
 | Shard | Test directories | Co-located gates |
 |---|---|---|
-| `concurrency` | `tests/concurrency` and `tests/quality` | Threading smoke and the single `native_stress` invocation. |
+| `concurrency` | `tests/concurrency` | Threading smoke, the single `native_stress` invocation, and the cross-toolchain standalone-fuzzer golden test. |
 | `memory-parquet` | `tests/memory`, `tests/parquet`, and `tests/sinks` | Compiled-wheel Parquet certification. |
 | `io-pipeline` | `tests/examples`, `tests/io`, `tests/pipeline`, `tests/remote`, and `tests/schema` | Non-gating reader scaling measurement. |
 
 The topology contract derives the repository's test directories and fails if a
 new one is not assigned exactly once. The assignment is a static source
 contract: CI never redistributes tests from observed runner timings, and every
-platform executes the same paths. Keeping `tests/quality` with `concurrency`
-balances the three existing owners without adding a job, dropping a directory,
-or changing coverage collection. Separate hosted runners provide real
-parallelism without oversubscribing a single runner's native concurrency tests.
-Three shards incur
+platform executes the same functional paths. The source-only `tests/quality`
+contracts run once in the existing quality job instead of repeating source
+scans on four operating systems. Their standalone C++ fuzzer golden remains in
+every concurrency shard because it is the one quality contract that exercises
+each platform's real compiler and process model. This preserves meaningful
+platform coverage without adding a job or dropping a test. Three shards incur
 one more checkout, Python setup, dependency installation, and hosted runner per
 platform than the previous two-way split, but reduce the slowest functional
 path and run the normal suite concurrently with the benchmark and certificate
@@ -268,13 +269,15 @@ Each test shard also records a runner manifest with the exact Python and
 installed package versions, operating-system and architecture identifiers,
 logical CPU count, process affinity where supported, and the effective CPU
 capacity after affinity and cgroup-v2 quota limits. Linux also records its raw
-cgroup CPU quota and throttling counters. Native CI builds cap parallel
-compilation at four tasks and reduce that width to the effective runner
-capacity; Linux wheel builds propagate the same exact limit into their
-cibuildwheel container. Windows lets build-level parallelism own that ceiling
-instead of multiplying it by per-target MSVC processes. Hardware supplied by hosted runners is not identical across
-architectures, so this manifest distinguishes an environment difference from a
-product regression while the software and test workload stay fixed.
+cgroup CPU quota and throttling counters. Release wheels use one scheduler per
+generator: Ninja owns its hardware-aware default width, while Windows keeps one
+MSBuild project lane and lets MSVC `/MP` read the effective processor count from
+the operating system. This avoids multiplying MSBuild and compiler processes.
+The memory-heavier sanitizer and TSan builds remain capped at four tasks and
+reduce that width to the effective runner capacity. Hardware supplied by hosted
+runners is not identical across architectures, so the manifest distinguishes
+an environment difference from a product regression while the software and
+test workload stay fixed.
 
 The concurrency shard fails before its workload when detected native CPU
 capacity is below the matrix contract: four credits on Linux, Windows, and

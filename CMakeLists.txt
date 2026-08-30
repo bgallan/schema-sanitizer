@@ -65,13 +65,14 @@ option(SCHEMA_SANITIZER_ENABLE_WARNINGS
 option(SCHEMA_SANITIZER_REPRODUCIBLE
        "Enable reproducible build flags (path mapping where supported)" ON)
 set(SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES
-    "4"
+    "auto"
     CACHE STRING
-          "Maximum concurrent MSVC compiler processes for project targets")
-if(NOT SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES MATCHES "^[1-9][0-9]*$")
+          "Concurrent MSVC compiler processes: auto or a positive integer")
+if(NOT SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES STREQUAL "auto"
+   AND NOT SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES MATCHES "^[1-9][0-9]*$")
   message(
     FATAL_ERROR
-      "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES must be a positive integer (got '${SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES}')"
+      "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES must be 'auto' or a positive integer (got '${SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES}')"
   )
 endif()
 

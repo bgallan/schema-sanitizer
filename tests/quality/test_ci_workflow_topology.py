@@ -982,7 +982,7 @@ def test_validation_matrix_has_eight_exact_workloads_and_safe_dispatch() -> None
 
 
 def test_platform_suite_exercises_the_installed_wheel() -> None:
-    """The full suite must retain the wheel's platform-specific runtime bootstrap."""
+    """The functional suite retains the wheel's platform-specific bootstrap."""
     _assert_text_contract(
         _action("test-platform-wheel"),
         required=(
@@ -1006,7 +1006,7 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     dependencies = [
         step
         for step in _step_bodies(test_action)
-        if "name: Install the wheel and full-suite dependencies" in step
+        if "name: Install the wheel and functional-suite dependencies" in step
     ]
 
     assert build_action.count("python-version: 3.11.9") == 1
@@ -1087,6 +1087,7 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
     sanitizer = _action("platform-sanitizer")
 
     assert windows["environment"] == {
+        "CMAKE_BUILD_PARALLEL_LEVEL": "1",
         "CMAKE_GENERATOR": "Visual Studio 17 2022",
         "CMAKE_GENERATOR_INSTANCE": ("C:/Program Files/Microsoft Visual Studio/2022/Enterprise"),
         "CMAKE_GENERATOR_PLATFORM": "x64",
@@ -1516,7 +1517,9 @@ def test_runner_network_and_toolchain_inputs_are_bounded_and_exact() -> None:
     assert ci.count("meta/ci/requirements/platform-tests.txt") == 1
     for action in (build, native, sanitizer, tsan, quality):
         assert "python -m pip install -U" not in action
-    assert "CIBW_CONFIG_SETTINGS: cmake.define.SCHEMA_SANITIZER_ENABLE_PCH=ON" in build
+    assert "CIBW_CONFIG_SETTINGS: >-" in build
+    assert "build.verbose=false" in build
+    assert "cmake.define.SCHEMA_SANITIZER_ENABLE_PCH=ON" in build
     assert native.count("SCHEMA_SANITIZER_ENABLE_PCH=OFF") == 1
     assert sanitizer.count("SCHEMA_SANITIZER_ENABLE_PCH=OFF") == 3
     assert tsan.count("SCHEMA_SANITIZER_ENABLE_PCH=OFF") == 1
@@ -1669,17 +1672,18 @@ def test_platform_smokes_are_owned_by_their_related_parallel_shards() -> None:
         assert f"if: inputs.shard == '{shard}'" in step
 
 
-def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
-    """Every platform runs the same stable partition of every test directory."""
+def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive() -> None:
+    """Source contracts run once while functional domains stay identical per platform."""
     ci = _workflow("ci.yml")
     test_action = _action("test-platform-wheel")
+    quality_action = _action("quality-validation")
     all_test_domains = {
         path.name
         for path in (ROOT / "tests").iterdir()
         if path.is_dir() and not path.name.startswith("_")
     }
     shard_domains = {
-        "concurrency": {"concurrency", "quality"},
+        "concurrency": {"concurrency"},
         "memory-parquet": {
             "memory",
             "parquet",
@@ -1695,6 +1699,11 @@ def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
     }
     functional = next(
         step for step in _step_bodies(test_action) if "name: Run functional test shard" in step
+    )
+    quality_contracts = next(
+        step
+        for step in _step_bodies(quality_action)
+        if "name: Run source quality contracts" in step
     )
 
     actual_shard_domains = {}
@@ -1716,15 +1725,24 @@ def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
     assert actual_shard_domains == shard_domains
     assert functional.count("test_paths=(") == len(shard_domains)
     assert set(re.findall(r"^              tests/([a-z0-9_-]+)$", functional, re.MULTILINE)) == (
-        all_test_domains
+        all_test_domains - {"quality"}
     )
+    cross_toolchain_quality_test = (
+        "tests/quality/test_fuzz_regression_runner.py::"
+        "test_standalone_mutation_stream_matches_its_cross_library_golden"
+    )
+    assert quality_contracts.count("tests/quality") == 1
+    assert cross_toolchain_quality_test in functional
+    assert functional.count(cross_toolchain_quality_test) == 1
+    assert "if [[ \"${TEST_SHARD}\" == 'concurrency' ]]" in functional
+    assert "test_paths+=(" in functional
 
     for shard, domains in shard_domains.items():
         other_domains = set().union(
             *(candidate for name, candidate in shard_domains.items() if name != shard)
         )
         assert domains.isdisjoint(other_domains)
-    assert set().union(*shard_domains.values()) == all_test_domains
+    assert set().union(*shard_domains.values(), {"quality"}) == all_test_domains
     for domains in shard_domains.values():
         for domain in domains:
             assert functional.count(f"tests/{domain}") == 1
@@ -1993,14 +2011,20 @@ def test_runner_environment_helper_writes_only_the_owned_schema(
     assert "environment" not in output.read_text(encoding="utf-8").lower()
 
 
-def test_build_parallelism_is_positive_bounded_and_runner_aware(
+def test_build_parallelism_is_positive_bounded_and_generator_aware(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sanitizer builds use CPU, affinity, and quota bounds without fixed widths."""
+    """Wheel generators own fan-out while diagnostic builds keep CPU bounds."""
     from meta.ci.quality import record_runner_environment
 
     monkeypatch.setattr(record_runner_environment.os, "cpu_count", lambda: 12)
-    monkeypatch.setattr(record_runner_environment.os, "sched_getaffinity", lambda _pid: {0, 1})
+    monkeypatch.delattr(record_runner_environment.os, "sched_getaffinity", raising=False)
+    monkeypatch.setattr(
+        record_runner_environment.os,
+        "sched_getaffinity",
+        lambda _pid: {0, 1},
+        raising=False,
+    )
     monkeypatch.setattr(
         record_runner_environment,
         "_optional_text",
@@ -2014,21 +2038,24 @@ def test_build_parallelism_is_positive_bounded_and_runner_aware(
     with pytest.raises(ValueError, match="must be positive"):
         record_runner_environment.bounded_build_parallelism(0)
 
-    for action_name in (
-        "build-platform-wheel",
-        "platform-sanitizer",
-        "thread-sanitizer",
-    ):
-        action = _action(action_name)
-        assert "bounded_build_parallelism" in action
-        assert "CMAKE_BUILD_PARALLEL_LEVEL" in action
-        assert '[[ "${CMAKE_BUILD_PARALLEL_LEVEL}" =~ ^[1-4]$ ]]' in action
-        assert "--parallel 4" not in action
     build = _action("build-platform-wheel")
     platform_sanitizer = _action("platform-sanitizer")
-    assert "CMAKE_BUILD_PARALLEL_LEVEL SOURCE_DATE_EPOCH" in build
-    assert "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES=1" in build
-    assert "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES=1" in platform_sanitizer
+    thread_sanitizer = _action("thread-sanitizer")
+
+    assert "bounded_build_parallelism" not in build
+    assert build.count("unset CMAKE_BUILD_PARALLEL_LEVEL") == 1
+    assert "CIBW_ENVIRONMENT_WINDOWS" not in build
+    assert "CIBW_CONFIG_SETTINGS_WINDOWS" not in build
+    assert "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES:STRING=auto" in build
+    for action in (platform_sanitizer, thread_sanitizer):
+        assert "bounded_build_parallelism" in action
+        assert "CMAKE_BUILD_PARALLEL_LEVEL" in action
+        assert "--parallel 4" not in action
+        assert '[[ "${CMAKE_BUILD_PARALLEL_LEVEL}" =~ ^[1-4]$ ]]' in action
+    assert "if [[ \"${RUNNER_SYSTEM}\" == 'Windows' ]]" in platform_sanitizer
+    assert "CMAKE_BUILD_PARALLEL_LEVEL=1" in platform_sanitizer
+    assert "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES=1" not in (build + platform_sanitizer)
+    assert "build.verbose=false" in build
 
 
 @pytest.mark.parametrize(
@@ -2061,10 +2088,12 @@ def test_build_parallelism_has_a_one_worker_fallback(
         raise OSError("affinity unavailable")
 
     monkeypatch.setattr(record_runner_environment.os, "cpu_count", lambda: None)
+    monkeypatch.delattr(record_runner_environment.os, "sched_getaffinity", raising=False)
     monkeypatch.setattr(
         record_runner_environment.os,
         "sched_getaffinity",
         unavailable_affinity,
+        raising=False,
     )
     monkeypatch.setattr(record_runner_environment, "_optional_text", lambda _path: None)
 

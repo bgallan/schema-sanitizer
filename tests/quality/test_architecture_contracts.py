@@ -299,17 +299,22 @@ def test_compile_database_requires_the_expected_regular_filename(tmp_path: Path)
         helper._validated_compile_database(unexpected, build_root)
 
 
-def test_msvc_translation_units_compile_in_four_bounded_processes() -> None:
-    """Release and diagnostic targets parallelize MSVC without changing LTO."""
+def test_msvc_translation_units_use_adaptive_parallel_compilation() -> None:
+    """MSVC adapts by default while accepting an explicit positive worker bound."""
     project = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     options = (ROOT / "cmake/SchemaSanitizerTargetOptions.cmake").read_text(encoding="utf-8")
     helper = options.split("function(schema_sanitizer_enable_msvc_parallel_compile target)", 1)[
         1
     ].split("endfunction()", 1)[0]
-    assert re.search(r'set\(SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES\s+"4"\s+CACHE STRING', project)
+    assert re.search(
+        r'set\(SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES\s+"auto"\s+CACHE STRING', project
+    )
+    assert 'STREQUAL "auto"' in project
     assert 'MATCHES "^[1-9][0-9]*$"' in project
     assert "if(NOT MSVC)" in helper
-    assert 'PRIVATE "/MP${SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES}"' in helper
+    assert 'set(_schema_sanitizer_msvc_parallel_flag "/MP")' in helper
+    assert "string(APPEND _schema_sanitizer_msvc_parallel_flag" in helper
+    assert 'PRIVATE "${_schema_sanitizer_msvc_parallel_flag}"' in helper
     main_targets = project.split("foreach(_schema_sanitizer_target sanitize_core", 1)[1].split(
         "endforeach()", 1
     )[0]

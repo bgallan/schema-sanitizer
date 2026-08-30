@@ -80,7 +80,7 @@ runs:
       with:
         name: dist-wheels-${{ inputs.platform-name }}
         path: wheelhouse
-    - name: Install the wheel and full-suite dependencies
+    - name: Install the wheel and functional-suite dependencies
       env:
         PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/platform-tests.txt
@@ -215,7 +215,6 @@ runs:
           concurrency)
             test_paths=(
               tests/concurrency
-              tests/quality
             )
             ;;
           memory-parquet)
@@ -239,6 +238,11 @@ runs:
             exit 2
             ;;
         esac
+        if [[ "${TEST_SHARD}" == 'concurrency' ]]; then
+          test_paths+=(
+            tests/quality/test_fuzz_regression_runner.py::test_standalone_mutation_stream_matches_its_cross_library_golden
+          )
+        fi
         pytest -q -o pythonpath=. \
           -m 'not native_stress' \
           --durations=50 \

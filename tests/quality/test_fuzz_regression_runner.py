@@ -47,8 +47,7 @@ def _runner_tree(module: ModuleType, root: Path) -> tuple[Path, Path]:
 def _compile_recording_standalone_runner(tmp_path: Path) -> Path:
     """Build the standalone driver with a target that records every input."""
     compiler = shutil.which("c++") or shutil.which("clang++") or shutil.which("g++")
-    if compiler is None:
-        pytest.skip("a C++ compiler is required for the standalone mutation golden test")
+    assert compiler is not None, "a C++ compiler is required for the mutation golden test"
     target_source = tmp_path / "record_fuzz_inputs.cc"
     target_source.write_text(
         """\

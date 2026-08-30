@@ -222,7 +222,6 @@ runs:
         -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
         -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
         -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
-        -DSCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES=1
     - name: Configure macOS ASan/UBSan
       if: runner.os == 'macOS'
       env:
@@ -242,12 +241,19 @@ runs:
         -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
         -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
     - name: Build native concurrency and fuzz targets
+      env:
+        RUNNER_SYSTEM: ${{ runner.os }}
       shell: bash
       run: |
         set -euo pipefail
-        CMAKE_BUILD_PARALLEL_LEVEL="$(
-          python -c 'from meta.ci.quality.record_runner_environment import bounded_build_parallelism; print(bounded_build_parallelism())'
-        )"
+        if [[ "${RUNNER_SYSTEM}" == 'Windows' ]]; then
+          # Compiler-level /MP owns Windows fan-out; MSBuild stays serial.
+          CMAKE_BUILD_PARALLEL_LEVEL=1
+        else
+          CMAKE_BUILD_PARALLEL_LEVEL="$(
+            python -c 'from meta.ci.quality.record_runner_environment import bounded_build_parallelism; print(bounded_build_parallelism())'
+          )"
+        fi
         [[ "${CMAKE_BUILD_PARALLEL_LEVEL}" =~ ^[1-4]$ ]]
         export CMAKE_BUILD_PARALLEL_LEVEL
         cmake --build .work/build/platform-sanitizer \

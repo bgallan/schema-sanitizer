@@ -59,17 +59,21 @@ function(schema_sanitizer_enable_release_pch target profile)
   target_precompile_headers(${target} PRIVATE ${_schema_sanitizer_pch_entries})
 endfunction()
 
-# Compiles the translation units within an MSVC target concurrently. Visual
-# Studio generators otherwise invoke cl.exe once with every source but leave its
-# multi-process mode disabled; /MPN preserves the target graph and LTO while
-# distributing those independent compilations across N processes.
+# Compiles the translation units within an MSVC target concurrently. The auto
+# mode delegates the worker count to cl.exe; numeric overrides remain available
+# for callers that own a stricter resource envelope.
 function(schema_sanitizer_enable_msvc_parallel_compile target)
   if(NOT MSVC)
     return()
   endif()
 
-  target_compile_options(
-    ${target} PRIVATE "/MP${SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES}")
+  set(_schema_sanitizer_msvc_parallel_flag "/MP")
+  if(NOT SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES STREQUAL "auto")
+    string(APPEND _schema_sanitizer_msvc_parallel_flag
+           "${SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES}")
+  endif()
+  target_compile_options(${target}
+                         PRIVATE "${_schema_sanitizer_msvc_parallel_flag}")
 endfunction()
 
 # Enables compiler warnings and optional Werror for a target.
