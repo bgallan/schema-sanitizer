@@ -81,8 +81,8 @@ _TEST_PLATFORM_JOBS = tuple(
 )
 _PLATFORM_LOCK_NAMES = frozenset(
     """
-    aiohappyeyeballs aiohttp aiosignal attrs duckdb frozenlist idna iniconfig multidict numpy
-    packaging pandas pip pluggy polars polars-runtime-32 propcache pyarrow pygments pytest
+    aiohappyeyeballs aiohttp aiosignal attrs colorama duckdb frozenlist idna iniconfig multidict
+    numpy packaging pandas pip pluggy polars polars-runtime-32 propcache pyarrow pygments pytest
     python-dateutil six typing-extensions tzdata yarl
     """.split()
 )
@@ -1036,6 +1036,13 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     assert cibuildwheel["build-verbosity"] == 0
     assert _exact_lock_names(test_requirements_path) == _PLATFORM_LOCK_NAMES
     assert len(test_requirements) == len(_PLATFORM_LOCK_NAMES)
+    parsed_requirements = {
+        canonicalize_name(requirement.name): requirement
+        for requirement in map(Requirement, test_requirements)
+    }
+    assert (
+        str(parsed_requirements[canonicalize_name("colorama")].marker) == 'sys_platform == "win32"'
+    )
     assert all(
         requirement not in dependencies[0]
         for requirement in test_requirements
@@ -1485,11 +1492,14 @@ def test_runner_network_and_toolchain_inputs_are_bounded_and_exact() -> None:
     assert "CACHE_RESTORE_OUTCOME" in cache
     assert "shutil.rmtree(cache_directory)" in cache
     for component in (
-        "${{ runner.os }}",
-        "${{ runner.arch }}",
-        "${{ inputs.python-version }}",
-        "${{ inputs.owner }}",
-        "${{ steps.pip-cache-identity.outputs.dependency-digest }}",
+        "CACHE_RUNNER_SYSTEM: ${{ runner.os }}",
+        "CACHE_RUNNER_ARCHITECTURE: ${{ runner.arch }}",
+        "CACHE_PYTHON_VERSION: ${{ inputs.python-version }}",
+        "CACHE_OWNER: ${{ inputs.owner }}",
+        "dependency_digest = digest.hexdigest()",
+        'f"pip-v1-{runner_system}-{runner_architecture}-python-"',
+        'f"{python_version}-{owner}-{dependency_digest}"',
+        "key: ${{ steps.pip-cache-identity.outputs.key }}",
     ):
         assert component in cache
     for owner in (
@@ -1735,7 +1745,9 @@ def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
         assert "if: ${{ !cancelled() }}" in tests
 
 
-def test_linux_sanitizer_reuses_one_certified_cmake_graph() -> None:
+def test_linux_sanitizer_reuses_one_certified_cmake_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The ASan extension, native executor, and fuzzers share one exact build tree."""
     sanitizer = _action("platform-sanitizer")
     install = next(
@@ -1776,11 +1788,58 @@ def test_linux_sanitizer_reuses_one_certified_cmake_graph() -> None:
         < sanitizer.index("Certify the reused Linux sanitizer build tree")
         < sanitizer.index("Build native concurrency and fuzz targets")
     )
-    assert "CMAKE_C_COMPILER:(FILEPATH=/usr/bin/clang-18|UNINITIALIZED=clang-18)" in certification
-    assert (
-        "CMAKE_CXX_COMPILER:(FILEPATH=/usr/bin/clang[+][+]-18|UNINITIALIZED=clang[+][+]-18)"
-        in certification
+    assert '("CMAKE_C_COMPILER", "clang-18")' in certification
+    assert '("CMAKE_CXX_COMPILER", "clang++-18")' in certification
+    assert "shutil.which(configured_value)" in certification
+    assert "configured_path.resolve(strict=True)" in certification
+    assert "expected_path = Path(expected_location).resolve(strict=True)" in certification
+    assert "os.access(configured_path, os.X_OK)" in certification
+    assert "/usr/bin/clang-18" not in certification
+
+    invocation = "python - \"${cache}\" <<'PY'"
+    certificate_source = textwrap.dedent(
+        certification.split(f"{invocation}\n", 1)[1].split("\n        PY", 1)[0]
     )
+    certificate = compile(certificate_source, "linux-sanitizer-cache-certificate", "exec")
+    compiler_directory = tmp_path / "compilers"
+    compiler_directory.mkdir()
+    c_compiler = compiler_directory / "clang-18"
+    cxx_compiler = compiler_directory / "clang++-18"
+    wrong_compiler = compiler_directory / "wrong-clang"
+    executable_mode = stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR
+    for executable in (c_compiler, cxx_compiler, wrong_compiler):
+        executable.write_bytes(b"")
+        executable.chmod(executable_mode)
+    locations = {
+        "clang-18": str(c_compiler),
+        "clang++-18": str(cxx_compiler),
+    }
+    monkeypatch.setattr(shutil, "which", locations.get)
+    cache_path = tmp_path / "CMakeCache.txt"
+
+    def execute_certificate(
+        cache_type: str,
+        configured_c: str | Path = c_compiler,
+        configured_cxx: str | Path = cxx_compiler,
+    ) -> None:
+        """Run the embedded certificate against one synthetic CMake cache."""
+        cache_path.write_text(
+            "\n".join(
+                (
+                    f"CMAKE_C_COMPILER:{cache_type}={configured_c}",
+                    f"CMAKE_CXX_COMPILER:{cache_type}={configured_cxx}",
+                )
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(sys, "argv", ["certificate", str(cache_path)])
+        exec(certificate, {"__name__": "__main__"})
+
+    for cache_type in ("STRING", "FILEPATH", "UNINITIALIZED"):
+        execute_certificate(cache_type)
+    execute_certificate("UNINITIALIZED", "clang-18", "clang++-18")
+    with pytest.raises(SystemExit, match="CMAKE_C_COMPILER mismatch"):
+        execute_certificate("STRING", wrong_compiler)
 
 
 def test_concurrency_shards_fail_closed_at_explicit_platform_cpu_minima() -> None:
@@ -1878,6 +1937,7 @@ def test_platform_evidence_records_comparable_cpu_limits_without_job_summary() -
     assert "if:" not in evidence
     assert "os.cpu_count()" in helper
     assert "os.sched_getaffinity(0)" in helper
+    assert '"effective_count": _effective_cpu_capacity(' in helper
     assert '"installed_distributions"' in helper
     for distribution in (
         "aiohttp",
@@ -1921,15 +1981,95 @@ def test_runner_environment_helper_writes_only_the_owned_schema(
         "platform",
         "cpu",
     }
-    assert evidence["schema_version"] == 1
+    assert evidence["schema_version"] == 2
     assert set(evidence["cpu"]) == {
         "logical_count",
         "affinity",
         "affinity_count",
+        "effective_count",
         "linux_cgroup_v2_cpu_max",
         "linux_cgroup_v2_cpu_stat",
     }
     assert "environment" not in output.read_text(encoding="utf-8").lower()
+
+
+def test_build_parallelism_is_positive_bounded_and_runner_aware(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sanitizer builds use CPU, affinity, and quota bounds without fixed widths."""
+    from meta.ci.quality import record_runner_environment
+
+    monkeypatch.setattr(record_runner_environment.os, "cpu_count", lambda: 12)
+    monkeypatch.setattr(record_runner_environment.os, "sched_getaffinity", lambda _pid: {0, 1})
+    monkeypatch.setattr(
+        record_runner_environment,
+        "_optional_text",
+        lambda _path: "150000 100000",
+    )
+
+    assert record_runner_environment.effective_cpu_capacity() == 2
+    assert record_runner_environment.bounded_build_parallelism() == 2
+    assert record_runner_environment.bounded_build_parallelism(1) == 1
+    assert record_runner_environment.bounded_build_parallelism(99) == 2
+    with pytest.raises(ValueError, match="must be positive"):
+        record_runner_environment.bounded_build_parallelism(0)
+
+    for action_name in (
+        "build-platform-wheel",
+        "platform-sanitizer",
+        "thread-sanitizer",
+    ):
+        action = _action(action_name)
+        assert "bounded_build_parallelism" in action
+        assert "CMAKE_BUILD_PARALLEL_LEVEL" in action
+        assert '[[ "${CMAKE_BUILD_PARALLEL_LEVEL}" =~ ^[1-4]$ ]]' in action
+        assert "--parallel 4" not in action
+    build = _action("build-platform-wheel")
+    platform_sanitizer = _action("platform-sanitizer")
+    assert "CMAKE_BUILD_PARALLEL_LEVEL SOURCE_DATE_EPOCH" in build
+    assert "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES=1" in build
+    assert "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES=1" in platform_sanitizer
+
+
+@pytest.mark.parametrize(
+    ("raw_quota", "expected"),
+    (
+        ("150000 100000", 2),
+        ("100000 100000", 1),
+        ("max 100000", None),
+        ("invalid", None),
+        ("0 100000", None),
+    ),
+)
+def test_build_parallelism_parses_linux_quota_without_fractional_workers(
+    raw_quota: str, expected: int | None
+) -> None:
+    """Cgroup quotas round up safely and malformed or unlimited values opt out."""
+    from meta.ci.quality import record_runner_environment
+
+    assert record_runner_environment._linux_cpu_quota_capacity(raw_quota) == expected
+
+
+def test_build_parallelism_has_a_one_worker_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing hardware counts and unavailable affinity still yield one worker."""
+    from meta.ci.quality import record_runner_environment
+
+    def unavailable_affinity(_pid: int) -> set[int]:
+        """Simulate a platform affinity probe that is present but unavailable."""
+        raise OSError("affinity unavailable")
+
+    monkeypatch.setattr(record_runner_environment.os, "cpu_count", lambda: None)
+    monkeypatch.setattr(
+        record_runner_environment.os,
+        "sched_getaffinity",
+        unavailable_affinity,
+    )
+    monkeypatch.setattr(record_runner_environment, "_optional_text", lambda _path: None)
+
+    assert record_runner_environment.effective_cpu_capacity() == 1
+    assert record_runner_environment.bounded_build_parallelism() == 1
 
 
 def test_platform_suite_reports_test_timings_without_job_summary() -> None:
@@ -2469,6 +2609,7 @@ def test_release_artifact_is_complete_exact_and_self_describing() -> None:
     assert "--dest .work/virtualenv-seed pip==26.2.1" in source_distribution
     pip_seed_sha256 = "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"  # pragma: allowlist secret
     assert pip_seed_sha256 in source_distribution
+    assert f'"{pip_seed_sha256}"  # pragma: allowlist secret' in downstream
     assert 'expected_name = "pip-26.2.1-py3-none-any.whl"' in source_distribution
     assert "len(entries) != 1" in source_distribution
     seed_invocation = "python - \"${PIP_SEED_SHA256}\" <<'PY'"

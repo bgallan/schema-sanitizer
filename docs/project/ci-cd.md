@@ -266,11 +266,15 @@ benchmark timing is retained only as diagnostic evidence.
 
 Each test shard also records a runner manifest with the exact Python and
 installed package versions, operating-system and architecture identifiers,
-logical CPU count, and process affinity where supported. Linux adds its cgroup
-CPU quota and throttling counters. Hardware supplied by hosted runners is not
-identical across architectures, so this manifest distinguishes an environment
-difference from a product regression while the software and test workload stay
-fixed.
+logical CPU count, process affinity where supported, and the effective CPU
+capacity after affinity and cgroup-v2 quota limits. Linux also records its raw
+cgroup CPU quota and throttling counters. Native CI builds cap parallel
+compilation at four tasks and reduce that width to the effective runner
+capacity; Linux wheel builds propagate the same exact limit into their
+cibuildwheel container. Windows lets build-level parallelism own that ceiling
+instead of multiplying it by per-target MSVC processes. Hardware supplied by hosted runners is not identical across
+architectures, so this manifest distinguishes an environment difference from a
+product regression while the software and test workload stay fixed.
 
 The concurrency shard fails before its workload when detected native CPU
 capacity is below the matrix contract: four credits on Linux, Windows, and

@@ -37,6 +37,58 @@ def _optional_key_values(path: str) -> dict[str, int] | None:
     return values
 
 
+def _linux_cpu_quota_capacity(cpu_max: str | None) -> int | None:
+    """Convert a cgroup-v2 CPU quota into a positive rounded-up capacity."""
+    if cpu_max is None:
+        return None
+    fields = cpu_max.split()
+    if len(fields) != 2 or fields[0] == "max":
+        return None
+    try:
+        quota, period = map(int, fields)
+    except ValueError:
+        return None
+    if quota <= 0 or period <= 0:
+        return None
+    return max(1, (quota + period - 1) // period)
+
+
+def _effective_cpu_capacity(
+    logical_count: int | None,
+    affinity_count: int | None,
+    linux_cpu_max: str | None,
+) -> int:
+    """Combine one coherent CPU snapshot into a positive capacity."""
+    candidates = [max(1, logical_count or 1)]
+    if affinity_count is not None:
+        candidates.append(max(1, affinity_count))
+    quota_capacity = _linux_cpu_quota_capacity(linux_cpu_max)
+    if quota_capacity is not None:
+        candidates.append(quota_capacity)
+    return min(candidates)
+
+
+def effective_cpu_capacity() -> int:
+    """Return a positive CPU bound from hardware, affinity, and cgroup quota."""
+    affinity_count: int | None = None
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            affinity_count = len(os.sched_getaffinity(0))
+        except OSError:
+            pass
+    linux_cpu_max = (
+        _optional_text("/sys/fs/cgroup/cpu.max") if sys.platform.startswith("linux") else None
+    )
+    return _effective_cpu_capacity(os.cpu_count(), affinity_count, linux_cpu_max)
+
+
+def bounded_build_parallelism(limit: int = 4) -> int:
+    """Cap build parallelism while adapting to the runner's effective CPUs."""
+    if limit < 1:
+        raise ValueError("build parallelism limit must be positive")
+    return min(limit, effective_cpu_capacity())
+
+
 def runner_environment() -> dict[str, object]:
     """Build evidence without copying environment variables into artifacts."""
     affinity: list[int] | None = None
@@ -46,8 +98,11 @@ def runner_environment() -> dict[str, object]:
         except OSError:
             pass
     is_linux = sys.platform.startswith("linux")
+    logical_count = os.cpu_count()
+    affinity_count = len(affinity) if affinity is not None else None
+    linux_cpu_max = _optional_text("/sys/fs/cgroup/cpu.max") if is_linux else None
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "python": {
             "implementation": platform.python_implementation(),
             "version": platform.python_version(),
@@ -70,12 +125,15 @@ def runner_environment() -> dict[str, object]:
             "machine": platform.machine(),
         },
         "cpu": {
-            "logical_count": os.cpu_count(),
+            "logical_count": logical_count,
             "affinity": affinity,
-            "affinity_count": len(affinity) if affinity is not None else None,
-            "linux_cgroup_v2_cpu_max": (
-                _optional_text("/sys/fs/cgroup/cpu.max") if is_linux else None
+            "affinity_count": affinity_count,
+            "effective_count": _effective_cpu_capacity(
+                logical_count,
+                affinity_count,
+                linux_cpu_max,
             ),
+            "linux_cgroup_v2_cpu_max": linux_cpu_max,
             "linux_cgroup_v2_cpu_stat": (
                 _optional_key_values("/sys/fs/cgroup/cpu.stat") if is_linux else None
             ),

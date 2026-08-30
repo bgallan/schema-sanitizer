@@ -125,6 +125,8 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         "CACHE_OWNER",
         "CACHE_PYTHON_VERSION",
         "CACHE_RESTORE_OUTCOME",
+        "CACHE_RUNNER_ARCHITECTURE",
+        "CACHE_RUNNER_SYSTEM",
         "GITHUB_ENV",
         "GITHUB_OUTPUT",
         "GITHUB_WORKSPACE",

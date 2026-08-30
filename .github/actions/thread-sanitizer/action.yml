@@ -42,7 +42,12 @@ runs:
           -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled \
           -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
           -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
-        cmake --build .work/build/tsan --parallel 4
+        CMAKE_BUILD_PARALLEL_LEVEL="$(
+          python -c 'from meta.ci.quality.record_runner_environment import bounded_build_parallelism; print(bounded_build_parallelism())'
+        )"
+        [[ "${CMAKE_BUILD_PARALLEL_LEVEL}" =~ ^[1-4]$ ]]
+        export CMAKE_BUILD_PARALLEL_LEVEL
+        cmake --build .work/build/tsan
     - name: Run TSan fuzz regressions and mutation campaigns
       shell: bash
       run: >-

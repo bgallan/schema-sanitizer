@@ -51,8 +51,8 @@ EXTRA_IMPORTS = {
 _ISOLATED_DIRECTORY = "downstream"
 _PIP_VERSION = "26.2.1"
 _PIP_WHEEL_NAME = f"pip-{_PIP_VERSION}-py3-none-any.whl"
-_PIP_WHEEL_SHA256 = (  # pragma: allowlist secret
-    "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"
+_PIP_WHEEL_SHA256 = (
+    "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"  # pragma: allowlist secret
 )
 
 

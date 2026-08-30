@@ -24,6 +24,8 @@ runs:
         CACHE_DEPENDENCY_PATHS: ${{ inputs.dependency-paths }}
         CACHE_OWNER: ${{ inputs.owner }}
         CACHE_PYTHON_VERSION: ${{ inputs.python-version }}
+        CACHE_RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        CACHE_RUNNER_SYSTEM: ${{ runner.os }}
       shell: bash
       run: |-
         set -euo pipefail
@@ -36,10 +38,18 @@ runs:
         from pathlib import Path
         owner = os.environ["CACHE_OWNER"]
         python_version = os.environ["CACHE_PYTHON_VERSION"]
+        runner_architecture = os.environ["CACHE_RUNNER_ARCHITECTURE"]
+        runner_system = os.environ["CACHE_RUNNER_SYSTEM"]
         if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", owner) is None:
             raise SystemExit(f"invalid pip-cache owner: {owner!r}")
         if re.fullmatch(r"3[.][0-9]+[.][0-9]+", python_version) is None:
             raise SystemExit(f"pip-cache Python version must be exact: {python_version!r}")
+        for label, value in (
+            ("runner architecture", runner_architecture),
+            ("runner system", runner_system),
+        ):
+            if re.fullmatch(r"[A-Za-z0-9]+", value) is None:
+                raise SystemExit(f"invalid pip-cache {label}: {value!r}")
         running_version = ".".join(str(part) for part in sys.version_info[:3])
         if running_version != python_version:
             raise SystemExit(
@@ -76,10 +86,16 @@ runs:
             cache_directory.unlink()
         elif cache_directory.exists():
             shutil.rmtree(cache_directory)
+        dependency_digest = digest.hexdigest()
+        cache_key = (
+            f"pip-v1-{runner_system}-{runner_architecture}-python-"
+            f"{python_version}-{owner}-{dependency_digest}"
+        )
         output = Path(os.environ["GITHUB_OUTPUT"])
         with output.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(f"dependency-digest={digest.hexdigest()}\n")
+            stream.write(f"dependency-digest={dependency_digest}\n")
             stream.write(f"directory={cache_directory}\n")
+            stream.write(f"key={cache_key}\n")
         PY
     - name: Restore the optional exact pip cache
       id: restore-pip-cache
@@ -87,10 +103,7 @@ runs:
       uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
       with:
         path: ${{ steps.pip-cache-identity.outputs.directory }}
-        key: >-
-          pip-v1-${{ runner.os }}-${{ runner.arch }}-python-${{ inputs.python-version
-          }}-${{ inputs.owner }}-${{ steps.pip-cache-identity.outputs.dependency-digest
-          }}
+        key: ${{ steps.pip-cache-identity.outputs.key }}
     - name: Validate and select the workload-owned pip cache
       env:
         CACHE_DIRECTORY: ${{ steps.pip-cache-identity.outputs.directory }}

@@ -75,21 +75,27 @@ runs:
       env:
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
-      run: >-
-        python -m pip install -v --no-build-isolation
-        --config-settings=cmake.define.CMAKE_C_COMPILER=clang-18
-        --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++-18
-        --config-settings=build-dir=.work/build/platform-sanitizer
-        --config-settings=cmake.build-type=RelWithDebInfo
-        --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF
-        --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_PCH=OFF
-        --config-settings=cmake.define.SCHEMA_SANITIZER_SANITIZER=asan-ubsan
-        --config-settings=cmake.define.SCHEMA_SANITIZER_BUILD_FUZZERS=ON
-        --config-settings=cmake.define.SCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer
-        --config-settings=cmake.define.SCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
-        --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON
-        --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_WERROR=ON
-        .
+      run: |
+        set -euo pipefail
+        CMAKE_BUILD_PARALLEL_LEVEL="$(
+          python -c 'from meta.ci.quality.record_runner_environment import bounded_build_parallelism; print(bounded_build_parallelism())'
+        )"
+        [[ "${CMAKE_BUILD_PARALLEL_LEVEL}" =~ ^[1-4]$ ]]
+        export CMAKE_BUILD_PARALLEL_LEVEL
+        python -m pip install -v --no-build-isolation \
+          --config-settings=cmake.define.CMAKE_C_COMPILER=clang-18 \
+          --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++-18 \
+          --config-settings=build-dir=.work/build/platform-sanitizer \
+          --config-settings=cmake.build-type=RelWithDebInfo \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_PCH=OFF \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_SANITIZER=asan-ubsan \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_BUILD_FUZZERS=ON \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_ZLIB_PROVIDER=bundled \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_WERROR=ON \
+          .
     - name: Certify the reused Linux sanitizer build tree
       if: inputs.mode == 'linux-full'
       shell: bash
@@ -119,10 +125,48 @@ runs:
             exit 2
           }
         done
-        grep -Eq '^CMAKE_C_COMPILER:(FILEPATH=/usr/bin/clang-18|UNINITIALIZED=clang-18)$' \
-          "${cache}"
-        grep -Eq '^CMAKE_CXX_COMPILER:(FILEPATH=/usr/bin/clang[+][+]-18|UNINITIALIZED=clang[+][+]-18)$' \
-          "${cache}"
+        python - "${cache}" <<'PY'
+        import os
+        import shutil
+        import sys
+        from pathlib import Path
+        cache = Path(sys.argv[1])
+        values = {}
+        for raw_line in cache.read_text(encoding="utf-8").splitlines():
+            key_and_type, separator, value = raw_line.partition("=")
+            key, type_separator, _cache_type = key_and_type.partition(":")
+            if separator and type_separator:
+                values[key] = value
+        for variable, executable_name in (
+            ("CMAKE_C_COMPILER", "clang-18"),
+            ("CMAKE_CXX_COMPILER", "clang++-18"),
+        ):
+            configured_value = values.get(variable)
+            if not configured_value:
+                raise SystemExit(f"Linux sanitizer cache omits {variable}")
+            configured_path = Path(configured_value)
+            if not configured_path.is_absolute():
+                configured_location = shutil.which(configured_value)
+                if configured_location is None:
+                    raise SystemExit(
+                        f"Linux sanitizer compiler is not executable: {configured_value}"
+                    )
+                configured_path = Path(configured_location)
+            expected_location = shutil.which(executable_name)
+            if expected_location is None:
+                raise SystemExit(f"Pinned compiler is unavailable: {executable_name}")
+            try:
+                configured_path = configured_path.resolve(strict=True)
+                expected_path = Path(expected_location).resolve(strict=True)
+            except OSError as error:
+                raise SystemExit(f"Linux sanitizer compiler path is invalid: {error}") from error
+            if configured_path != expected_path or not os.access(configured_path, os.X_OK):
+                raise SystemExit(
+                    f"Linux sanitizer {variable} mismatch: "
+                    f"configured={configured_path}, expected={expected_path}"
+                )
+            print(f"{variable}={configured_path}")
+        PY
     - name: Build the Linux sanitizer-first CPython launcher
       if: inputs.mode == 'linux-full'
       shell: bash
@@ -178,6 +222,7 @@ runs:
         -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
         -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
         -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+        -DSCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES=1
     - name: Configure macOS ASan/UBSan
       if: runner.os == 'macOS'
       env:
@@ -198,13 +243,18 @@ runs:
         -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
     - name: Build native concurrency and fuzz targets
       shell: bash
-      run: >-
-        cmake --build .work/build/platform-sanitizer
-        --config RelWithDebInfo
-        --target schema_sanitizer_sanitized_ordered_executor
-        schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv
-        schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
-        --parallel 4
+      run: |
+        set -euo pipefail
+        CMAKE_BUILD_PARALLEL_LEVEL="$(
+          python -c 'from meta.ci.quality.record_runner_environment import bounded_build_parallelism; print(bounded_build_parallelism())'
+        )"
+        [[ "${CMAKE_BUILD_PARALLEL_LEVEL}" =~ ^[1-4]$ ]]
+        export CMAKE_BUILD_PARALLEL_LEVEL
+        cmake --build .work/build/platform-sanitizer \
+          --config RelWithDebInfo \
+          --target schema_sanitizer_sanitized_ordered_executor \
+          schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv \
+          schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
     - name: Require capacity for complete native concurrency coverage
       if: inputs.mode == 'native' && runner.os != 'Windows'
       shell: bash
