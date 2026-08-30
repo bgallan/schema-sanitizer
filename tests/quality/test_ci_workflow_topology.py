@@ -1690,7 +1690,7 @@ def test_native_stress_and_functional_suites_form_an_explicit_partition() -> Non
     assert "tests/concurrency/test_ordered_executor_completion_probe.py" in stress
     assert "-m 'not native_stress'" in functional
     assert "--ignore" not in stress
-    assert functional.count("--ignore=") == 2
+    assert functional.count("--ignore=") == 1
     assert "pytest-native-stress-${PLATFORM_ARTIFACT}.xml" in stress
     assert "pytest-native-stress-durations-${PLATFORM_ARTIFACT}.log" in stress
     assert "pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml" in functional
@@ -1796,8 +1796,8 @@ def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive()
         "tests/quality/test_fuzz_regression_runner.py::"
         "test_standalone_mutation_stream_matches_its_cross_library_golden"
     )
+    release_gate = "tests/concurrency/test_concurrency_route_release_gate.py"
     relocated_concurrency_tests = (
-        "tests/concurrency/test_concurrency_route_release_gate.py",
         "tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py",
     )
     assert quality_contracts.count("tests/quality") == 1
@@ -1805,6 +1805,7 @@ def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive()
     assert functional.count(cross_toolchain_quality_test) == 1
     assert "elif [[ \"${TEST_SHARD}\" == 'memory-parquet' ]]" in functional
     assert "test_paths+=(" in functional
+    assert release_gate not in functional
     concurrency_rebalance, memory_rebalance = functional.split(
         "elif [[ \"${TEST_SHARD}\" == 'memory-parquet' ]]", 1
     )
@@ -2187,7 +2188,7 @@ def test_build_parallelism_has_a_one_worker_fallback(
 
 
 def test_platform_suite_reports_test_timings_without_job_summary() -> None:
-    """Every wheel runner logs ranked pytest timings without rendering a summary."""
+    """Every runner uses a portable nonempty command and logs ranked test timings."""
     test_action = _action("test-platform-wheel")
     full_suite = next(
         step for step in _step_bodies(test_action) if "name: Run functional test shard" in step
@@ -2195,6 +2196,9 @@ def test_platform_suite_reports_test_timings_without_job_summary() -> None:
 
     assert "shell: bash" in full_suite
     assert "set -euo pipefail" in full_suite
+    assert re.search(r"pytest_command=\(\n\s+pytest -q -o pythonpath=\.", full_suite)
+    assert "pytest_args=()" not in full_suite
+    assert full_suite.count('"${pytest_command[@]}"') == 1
     assert "--durations=50" in full_suite
     assert "--durations-min=0.05" in full_suite
     assert '--junitxml="artifacts/pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml"' in full_suite

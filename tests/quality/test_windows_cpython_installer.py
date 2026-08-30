@@ -15,7 +15,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from cibuildwheel.util import file as cibuildwheel_file
 
 from meta.ci.native import install_windows_cpython as installer
 
@@ -203,7 +202,8 @@ def test_cli_emits_only_the_certified_executable_path(
     archive = tmp_path / "python.nupkg"
     expected = _archive(archive)
     cache_root = tmp_path / "cibuildwheel"
-    monkeypatch.setattr(cibuildwheel_file, "CIBW_CACHE_PATH", cache_root)
+    cache_path = MagicMock(return_value=cache_root)
+    monkeypatch.setattr(installer, "_cibuildwheel_cache_path", cache_path)
 
     def fixture_archive(_workspace: Path) -> Path:
         """Route the CLI's owned cache lookup to the immutable fixture package."""
@@ -216,6 +216,7 @@ def test_cli_emits_only_the_certified_executable_path(
     monkeypatch.setattr(installer, "ensure_verified_archive", preserve_fixture)
 
     assert installer.main([expected]) == 0
+    cache_path.assert_called_once_with()
 
     executable = cache_root / "nuget-cpython" / "python.3.11.9" / "tools" / "python.exe"
     captured = capsys.readouterr()

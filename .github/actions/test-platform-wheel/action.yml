@@ -225,25 +225,26 @@ runs:
             exit 2
             ;;
         esac
-        pytest_args=()
+        # Bash 3.2 treats an empty-array expansion as unbound under nounset.
+        pytest_command=(
+          pytest -q -o pythonpath=.
+          -m 'not native_stress'
+          --durations=50
+          --durations-min=0.05
+          --junitxml="artifacts/pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml"
+        )
         if [[ "${TEST_SHARD}" == 'concurrency' ]]; then
-          pytest_args+=(
-            --ignore=tests/concurrency/test_concurrency_route_release_gate.py
+          # The release gate owns sticky process-wide counters, so it stays here.
+          pytest_command+=(
             --ignore=tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py
           )
         elif [[ "${TEST_SHARD}" == 'memory-parquet' ]]; then
           test_paths+=(
-            tests/concurrency/test_concurrency_route_release_gate.py
             tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py
             tests/quality/test_fuzz_regression_runner.py::test_standalone_mutation_stream_matches_its_cross_library_golden
           )
         fi
-        pytest -q -o pythonpath=. \
-          -m 'not native_stress' \
-          --durations=50 \
-          --durations-min=0.05 \
-          --junitxml="artifacts/pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml" \
-          "${pytest_args[@]}" \
+        "${pytest_command[@]}" \
           "${test_paths[@]}" \
           2>&1 | tee "artifacts/pytest-durations-${PLATFORM_ARTIFACT}-${TEST_SHARD}.log"
     - name: Certify the Parquet runtime from functional evidence

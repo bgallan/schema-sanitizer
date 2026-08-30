@@ -352,6 +352,13 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _cibuildwheel_cache_path() -> Path:
+    """Resolve cibuildwheel's private cache only inside its build environment."""
+    from cibuildwheel.util.file import CIBW_CACHE_PATH
+
+    return CIBW_CACHE_PATH
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Install the verified CPython runtime into cibuildwheel's private cache."""
     arguments = _parser().parse_args(argv)
@@ -359,12 +366,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     archive_path = _workspace_archive(workspace)
     ensure_verified_archive(archive_path, arguments.sha256)
 
-    from cibuildwheel.util.file import CIBW_CACHE_PATH
-
-    if CIBW_CACHE_PATH.is_symlink() or (CIBW_CACHE_PATH.exists() and not CIBW_CACHE_PATH.is_dir()):
-        raise WindowsCpythonInstallError(f"cibuildwheel cache root is unsafe: {CIBW_CACHE_PATH}")
-    CIBW_CACHE_PATH.mkdir(parents=True, exist_ok=True)
-    package_parent = CIBW_CACHE_PATH / "nuget-cpython"
+    cache_root = _cibuildwheel_cache_path()
+    if cache_root.is_symlink() or (cache_root.exists() and not cache_root.is_dir()):
+        raise WindowsCpythonInstallError(f"cibuildwheel cache root is unsafe: {cache_root}")
+    cache_root.mkdir(parents=True, exist_ok=True)
+    package_parent = cache_root / "nuget-cpython"
     if package_parent.is_symlink() or (package_parent.exists() and not package_parent.is_dir()):
         raise WindowsCpythonInstallError(
             f"cibuildwheel CPython cache root is unsafe: {package_parent}"
