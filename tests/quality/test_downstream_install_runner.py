@@ -197,11 +197,13 @@ def test_downstream_cleanup_traps_report_cleanup_only_failures(
         "TZ": "UTC",
     }
 
-    for content, marker in scripts:
+    for index, (content, marker) in enumerate(scripts):
         end = content.index(marker) + len(marker)
         preamble = content[:end] + f"\nexit {primary_status}\n"
+        preamble_path = tmp_path / f"cleanup-preamble-{primary_status}-{index}.sh"
+        preamble_path.write_text(preamble, encoding="utf-8")
         completed = subprocess.run(
-            [bash, "-c", preamble],
+            [bash, preamble_path.as_posix()],
             check=False,
             cwd=ROOT,
             env=environment,

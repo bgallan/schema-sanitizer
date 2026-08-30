@@ -61,12 +61,15 @@ runs:
     - name: Preseed the pinned Windows NuGet client
       if: runner.os == 'Windows'
       shell: bash
+      env:
+        NUGET_SHA256: 992d70cac5b06c38efec91806caba64cdcc07e6d963a0959dbbbaf264d33b800  # pragma: allowlist secret
       run: |
         set -euo pipefail
-        python - <<'PY'
+        python - "${NUGET_SHA256}" <<'PY'
         import hashlib
         import os
         import ssl
+        import sys
         import tempfile
         import time
         import urllib.request
@@ -74,7 +77,7 @@ runs:
         import certifi
         from cibuildwheel.util.file import CIBW_CACHE_PATH
         url = 'https://dist.nuget.org/win-x86-commandline/v7.9.0/nuget.exe'
-        expected = '992d70cac5b06c38efec91806caba64cdcc07e6d963a0959dbbbaf264d33b800'
+        expected = sys.argv[1]
         CIBW_CACHE_PATH.mkdir(parents=True, exist_ok=True)
         target = CIBW_CACHE_PATH / 'nuget.exe'
         installed = None

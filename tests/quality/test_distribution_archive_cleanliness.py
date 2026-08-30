@@ -197,7 +197,9 @@ def test_distribution_validator_rejects_unsafe_member_names(
     """Release archives cannot encode traversal or platform-dependent paths."""
     wheel = tmp_path / "unsafe.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
-        archive.writestr(member_name, b"unsafe")
+        member = zipfile.ZipInfo("placeholder")
+        member.filename = member.orig_filename = member_name
+        archive.writestr(member, b"unsafe")
 
     with pytest.raises(AssertionError, match="unsafe archive member names"):
         _load_validator().validate(wheel)

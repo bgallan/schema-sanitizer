@@ -1079,12 +1079,17 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
     assert "Microsoft.VC143.CRT" in build
     assert "name: Preseed the pinned Windows NuGet client" in build
     assert "https://dist.nuget.org/win-x86-commandline/v7.9.0/nuget.exe" in build
-    assert "992d70cac5b06c38efec91806caba64cdcc07e6d963a0959dbbbaf264d33b800" in build
+    nuget_sha256 = "992d70cac5b06c38efec91806caba64cdcc07e6d963a0959dbbbaf264d33b800"  # pragma: allowlist secret
+    assert nuget_sha256 in build
     assert "from cibuildwheel.util.file import CIBW_CACHE_PATH" in build
     assert "target.is_symlink() or not target.is_file()" in build
     assert "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" not in build
     assert "grep -Fq -- 'win-x86-commandline/latest/nuget.exe'" in build
-    nuget_script = build.split("python - <<'PY'\n", 1)[1].split("\n        PY", 1)[0]
+    assert "python - \"${NUGET_SHA256}\" <<'PY'" in build
+    nuget_script = build.split("python - \"${NUGET_SHA256}\" <<'PY'\n", 1)[1].split(
+        "\n        PY", 1
+    )[0]
+    assert "expected = sys.argv[1]" in nuget_script
     compile(textwrap.dedent(nuget_script), "pinned-nuget-bootstrap", "exec")
     assert build.index("name: Preseed the pinned Windows NuGet client") < build.index(
         "python -m cibuildwheel"

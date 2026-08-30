@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import os
 import shutil
 import stat
 import zipfile
@@ -166,12 +167,15 @@ def test_fuzz_packer_is_deterministic_and_removes_only_hashed_files(tmp_path: Pa
     assert packer.pack_target(regression_root, target, remove_loose=True) == 2
     assert archive.read_bytes() == first_bytes
     assert archive.stat().st_mtime_ns == first_mtime
-    assert stat.S_IMODE(archive.stat().st_mode) == 0o644
+    if os.name != "nt":
+        assert stat.S_IMODE(archive.stat().st_mode) == 0o644
     assert descriptive.read_bytes() == b"descriptive"
     assert sorted(path.name for path in target_root.iterdir()) == [descriptive.name]
     with zipfile.ZipFile(archive) as packed:
         assert packed.namelist() == sorted(expected)
         assert {name: packed.read(name) for name in packed.namelist()} == expected
+        assert all(info.create_system == 3 for info in packed.infolist())
+        assert all(info.external_attr >> 16 == 0o100644 for info in packed.infolist())
 
 
 def test_fuzz_packer_recovers_after_interrupted_loose_cleanup(

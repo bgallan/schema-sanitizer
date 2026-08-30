@@ -106,7 +106,7 @@ int main(int argc, char **argv) {
         str(executable),
     ]
     if os.name == "nt":
-        command.append("-lpsapi")
+        command.extend(("-static-libgcc", "-static-libstdc++", "-lpsapi"))
     completed = subprocess.run(
         command,
         check=False,
@@ -466,7 +466,11 @@ def test_shell_plan_quotes_commands_and_publishes_evidence_last(tmp_path: Path) 
     assert '"status": "passed"' in content
     assert not output.exists()
 
-    completed = subprocess.run(["bash", str(script)], check=False, capture_output=True, text=True)
+    bash = shutil.which("bash")
+    assert bash is not None
+    completed = subprocess.run(
+        [bash, script.as_posix()], check=False, capture_output=True, text=True
+    )
     assert completed.returncode == 0, completed.stderr
     assert json.loads(output.read_text(encoding="utf-8")) == evidence
     assert not staging_root.exists()
@@ -493,7 +497,9 @@ def test_failed_fuzz_plan_removes_stale_passing_evidence(tmp_path: Path) -> None
         evidence_output=output,
         evidence={"status": "passed"},
     )
-    completed = subprocess.run(["bash", str(script)], check=False)
+    bash = shutil.which("bash")
+    assert bash is not None
+    completed = subprocess.run([bash, script.as_posix()], check=False)
 
     assert completed.returncode != 0
     assert not output.exists()
@@ -616,11 +622,13 @@ def test_fuzz_cleanup_traps_report_cleanup_only_failures(
         "TZ": "UTC",
     }
 
-    for content, marker in scripts:
+    for index, (content, marker) in enumerate(scripts):
         end = content.index(marker) + len(marker)
         preamble = content[:end] + f"\nexit {primary_status}\n"
+        preamble_path = tmp_path / f"cleanup-preamble-{primary_status}-{index}.sh"
+        preamble_path.write_text(preamble, encoding="utf-8")
         completed = subprocess.run(
-            [bash, "-c", preamble],
+            [bash, preamble_path.as_posix()],
             check=False,
             cwd=ROOT,
             env=environment,
