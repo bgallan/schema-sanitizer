@@ -89,10 +89,12 @@ runs:
         set -euo pipefail
         python -m pip install pip==26.2.1
         python -m pip install \
+          --no-deps \
           --retries 10 \
           --timeout 60 \
           -r meta/ci/requirements/platform-tests.txt \
           wheelhouse/*.whl
+        python -m pip check
     - name: Assert tests import the installed wheel
       shell: bash
       run: |
@@ -211,13 +213,15 @@ runs:
         set -euo pipefail
         case "${TEST_SHARD}" in
           concurrency)
-            test_paths=(tests/concurrency)
+            test_paths=(
+              tests/concurrency
+              tests/quality
+            )
             ;;
           memory-parquet)
             test_paths=(
               tests/memory
               tests/parquet
-              tests/quality
               tests/sinks
             )
             ;;

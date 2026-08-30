@@ -210,11 +210,48 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python }}
-          cache: pip
-          cache-dependency-path: |-
+      - if: matrix.task == 'quality'
+        uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: quality
+          python-version: ${{ matrix.python }}
+          dependency-paths: |-
             pyproject.toml
-            meta/ci/requirements/*.txt
-            .github/actions/*/action.yml
+            meta/ci/requirements/build-tools.txt
+            meta/ci/requirements/quality.txt
+            meta/ci/requirements/pre-commit-hooks.txt
+      - if: matrix.task == 'source-distribution'
+        uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: source-distribution
+          python-version: ${{ matrix.python }}
+          dependency-paths: |-
+            pyproject.toml
+            meta/ci/requirements/build-tools.txt
+            meta/ci/requirements/downstream.txt
+      - if: matrix.task == 'native-llvm-coverage'
+        uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: native-llvm-coverage
+          python-version: ${{ matrix.python }}
+          dependency-paths: |-
+            pyproject.toml
+            meta/ci/requirements/build-tools.txt
+            meta/ci/requirements/platform-tests.txt
+      - if: matrix.task == 'thread-sanitizer'
+        uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: thread-sanitizer
+          python-version: ${{ matrix.python }}
+          dependency-paths: meta/ci/requirements/build-tools.txt
+      - if: matrix.task == 'platform-sanitizer'
+        uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: platform-sanitizer
+          python-version: ${{ matrix.python }}
+          dependency-paths: |-
+            pyproject.toml
+            meta/ci/requirements/build-tools.txt
       - name: Require a known validation workload
         env:
           VALIDATION_TASK: ${{ matrix.task }}
@@ -230,6 +267,8 @@ jobs:
           esac
       - if: matrix.task == 'quality'
         uses: ./.github/actions/quality-validation
+        with:
+          python-version: ${{ matrix.python }}
       - if: matrix.task == 'source-distribution'
         uses: ./.github/actions/source-distribution
       - if: matrix.task == 'native-llvm-coverage'
@@ -286,11 +325,11 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: 3.11.9
-          cache: pip
-          cache-dependency-path: |-
-            pyproject.toml
-            meta/ci/requirements/*.txt
-            .github/actions/*/action.yml
+      - uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: validation-gate
+          python-version: 3.11.9
+          dependency-paths: meta/ci/requirements/build-tools.txt
       - name: Reset release-assembly destinations
         shell: bash
         run: |-

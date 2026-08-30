@@ -216,13 +216,18 @@ four platforms:
 
 | Shard | Test directories | Co-located gates |
 |---|---|---|
-| `concurrency` | `tests/concurrency` | Threading smoke and the single `native_stress` invocation. |
-| `memory-parquet` | `tests/memory`, `tests/parquet`, `tests/quality`, and `tests/sinks` | Compiled-wheel Parquet certification. |
+| `concurrency` | `tests/concurrency` and `tests/quality` | Threading smoke and the single `native_stress` invocation. |
+| `memory-parquet` | `tests/memory`, `tests/parquet`, and `tests/sinks` | Compiled-wheel Parquet certification. |
 | `io-pipeline` | `tests/examples`, `tests/io`, `tests/pipeline`, `tests/remote`, and `tests/schema` | Non-gating reader scaling measurement. |
 
 The topology contract derives the repository's test directories and fails if a
-new one is not assigned exactly once. Separate hosted runners provide real parallelism without
-oversubscribing a single runner's native concurrency tests. Three shards incur
+new one is not assigned exactly once. The assignment is a static source
+contract: CI never redistributes tests from observed runner timings, and every
+platform executes the same paths. Keeping `tests/quality` with `concurrency`
+balances the three existing owners without adding a job, dropping a directory,
+or changing coverage collection. Separate hosted runners provide real
+parallelism without oversubscribing a single runner's native concurrency tests.
+Three shards incur
 one more checkout, Python setup, dependency installation, and hosted runner per
 platform than the previous two-way split, but reduce the slowest functional
 path and run the normal suite concurrently with the benchmark and certificate
@@ -350,6 +355,60 @@ select Xcode 16.4, SDK 15.5, and its exact AppleClang release; Windows release
 builds select VS 2022/v143 and verify the generated CMake cache. Missing or
 changed toolchains therefore fail before their output can become release
 evidence.
+
+### Deterministic acceleration
+
+The validation matrix and terminal gate restore pip download caches through one
+repository-owned action. Each exact key includes the workload owner, runner
+operating system and architecture, exact Python patch, and a SHA-256 digest over
+the complete regular-file dependency inputs for that workload. There are no
+partial restore prefixes. Cache access is allowed to fail, while the normal
+locked installation and `pip check` remain mandatory, so a cache hit can reduce
+downloads but can never establish correctness or select dependency versions.
+Quality's pre-commit environments use the same principle: an exact
+OS/architecture/Python/configuration key is only an accelerator, every hook is
+still installed and executed, and a failed bootstrap removes the owned cache
+before its bounded retry.
+
+Windows wheel builds provision CPython 3.11.9 from a pinned NuGet package before
+cibuildwheel starts. An exact-key cache may supply the `.nupkg`, but the action
+always verifies its SHA-256, extracts it afresh through the separately verified
+NuGet client, rejects links, checks the PE machine as AMD64, and runs the
+interpreter to verify its patch, pointer width, and reported architecture. The
+wheel log must show that cibuildwheel used this local installation rather than
+a mutable NuGet or fallback source. A missing, corrupt, or unavailable cache
+therefore falls back to the same digest-verified package path instead of a
+different build contract.
+
+Production wheel cells enable two target-private, Release-only precompiled
+headers: one for the standalone core and one for the Python ABI3 module. The
+core profile does not inherit `Python.h`. PCH is off by default and is rejected
+for sanitizer, coverage, and clang-tidy/include-hygiene configurations; those
+diagnostic builds continue to parse each translation unit from its own declared
+includes. The optimization changes compilation work, not LTO, ABI auditing,
+wheel repair, or the shipped source and test contracts.
+
+The Linux ASan/UBSan cell also uses one explicitly named CMake graph for the
+installed extension, sanitized executor, and four libFuzzer targets. It
+certifies the graph's compiler, build type, sanitizer, bundled-zlib, fuzzer,
+warnings, LTO, and PCH settings before reusing that configured graph and its
+shared target outputs for the named native targets. It does not perform a
+second configure or accept an unidentified build directory. The same Python
+cases, native executor, corpora, and mutation campaigns remain blocking.
+
+Source downstream checks create every isolated consumer with the pinned
+`virtualenv` app-data seeder. CI downloads exactly one pinned pip wheel, verifies
+its filename and SHA-256, and creates copied environments with network seeding
+disabled. Every environment then verifies its Python patch, pointer width, and
+pip version before installing its assigned extra. The environments remain
+separate, so dependency metadata and imports for one published extra cannot
+make another appear valid.
+
+These accelerators preserve the six matrices, 25-job graph, complete
+four-platform shard product, coverage contexts, sanitizer targets, and release
+artifacts. Hosted-runner capacity, network service, and cold-cache state remain
+variable external inputs; CI does not impose timing assertions or promise a
+particular duration.
 
 ## [Release evidence](#index)
 

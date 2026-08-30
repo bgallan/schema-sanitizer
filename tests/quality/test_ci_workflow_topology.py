@@ -260,7 +260,12 @@ def _no_isolation_constraint_violations(definitions: dict[str, str]) -> tuple[st
         if path.startswith(".github/actions/") and path.endswith("/action.yml")
     }
 
+    persistent_environment_owner = ".github/actions/restore-pip-cache/action.yml"
     for path, source in definitions.items():
+        if path == persistent_environment_owner:
+            if constraint in source:
+                violations.add(f"{path}: persistent GITHUB_ENV mutates {constraint}")
+            continue
         if re.search(r"\bGITHUB_ENV\b", source, re.IGNORECASE):
             violations.add(f"{path}: persistent GITHUB_ENV mutation is forbidden")
 
@@ -645,12 +650,14 @@ def test_external_actions_are_pinned_to_immutable_commits() -> None:
     local_refs = [ref for ref in refs if ref.startswith("./")]
     assert local_refs.count("./.github/workflows/ci.yml") == 1
     assert local_refs.count("./.github/actions/build-platform-wheel") == 1
+    assert local_refs.count("./.github/actions/restore-pip-cache") == 6
     assert local_refs.count("./.github/actions/test-platform-wheel") == 4
     for name in VALIDATION_ACTIONS:
         assert local_refs.count(f"./.github/actions/{name}") == 1
     assert set(local_refs) == {
         "./.github/workflows/ci.yml",
         "./.github/actions/build-platform-wheel",
+        "./.github/actions/restore-pip-cache",
         "./.github/actions/test-platform-wheel",
         *(f"./.github/actions/{name}" for name in VALIDATION_ACTIONS),
     }
@@ -659,6 +666,7 @@ def test_external_actions_are_pinned_to_immutable_commits() -> None:
     assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", ref) for ref in external_refs)
     assert set(external_refs) == {
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
         "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
         "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
@@ -964,6 +972,11 @@ def test_validation_matrix_has_eight_exact_workloads_and_safe_dispatch() -> None
     for task in VALIDATION_ACTIONS:
         assert f"if: matrix.task == '{task.removesuffix('-validation')}'" in validation
         assert validation.count(f"uses: ./.github/actions/{task}") == 1
+    assert (
+        "uses: ./.github/actions/quality-validation\n"
+        "        with:\n"
+        "          python-version: ${{ matrix.python }}" in validation
+    )
     assert "sanitizer: ${{ matrix.sanitizer }}" in validation
     assert "mode: ${{ matrix.mode }}" in validation
 
@@ -1013,7 +1026,9 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     assert "if:" not in dependencies[0]
     assert "--retries 10" in dependencies[0]
     assert "--timeout 60" in dependencies[0]
+    assert "--no-deps" in dependencies[0]
     assert "-r meta/ci/requirements/platform-tests.txt" in dependencies[0]
+    assert "python -m pip check" in dependencies[0]
     assert "meta/ci/requirements/build-tools.txt" in test_action
     assert "meta/ci/requirements/platform-tests.txt" in test_action
     assert cibuildwheel["test-requires"] == ["pyarrow==25.0.1"]
@@ -1078,22 +1093,56 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
     assert "Microsoft.VCRedistVersion.default.txt" in build
     assert "Microsoft.VC143.CRT" in build
     assert "name: Preseed the pinned Windows NuGet client" in build
+    python_cache = next(
+        step
+        for step in _step_bodies(build)
+        if "name: Restore the verified Windows CPython package" in step
+    )
+    assert "if: runner.os == 'Windows'" in python_cache
+    assert "continue-on-error: true" in python_cache
+    assert "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9" in python_cache
+    assert "restore-keys:" not in python_cache
+    for component in (
+        "${{ runner.os }}",
+        "${{ runner.arch }}",
+        "python-3.11.9",
+        "cibuildwheel-4.2.0",
+    ):
+        assert component in " ".join(python_cache.split())
+    assert build.index("name: Reset the owned Windows CPython package-cache path") < build.index(
+        "name: Restore the verified Windows CPython package"
+    )
+    assert 'target = cache_root / "python.3.11.9.nupkg"' in build
+    assert "target.is_symlink() or target.is_file()" in build
     assert "https://dist.nuget.org/win-x86-commandline/v7.9.0/nuget.exe" in build
     nuget_sha256 = "992d70cac5b06c38efec91806caba64cdcc07e6d963a0959dbbbaf264d33b800"  # pragma: allowlist secret
+    python_sha256 = "9283876d58c017e0e846f95b490da3bca0fc0a6ee1134b2870677cfb7eec3c67"  # pragma: allowlist secret
     assert nuget_sha256 in build
+    assert python_sha256 in build
     assert "from cibuildwheel.util.file import CIBW_CACHE_PATH" in build
-    assert "target.is_symlink() or not target.is_file()" in build
+    assert "https://api.nuget.org/v3-flatcontainer/python/3.11.9/" in build
+    assert "-Source" in build
+    assert "-NoCache" in build
+    assert "-DirectDownload" in build
+    assert "-NonInteractive" in build
+    assert "platform.machine().upper() == 'AMD64'" in build
+    assert "struct.unpack('<H', stream.read(2))[0] != 0x8664" in build
     assert "https://dist.nuget.org/win-x86-commandline/latest/nuget.exe" not in build
     assert "grep -Fq -- 'win-x86-commandline/latest/nuget.exe'" in build
-    assert "python - \"${NUGET_SHA256}\" <<'PY'" in build
-    nuget_script = build.split("python - \"${NUGET_SHA256}\" <<'PY'\n", 1)[1].split(
-        "\n        PY", 1
-    )[0]
-    assert "expected = sys.argv[1]" in nuget_script
+    invocation = 'python - "${NUGET_SHA256}" "${PYTHON_NUPKG_SHA256}" <<\'PY\''
+    assert invocation in build
+    nuget_script = build.split(f"{invocation}\n", 1)[1].split("\n        PY", 1)[0]
+    assert "nuget_expected = sys.argv[1]" in nuget_script
+    assert "python_expected = sys.argv[2]" in nuget_script
     compile(textwrap.dedent(nuget_script), "pinned-nuget-bootstrap", "exec")
+    assert build.index("name: Restore the verified Windows CPython package") < build.index(
+        "name: Preseed the pinned Windows NuGet client"
+    )
     assert build.index("name: Preseed the pinned Windows NuGet client") < build.index(
         "python -m cibuildwheel"
     )
+    assert "grep -Fq -- 'nuget.exe install python'" in build
+    assert "grep -Fq -- '-FallbackSource'" in build
     assert "rm -rf -- .work/msvc-redist" in build
     assert 'cp -- "${redist_directory}"/*.dll .work/msvc-redist/' in build
     assert "rm -rf -- wheelhouse .work/build .work/delvewheel-extract" in build
@@ -1206,7 +1255,12 @@ def test_native_coverage_resolves_sources_and_rejects_incomplete_html() -> None:
 
 def test_quality_requirements_are_a_complete_exact_lock() -> None:
     """The quality runner cannot acquire direct or transitive dependencies implicitly."""
+    quality = _action("quality-validation")
+
     assert _exact_lock_names(ROOT / "meta/ci/requirements/quality.txt") == _QUALITY_LOCK_NAMES
+    assert "python -m pip install --no-deps -r meta/ci/requirements/quality.txt" in quality
+    assert "python -m pip install --no-deps '.[dev]'" in quality
+    assert "python -m pip check" in quality
 
 
 def test_build_and_hook_requirements_are_complete_exact_owner_locks() -> None:
@@ -1314,6 +1368,7 @@ def test_no_build_isolation_constraint_guard_detects_every_inherited_scope() -> 
         path.relative_to(ROOT).as_posix(): definition for path, definition in _ci_yaml_definitions()
     }
     action_path = ".github/actions/native-llvm-coverage/action.yml"
+    cache_action_path = ".github/actions/restore-pip-cache/action.yml"
     workflow_path = ".github/workflows/ci.yml"
     mutations = (
         (
@@ -1355,6 +1410,12 @@ def test_no_build_isolation_constraint_guard_detects_every_inherited_scope() -> 
             "          set -euo pipefail\n"
             "          echo 'PIP_BUILD_CONSTRAINT=/tmp/build.txt' >> \"$GITHUB_ENV\"\n"
             '          case "${VALIDATION_TASK}" in\n',
+        ),
+        (
+            cache_action_path,
+            '            stream.write(f"PIP_CACHE_DIR={cache_directory}\\n")\n',
+            '            stream.write(f"PIP_CACHE_DIR={cache_directory}\\n")\n'
+            '            stream.write("PIP_BUILD_CONSTRAINT=/tmp/build.txt\\n")\n',
         ),
     )
     for path, original, replacement in mutations:
@@ -1407,11 +1468,48 @@ def test_runner_network_and_toolchain_inputs_are_bounded_and_exact() -> None:
         "PIP_TIMEOUT: '60'",
     ):
         assert setting in _workflow_preamble(ci)
-    assert ci.count("cache-dependency-path: |-\n") == 2
-    assert ci.count("meta/ci/requirements/*.txt") == 2
-    assert ci.count(".github/actions/*/action.yml") == 2
+    cache = _action("restore-pip-cache")
+    assert "cache-dependency-path:" not in ci
+    assert "meta/ci/requirements/*.txt" not in ci
+    assert ".github/actions/*/action.yml" not in ci
+    assert ci.count("uses: ./.github/actions/restore-pip-cache") == 6
+    assert "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9" in cache
+    assert "continue-on-error: true" in cache
+    assert "restore-keys:" not in cache
+    assert 'cache_root = workspace / ".work" / "pip-cache"' in cache
+    assert "cache_directory = cache_root / owner" in cache
+    assert "python -m pip cache dir" not in cache
+    assert 'stream.write(f"PIP_CACHE_DIR={cache_directory}\\n")' in cache
+    assert cache.count('os.environ["GITHUB_ENV"]') == 1
+    assert "PIP_BUILD_CONSTRAINT" not in cache
+    assert "CACHE_RESTORE_OUTCOME" in cache
+    assert "shutil.rmtree(cache_directory)" in cache
+    for component in (
+        "${{ runner.os }}",
+        "${{ runner.arch }}",
+        "${{ inputs.python-version }}",
+        "${{ inputs.owner }}",
+        "${{ steps.pip-cache-identity.outputs.dependency-digest }}",
+    ):
+        assert component in cache
+    for owner in (
+        "quality",
+        "source-distribution",
+        "native-llvm-coverage",
+        "thread-sanitizer",
+        "platform-sanitizer",
+        "validation-gate",
+    ):
+        assert ci.count(f"owner: {owner}") == 1
+    assert ci.count("meta/ci/requirements/quality.txt") == 1
+    assert ci.count("meta/ci/requirements/downstream.txt") == 1
+    assert ci.count("meta/ci/requirements/platform-tests.txt") == 1
     for action in (build, native, sanitizer, tsan, quality):
         assert "python -m pip install -U" not in action
+    assert "CIBW_CONFIG_SETTINGS: cmake.define.SCHEMA_SANITIZER_ENABLE_PCH=ON" in build
+    assert native.count("SCHEMA_SANITIZER_ENABLE_PCH=OFF") == 1
+    assert sanitizer.count("SCHEMA_SANITIZER_ENABLE_PCH=OFF") == 3
+    assert tsan.count("SCHEMA_SANITIZER_ENABLE_PCH=OFF") == 1
     for action in (native, sanitizer, tsan):
         assert "Acquire::Retries=3" in action
         assert "Acquire::http::Timeout=30" in action
@@ -1454,6 +1552,16 @@ def test_runner_network_and_toolchain_inputs_are_bounded_and_exact() -> None:
         assert "Apple clang version 17.0.0 (clang-1700.0.13.5)" in action
     assert "-DCMAKE_OSX_SYSROOT=macosx15.5" in sanitizer
     assert "pre-commit install-hooks" in quality
+    assert "PRE_COMMIT_HOME: ${{ github.workspace }}/.work/pre-commit-cache" in quality
+    assert "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9" in quality
+    assert "continue-on-error: true" in quality
+    assert "restore-keys:" not in quality
+    assert "${{ runner.arch }}" in " ".join(quality.split())
+    assert "${{ inputs.python-version }}" in " ".join(quality.split())
+    assert "hashFiles('.pre-commit-config.yaml'," in quality
+    assert "'meta/ci/requirements/quality.txt'," in quality
+    assert "'meta/ci/requirements/pre-commit-hooks.txt')" in quality
+    assert 'rm -rf -- "${PRE_COMMIT_HOME}"' in quality
     assert "for attempt in 1 2 3" in quality
     assert "timeout --signal=TERM --kill-after=15s 120s pre-commit install-hooks" in quality
     assert "sleep $((attempt * 2))" in quality
@@ -1561,11 +1669,10 @@ def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
         if path.is_dir() and not path.name.startswith("_")
     }
     shard_domains = {
-        "concurrency": {"concurrency"},
+        "concurrency": {"concurrency", "quality"},
         "memory-parquet": {
             "memory",
             "parquet",
-            "quality",
             "sinks",
         },
         "io-pipeline": {
@@ -1578,6 +1685,28 @@ def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
     }
     functional = next(
         step for step in _step_bodies(test_action) if "name: Run functional test shard" in step
+    )
+
+    actual_shard_domains = {}
+    for shard in shard_domains:
+        match = re.search(
+            rf"^          {re.escape(shard)}\)\n"
+            r"            test_paths=\(\n"
+            r"(?P<paths>(?:              tests/[a-z0-9_-]+\n)+)"
+            r"            \)\n"
+            r"            ;;$",
+            functional,
+            re.MULTILINE,
+        )
+        assert match is not None, f"missing static test-path array for {shard}"
+        actual_shard_domains[shard] = set(
+            re.findall(r"^              tests/([a-z0-9_-]+)$", match["paths"], re.MULTILINE)
+        )
+
+    assert actual_shard_domains == shard_domains
+    assert functional.count("test_paths=(") == len(shard_domains)
+    assert set(re.findall(r"^              tests/([a-z0-9_-]+)$", functional, re.MULTILINE)) == (
+        all_test_domains
     )
 
     for shard, domains in shard_domains.items():
@@ -1604,6 +1733,54 @@ def test_platform_test_shards_are_identical_disjoint_and_exhaustive() -> None:
         tests = _job_body(ci, platform["job-id"])
         assert "fail-fast: false" in tests
         assert "if: ${{ !cancelled() }}" in tests
+
+
+def test_linux_sanitizer_reuses_one_certified_cmake_graph() -> None:
+    """The ASan extension, native executor, and fuzzers share one exact build tree."""
+    sanitizer = _action("platform-sanitizer")
+    install = next(
+        step
+        for step in _step_bodies(sanitizer)
+        if "name: Build and install the Linux instrumented extension" in step
+    )
+    certification = next(
+        step
+        for step in _step_bodies(sanitizer)
+        if "name: Certify the reused Linux sanitizer build tree" in step
+    )
+
+    assert "--config-settings=build-dir=.work/build/platform-sanitizer" in install
+    assert "--config-settings=cmake.build-type=RelWithDebInfo" in install
+    for setting in (
+        "SCHEMA_SANITIZER_BUILD_FUZZERS=ON",
+        "SCHEMA_SANITIZER_ENABLE_LTO=OFF",
+        "SCHEMA_SANITIZER_ENABLE_PCH=OFF",
+        "SCHEMA_SANITIZER_ENABLE_WERROR=ON",
+        "SCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer",
+        "SCHEMA_SANITIZER_REQUIRE_ZLIB=ON",
+        "SCHEMA_SANITIZER_SANITIZER=asan-ubsan",
+        "SCHEMA_SANITIZER_ZLIB_PROVIDER=bundled",
+    ):
+        assert setting in install
+        assert (
+            setting.replace("=", ":BOOL=", 1) in certification
+            or setting.replace("=", ":STRING=", 1) in certification
+        )
+    assert "CMAKE_BUILD_TYPE:STRING=RelWithDebInfo" in certification
+    assert "CMAKE_GENERATOR:INTERNAL=Ninja" in certification
+    assert "CMAKE_PROJECT_NAME:STATIC=schema_sanitizer" in certification
+    assert "name: Configure Linux ASan/UBSan" not in sanitizer
+    assert sanitizer.count("cmake -S . -B .work/build/platform-sanitizer") == 2
+    assert (
+        sanitizer.index("Build and install the Linux instrumented extension")
+        < sanitizer.index("Certify the reused Linux sanitizer build tree")
+        < sanitizer.index("Build native concurrency and fuzz targets")
+    )
+    assert "CMAKE_C_COMPILER:(FILEPATH=/usr/bin/clang-18|UNINITIALIZED=clang-18)" in certification
+    assert (
+        "CMAKE_CXX_COMPILER:(FILEPATH=/usr/bin/clang[+][+]-18|UNINITIALIZED=clang[+][+]-18)"
+        in certification
+    )
 
 
 def test_concurrency_shards_fail_closed_at_explicit_platform_cpu_minima() -> None:
@@ -2287,6 +2464,18 @@ def test_release_artifact_is_complete_exact_and_self_describing() -> None:
         "validation-matrix",
     )
     assert source_distribution.count("python -m build --sdist") == 2
+    assert "virtualenv==21.7.1" in source_distribution
+    assert "python -m pip download --no-deps --only-binary=:all:" in source_distribution
+    assert "--dest .work/virtualenv-seed pip==26.2.1" in source_distribution
+    pip_seed_sha256 = "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"  # pragma: allowlist secret
+    assert pip_seed_sha256 in source_distribution
+    assert 'expected_name = "pip-26.2.1-py3-none-any.whl"' in source_distribution
+    assert "len(entries) != 1" in source_distribution
+    seed_invocation = "python - \"${PIP_SEED_SHA256}\" <<'PY'"
+    seed_script = source_distribution.split(f"{seed_invocation}\n", 1)[1].split("\n        PY", 1)[
+        0
+    ]
+    compile(textwrap.dedent(seed_script), "virtualenv-pip-seed", "exec")
     assert 'cmp -- "${first[0]}" "${second[0]}"' in source_distribution
     assert "check_downstream_install.sh" in source_distribution
     assert "shopt -s nullglob" in source_distribution
@@ -2311,6 +2500,32 @@ def test_release_artifact_is_complete_exact_and_self_describing() -> None:
     assert "name: pypi-publish-distributions" in publish
     assert "packages-dir: pypi-publish/" in publish
     assert "release/release-manifest.json" in ci
+    assert '_PIP_VERSION = "26.2.1"' in downstream
+    assert pip_seed_sha256 in downstream
+    assert "def _validated_seed_directory(" in downstream
+    assert "virtualenv seed root must contain exactly" in downstream
+    assert "virtualenv pip seed SHA-256 mismatch" in downstream
+    for argument in (
+        "--creator",
+        "builtin",
+        "--seeder",
+        "app-data",
+        "--no-download",
+        "--no-periodic-update",
+        "--copies",
+        "--pip",
+        "--no-setuptools",
+        "--extra-search-dir",
+    ):
+        assert f'"{argument}"' in downstream
+    assert '"virtualenv"' in downstream
+    assert re.search(r'["\']venv["\']', downstream) is None
+    assert (
+        '_command([python, "-m", "pip", "install", "-c", constraints, "pip==26.2.1"])'
+        not in downstream
+    )
+    assert "pip.__version__ ==" in downstream
+    assert 'struct.calcsize("P") * 8' in downstream
     for extra in (
         "core",
         "pyarrow",

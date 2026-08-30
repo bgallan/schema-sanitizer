@@ -212,6 +212,8 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
         if any(token in text for token in _ENV_ACCESS_TOKENS):
             offenders.append(path.relative_to(root).as_posix())
     allowed_environment_files = {
+        ".github/actions/quality-validation/action.yml",
+        ".github/actions/restore-pip-cache/action.yml",
         "cpp/src/internal/runtime/operation_task_arena.cc",
         "meta/ci/release/check_distribution_contents.py",
         "meta/ci/release/check_github_release_state.py",

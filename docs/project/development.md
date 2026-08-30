@@ -87,6 +87,12 @@ python -m build --wheel
 Release wheels use CPython's 3.11 stable ABI and bundle pinned zlib for a
 consistent Parquet compression matrix.
 
+Production wheel builds may opt into target-private precompiled headers with
+`-DSCHEMA_SANITIZER_ENABLE_PCH=ON`. The option is deliberately off by default,
+applies only to Release configurations, and is rejected for sanitizer, coverage,
+and clang-tidy/include-hygiene builds so those diagnostics continue to parse each
+translation unit from its own declared includes.
+
 ## [Benchmarks](#index)
 
 Benchmarks live in [`benchmarks/`](../../benchmarks/). Start with a small smoke run

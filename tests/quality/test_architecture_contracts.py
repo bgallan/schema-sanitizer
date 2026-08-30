@@ -327,3 +327,38 @@ def test_msvc_translation_units_compile_in_four_bounded_processes() -> None:
     assert project.count("schema_sanitizer_enable_msvc_parallel_compile(") == 3
     assert "set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)" in project
     assert "set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO TRUE)" in project
+
+
+def test_release_pch_is_opt_in_target_private_and_diagnostic_safe() -> None:
+    """PCH accelerates release targets without weakening diagnostic builds."""
+    project = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    options = (ROOT / "cmake/SchemaSanitizerTargetOptions.cmake").read_text(encoding="utf-8")
+    helper = options.split("function(schema_sanitizer_enable_release_pch target profile)", 1)[
+        1
+    ].split("endfunction()", 1)[0]
+
+    assert re.search(
+        r"option\(\s*SCHEMA_SANITIZER_ENABLE_PCH\s+"
+        r'"Use target-private precompiled headers for production Release builds"\s+OFF\)',
+        project,
+    )
+    assert 'NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none"' in project
+    assert "SCHEMA_SANITIZER_ENABLE_COVERAGE" in project
+    assert "SCHEMA_SANITIZER_ENABLE_CLANG_TIDY" in project
+    assert re.search(r'NOT CMAKE_BUILD_TYPE STREQUAL\s+"Release"', project)
+    assert "target_precompile_headers(${target} PRIVATE" in helper
+    assert "$<COMPILE_LANGUAGE:CXX>" in helper
+    assert "$<CONFIG:Release>" in helper
+    assert (
+        "Python.h"
+        not in helper.split('if(profile STREQUAL "core")', 1)[1].split(
+            'elseif(profile STREQUAL "python_abi3")', 1
+        )[0]
+    )
+    assert "Python.h" in helper.split('elseif(profile STREQUAL "python_abi3")', 1)[1]
+    assert "schema_sanitizer_enable_release_pch(sanitize_core core)" in project
+    assert re.search(
+        r"schema_sanitizer_enable_release_pch\(\$\{_schema_sanitizer_pymod_target\}\s+"
+        r"python_abi3\)",
+        project,
+    )

@@ -31,27 +31,57 @@ class _Owner:
             self._escrow_armed_ticket = 0
 
 
-def test_generation_owner_first_acquire_rolls_back_after_internal_interrupt(monkeypatch) -> None:
+def test_generation_owner_first_acquire_rolls_back_after_internal_interrupt() -> None:
     """Verify generation owner first acquire rolls back after internal interrupt."""
     from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
 
     pool = BoundedGenerationPool(1)
     owner = object()
-    original = BoundedGenerationPool._rebuild_derived_from_owners
-    calls = 0
 
-    def flaky(self: BoundedGenerationPool) -> None:
-        """Inject the flaky failure at the controlled test point."""
-        nonlocal calls
-        calls += 1
-        if self is pool and calls == 2:
+    class InsertThenInterrupt(dict[int, int]):
+        """Interrupt after the derived hint is inserted post-authority."""
+
+        def __setitem__(self, key: int, value: int) -> None:
+            """Insert the hint, then interrupt the owner-first commit tail."""
+            super().__setitem__(key, value)
+            assert pool._owners[value] is owner
             raise KeyboardInterrupt("generation-owner-first-acquire-rolls-back acquire post-owner")
-        original(self)
 
-    monkeypatch.setattr(BoundedGenerationPool, "_rebuild_derived_from_owners", flaky)
+    pool._owner_slots = InsertThenInterrupt()
     with pytest.raises(KeyboardInterrupt, match="post-owner"):
         pool.acquire_for(owner)
 
+    assert not pool.owns_owner(owner)
+    assert pool.exact_active_count() == 0
+    snap = pool.snapshot()
+    assert snap.active == 0
+    assert snap.available == 1
+
+
+def test_generation_owner_assignment_commit_rolls_back_before_flag_store() -> None:
+    """Roll back when exact owner assignment commits before its local flag."""
+    from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
+
+    pool = BoundedGenerationPool(1)
+    owner = object()
+
+    class AssignThenInterrupt(list[object | None]):
+        """Interrupt after the authoritative owner list accepts the owner."""
+
+        failed = False
+
+        def __setitem__(self, key: int, value: object | None) -> None:
+            """Commit the exact owner assignment, then interrupt once."""
+            super().__setitem__(key, value)
+            if value is owner and not self.failed:
+                self.failed = True
+                raise KeyboardInterrupt("generation-owner-assignment postcommit")
+
+    pool._owners = AssignThenInterrupt(pool._owners)
+    with pytest.raises(KeyboardInterrupt, match="owner-assignment postcommit"):
+        pool.acquire_for(owner)
+
+    assert all(candidate is not owner for candidate in pool._owners)
     assert not pool.owns_owner(owner)
     assert pool.exact_active_count() == 0
     snap = pool.snapshot()
@@ -80,7 +110,7 @@ def test_generation_owner_identity_closes_return_to_store_handoff_gap() -> None:
     assert pool.snapshot().available == 1
 
 
-def test_generation_release_postcommit_is_retry_idempotent(monkeypatch) -> None:
+def test_generation_release_postcommit_is_retry_idempotent() -> None:
     """Verify generation release postcommit is retry idempotent."""
     from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
 
@@ -89,18 +119,16 @@ def test_generation_release_postcommit_is_retry_idempotent(monkeypatch) -> None:
     token = pool.acquire_for(owner)
     assert token is not None
 
-    original = BoundedGenerationPool._rebuild_derived_from_owners
-    calls = 0
+    class PopThenInterrupt(dict[int, int]):
+        """Interrupt after removing the derived hint post-retirement."""
 
-    def flaky(self: BoundedGenerationPool) -> None:
-        """Inject the flaky failure at the controlled test point."""
-        nonlocal calls
-        calls += 1
-        if self is pool and calls == 2:
+        def pop(self, key: int, default: object = None) -> int | object:
+            """Remove the hint, then interrupt after exact owner retirement."""
+            super().pop(key, default)
+            assert owner not in pool._owners
             raise KeyboardInterrupt("generation-owner-first-acquire-rolls-back release postcommit")
-        original(self)
 
-    monkeypatch.setattr(BoundedGenerationPool, "_rebuild_derived_from_owners", flaky)
+    pool._owner_slots = PopThenInterrupt(pool._owner_slots)
     with pytest.raises(KeyboardInterrupt, match="postcommit"):
         pool.release_for(owner)
 
@@ -109,6 +137,40 @@ def test_generation_release_postcommit_is_retry_idempotent(monkeypatch) -> None:
     assert pool.release_for(owner)
     assert pool.exact_active_count() == 0
     assert pool.snapshot().available == 1
+
+
+def test_generation_normal_path_never_scans_capacity(monkeypatch) -> None:
+    """Keep ordinary generation acquisition and release on derived O(1) structures."""
+    from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
+
+    pool = BoundedGenerationPool(8_192)
+
+    def unexpected_rebuild(_self: BoundedGenerationPool) -> None:
+        """Fail if a clean normal-path operation attempts full reconstruction."""
+        raise AssertionError("clean bounded-generation path rebuilt capacity")
+
+    monkeypatch.setattr(BoundedGenerationPool, "_rebuild_derived_from_owners", unexpected_rebuild)
+    for _ in range(32):
+        owner = object()
+        assert pool.acquire_for(owner) is not None
+        assert pool.release_for(owner)
+
+
+def test_generation_dirty_identity_hint_rebuilds_from_exact_authority() -> None:
+    """Recover a lost derived identity hint without rekeying its exact owner."""
+    from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
+
+    pool = BoundedGenerationPool(4)
+    owner = object()
+    token = pool.acquire_for(owner)
+    assert token is not None
+    pool._owner_slots.clear()
+    pool._states[:] = b"\x00" * 4
+    pool._derived_dirty = True
+
+    assert pool.owns_owner(owner, token)
+    assert pool.snapshot().active == 1
+    assert pool.release_for(owner)
 
 
 def test_reserved_escrow_owner_first_reservation_rolls_back_without_ticket_handoff(

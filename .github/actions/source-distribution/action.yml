@@ -4,6 +4,39 @@ description: Build, inspect, rebuild, install, and upload the source distributio
 runs:
   using: composite
   steps:
+    - name: Prepare source-build tools and the offline virtualenv seed
+      env:
+        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_SEED_SHA256: 71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e  # pragma: allowlist secret
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- .work/virtualenv-seed
+        mkdir -p .work/virtualenv-seed
+        python -m pip install pip==26.2.1 build==1.5.0 twine==7.0.0 \
+          packaging==26.3 virtualenv==21.7.1
+        python -m pip check
+        python -m pip download --no-deps --only-binary=:all: \
+          --dest .work/virtualenv-seed pip==26.2.1
+        python - "${PIP_SEED_SHA256}" <<'PY'
+        import hashlib
+        import sys
+        from pathlib import Path
+        root = Path(".work/virtualenv-seed")
+        entries = sorted(root.iterdir())
+        expected_name = "pip-26.2.1-py3-none-any.whl"
+        if len(entries) != 1 or entries[0].name != expected_name:
+            raise SystemExit(
+                f"Expected only {expected_name} in {root}, got {[entry.name for entry in entries]}"
+            )
+        wheel = entries[0]
+        if wheel.is_symlink() or not wheel.is_file():
+            raise SystemExit(f"pip seed is not a regular file: {wheel}")
+        actual = hashlib.sha256(wheel.read_bytes()).hexdigest()
+        if actual != sys.argv[1]:
+            raise SystemExit(f"pip seed SHA-256 mismatch: expected {sys.argv[1]}, got {actual}")
+        PY
     - name: Validate version and build the source distribution
       env:
         PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
@@ -17,7 +50,6 @@ runs:
         [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
         export SOURCE_DATE_EPOCH
         python meta/ci/release/validate_release_version.py
-        python -m pip install pip==26.2.1 build==1.5.0 twine==7.0.0 packaging==26.3
         python -m build --sdist --outdir .work/sdist-reproducibility/first
         rm -rf -- .work/build
         python -m build --sdist --outdir .work/sdist-reproducibility/second

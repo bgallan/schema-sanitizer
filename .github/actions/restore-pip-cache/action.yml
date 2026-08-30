@@ -1,0 +1,130 @@
+---
+name: Restore an exact pip download cache
+description: >-
+  Restore one optional pip cache whose identity is bound to its workload,
+  runner architecture, Python version, and complete dependency inputs. The
+  action validates every identity input before cache access; dependency
+  installation and verification remain the caller's responsibility.
+inputs:
+  owner:
+    description: Stable workload identifier included literally in the cache key.
+    required: true
+  python-version:
+    description: Exact Python version selected by the caller.
+    required: true
+  dependency-paths:
+    description: Newline-delimited regular files that completely own installed versions.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Resolve the exact pip-cache identity
+      id: pip-cache-identity
+      env:
+        CACHE_DEPENDENCY_PATHS: ${{ inputs.dependency-paths }}
+        CACHE_OWNER: ${{ inputs.owner }}
+        CACHE_PYTHON_VERSION: ${{ inputs.python-version }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        python - <<'PY'
+        import hashlib
+        import os
+        import re
+        import shutil
+        import sys
+        from pathlib import Path
+        owner = os.environ["CACHE_OWNER"]
+        python_version = os.environ["CACHE_PYTHON_VERSION"]
+        if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", owner) is None:
+            raise SystemExit(f"invalid pip-cache owner: {owner!r}")
+        if re.fullmatch(r"3[.][0-9]+[.][0-9]+", python_version) is None:
+            raise SystemExit(f"pip-cache Python version must be exact: {python_version!r}")
+        running_version = ".".join(str(part) for part in sys.version_info[:3])
+        if running_version != python_version:
+            raise SystemExit(
+                f"pip-cache Python mismatch: expected {python_version}, got {running_version}"
+            )
+        workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+        dependencies = tuple(
+            line.strip()
+            for line in os.environ["CACHE_DEPENDENCY_PATHS"].splitlines()
+            if line.strip()
+        )
+        if not dependencies or len(dependencies) != len(set(dependencies)):
+            raise SystemExit("pip-cache dependency paths must be non-empty and unique")
+        digest = hashlib.sha256()
+        for relative in sorted(dependencies):
+            candidate = workspace / relative
+            if candidate.is_symlink() or not candidate.is_file():
+                raise SystemExit(f"pip-cache dependency is not a regular file: {relative}")
+            resolved = candidate.resolve()
+            if not resolved.is_relative_to(workspace):
+                raise SystemExit(f"pip-cache dependency escapes the workspace: {relative}")
+            payload = resolved.read_bytes()
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+        cache_root = workspace / ".work" / "pip-cache"
+        for directory in (cache_root.parent, cache_root):
+            if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+                raise SystemExit(f"pip-cache parent is not a regular directory: {directory}")
+            directory.mkdir(parents=True, exist_ok=True)
+        cache_directory = cache_root / owner
+        if cache_directory.is_symlink() or cache_directory.is_file():
+            cache_directory.unlink()
+        elif cache_directory.exists():
+            shutil.rmtree(cache_directory)
+        output = Path(os.environ["GITHUB_OUTPUT"])
+        with output.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(f"dependency-digest={digest.hexdigest()}\n")
+            stream.write(f"directory={cache_directory}\n")
+        PY
+    - name: Restore the optional exact pip cache
+      id: restore-pip-cache
+      continue-on-error: true
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ${{ steps.pip-cache-identity.outputs.directory }}
+        key: >-
+          pip-v1-${{ runner.os }}-${{ runner.arch }}-python-${{ inputs.python-version
+          }}-${{ inputs.owner }}-${{ steps.pip-cache-identity.outputs.dependency-digest
+          }}
+    - name: Validate and select the workload-owned pip cache
+      env:
+        CACHE_DIRECTORY: ${{ steps.pip-cache-identity.outputs.directory }}
+        CACHE_OWNER: ${{ inputs.owner }}
+        CACHE_RESTORE_OUTCOME: ${{ steps.restore-pip-cache.outcome }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        python - <<'PY'
+        import os
+        import shutil
+        from pathlib import Path
+        workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+        cache_directory = Path(os.environ["CACHE_DIRECTORY"])
+        expected = workspace / ".work" / "pip-cache" / os.environ["CACHE_OWNER"]
+        if cache_directory != expected:
+            raise SystemExit(
+                f"pip-cache path mismatch: expected {expected}, got {cache_directory}"
+            )
+        restore_failed = os.environ["CACHE_RESTORE_OUTCOME"] != "success"
+        restored_path_is_unsafe = cache_directory.is_symlink() or (
+            cache_directory.exists() and not cache_directory.is_dir()
+        )
+        if restore_failed or restored_path_is_unsafe:
+            if cache_directory.is_symlink() or cache_directory.is_file():
+                cache_directory.unlink()
+            elif cache_directory.exists() and not cache_directory.is_dir():
+                cache_directory.unlink()
+            elif cache_directory.exists():
+                shutil.rmtree(cache_directory)
+        cache_directory.mkdir(parents=True, exist_ok=True)
+        if cache_directory.resolve() != expected:
+            raise SystemExit(f"restored pip cache escaped its owned path: {cache_directory}")
+        github_environment = Path(os.environ["GITHUB_ENV"])
+        with github_environment.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(f"PIP_CACHE_DIR={cache_directory}\n")
+        PY

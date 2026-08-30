@@ -35,6 +35,7 @@ runs:
           -DCMAKE_CXX_COMPILER=g++-14 \
           -DPython3_EXECUTABLE="$(command -v python)" \
           -DSCHEMA_SANITIZER_ENABLE_LTO=OFF \
+          -DSCHEMA_SANITIZER_ENABLE_PCH=OFF \
           -DSCHEMA_SANITIZER_SANITIZER=tsan \
           -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON \
           -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone \

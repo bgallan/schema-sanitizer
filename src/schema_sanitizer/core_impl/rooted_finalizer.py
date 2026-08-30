@@ -120,7 +120,7 @@ def reserve_rooted_finalizer_authority(
     callback: Callable[[RootedFinalizerAuthority], object],
 ) -> tuple[int, RootedFinalizerAuthority]:
     """Reserve and root a separate cleanup authority before wrapper exposure."""
-    # Allocate the owner first.  Once reserve_ticket commits, no allocation is
+    # Allocate the owner first. Once reserve_rooted commits, no allocation is
     # required to establish the escrow's physical ownership of this authority.
     authority = RootedFinalizerAuthority(callback)
     try:

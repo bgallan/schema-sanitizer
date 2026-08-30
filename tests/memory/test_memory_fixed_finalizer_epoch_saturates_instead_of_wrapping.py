@@ -7,8 +7,10 @@ or snapshot failures roll back gates and resource domains exactly."""
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
+from _support.synchronization import join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -20,6 +22,87 @@ def test_fixed_finalizer_epoch_saturates_instead_of_wrapping() -> None:
     counter = bytearray([255, 255])
     assert _fixed_increment(counter) is False
     assert counter == bytearray([255, 255])
+
+
+def test_atomic_epoch_fork_locks_advance_without_reusing_an_ancestor_lock() -> None:
+    """Use each preallocated child fallback lock once and then fail closed."""
+    from schema_sanitizer.core_impl.atomic_epoch import AtomicEpoch
+
+    epoch = AtomicEpoch()
+    locks = epoch._fork_locks
+    assert epoch._lock is locks[0]
+    assert epoch.reset_after_fork()
+    assert epoch._lock is locks[1]
+    assert epoch.reset_after_fork()
+    assert epoch._lock is locks[2]
+    assert not epoch.reset_after_fork()
+    assert epoch._lock is locks[2]
+    epoch.replenish_fork_locks()
+    assert epoch._fork_locks[0] is locks[2]
+    assert epoch.reset_after_fork()
+    assert epoch.reset_after_fork()
+    assert not epoch.reset_after_fork()
+
+
+def test_native_atomic_epoch_exact_store_rejects_uint64_wraparound() -> None:
+    """Reject native exact-store inputs that would otherwise wrap modulo uint64."""
+    from schema_sanitizer.core_impl.native_runtime import native_core
+
+    counter = native_core.atomic_epoch_create()
+    for invalid in (-1, 1 << 64):
+        with pytest.raises(OverflowError):
+            native_core.atomic_epoch_set_exact(counter, invalid)
+    native_core.atomic_epoch_set_exact(counter, (1 << 64) - 1)
+    assert native_core.atomic_epoch_value(counter) == (1 << 64) - 1
+
+
+def test_native_atomic_epoch_marked_increment_commits_exactly_once() -> None:
+    """Commit one counter event and its retry marker in a single native call."""
+    from schema_sanitizer.core_impl.native_runtime import native_core
+
+    counter = native_core.atomic_epoch_create()
+    markers = bytearray([1, 0])
+    assert native_core.atomic_epoch_increment_marked(counter, markers, 0)
+    assert markers == bytearray([2, 0])
+    assert native_core.atomic_epoch_value(counter) == 1
+    assert native_core.atomic_epoch_increment_marked(counter, markers, 0)
+    assert native_core.atomic_epoch_value(counter) == 1
+    assert not native_core.atomic_epoch_increment_marked(counter, markers, 1)
+    assert native_core.atomic_epoch_value(counter) == 1
+
+
+def test_native_atomic_epoch_marked_increment_records_saturation() -> None:
+    """Advance the retry marker when the visible failure count is saturated."""
+    from schema_sanitizer.core_impl.native_runtime import native_core
+
+    counter = native_core.atomic_epoch_create()
+    native_core.atomic_epoch_set_exact(counter, (1 << 64) - 1)
+    markers = bytearray([1])
+    assert native_core.atomic_epoch_increment_marked(counter, markers, 0)
+    assert markers == bytearray([2])
+    assert native_core.atomic_epoch_value(counter) == (1 << 64) - 1
+
+
+def test_atomic_epoch_marked_increment_trusts_committed_postcondition() -> None:
+    """Acknowledge a native pair committed before an asynchronous exception."""
+    from schema_sanitizer.core_impl.atomic_epoch import AtomicEpoch
+
+    counter = AtomicEpoch()
+    original_increment_marked = counter._inc_marked
+    assert original_increment_marked is not None
+
+    def commit_then_interrupt(capsule: object, markers: bytearray, index: int) -> object:
+        """Raise after the real native counter-and-marker commit returns."""
+        original_increment_marked(capsule, markers, index)
+        raise KeyboardInterrupt("post marked increment")
+
+    counter._inc_marked = commit_then_interrupt
+    markers = bytearray([1])
+    assert counter.increment_marked(markers, 0)
+    assert markers == bytearray([2])
+    assert counter.value() == 1
+    assert counter.increment_marked(markers, 0)
+    assert counter.value() == 1
 
 
 def test_reserved_finalizer_admission_uses_preallocated_ring_with_bounded_recovery() -> None:
@@ -85,6 +168,115 @@ def test_quiescence_buffer_rejects_stable_reserved_owner_without_allocating_toke
     _reset_finalizer_registry_for_tests()
 
 
+def test_frozen_activity_capsules_survive_forced_capacity_rebuild() -> None:
+    """Keep shutdown's cached native counters live through recovery rebuild."""
+    from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
+    from schema_sanitizer.core_impl.finalizer_registry import (
+        _reset_finalizer_registry_for_tests,
+        finalizer_activity_buffer_size,
+        finalizer_domains,
+        freeze_finalizer_registry,
+        register_finalizer_domain,
+        write_finalizer_activity_into,
+    )
+
+    _reset_finalizer_registry_for_tests()
+    escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(1)
+    name = f"fixed-finalizer-epoch-rebuild-capsules-{id(escrow)}"
+    register_finalizer_domain(name, drain=lambda: 0, snapshot=lambda: (), escrows=((name, escrow),))
+    freeze_finalizer_registry()
+    counters = escrow.activity_counters()
+    capsules = tuple(counter.native_capsule for counter in counters)
+    assert all(capsule is not None for capsule in capsules)
+
+    ticket = escrow.reserve_ticket()
+    assert ticket is not None
+    with escrow._reserve_lock:
+        escrow._capacity_mirrors_dirty = True
+        escrow._rebuild_capacity_mirrors_locked()
+
+    assert escrow.activity_counters() == counters
+    assert tuple(counter.native_capsule for counter in escrow.activity_counters()) == capsules
+    activity = bytearray(finalizer_activity_buffer_size())
+    assert write_finalizer_activity_into(activity) is False
+    offset = 9
+    for domain in finalizer_domains():
+        for _escrow_name, registered_escrow in domain.escrows:
+            if registered_escrow is escrow:
+                assert int.from_bytes(activity[offset : offset + 8], "little") == 1
+                break
+            offset += 32
+        else:
+            continue
+        break
+    else:
+        raise AssertionError("frozen registry lost the rebuilt escrow")
+    assert escrow.release_ticket(ticket)
+    _reset_finalizer_registry_for_tests()
+
+
+def test_frozen_activity_stays_conservative_before_rooted_owner_commit() -> None:
+    """Observe the active counter while rooted admission pauses before authority."""
+    import schema_sanitizer.core_impl.finalizer_escrow as module
+    from schema_sanitizer.core_impl.finalizer_registry import (
+        _reset_finalizer_registry_for_tests,
+        finalizer_activity_buffer_size,
+        finalizer_domains,
+        freeze_finalizer_registry,
+        register_finalizer_domain,
+        write_finalizer_activity_into,
+    )
+    from schema_sanitizer.core_impl.rooted_finalizer import RootedFinalizerAuthority
+
+    _reset_finalizer_registry_for_tests()
+    escrow: module.ReservedFinalizerEscrow[RootedFinalizerAuthority] = (
+        module.ReservedFinalizerEscrow(1)
+    )
+    name = f"fixed-finalizer-epoch-preowner-activity-{id(escrow)}"
+    register_finalizer_domain(name, drain=lambda: 0, snapshot=lambda: (), escrows=((name, escrow),))
+    freeze_finalizer_registry()
+    owner = RootedFinalizerAuthority(lambda _owner: None)
+    owner_install_started = Event()
+    finish_owner_install = Event()
+
+    class PausingSlots(list[object]):
+        """Pause the exact authority assignment after conservative admission."""
+
+        def __setitem__(self, index, value) -> None:
+            """Expose the pre-owner activity window deterministically."""
+            if value is owner and not owner_install_started.is_set():
+                owner_install_started.set()
+                assert finish_owner_install.wait(30)
+            super().__setitem__(index, value)
+
+    escrow._slots = PausingSlots(escrow._slots)
+    result: dict[str, int | None] = {}
+    thread = Thread(target=lambda: result.setdefault("ticket", escrow.reserve_rooted(owner)))
+    thread.start()
+    assert owner_install_started.wait(30)
+
+    activity = bytearray(finalizer_activity_buffer_size())
+    write_finalizer_activity_into(activity)
+    offset = 9
+    for domain in finalizer_domains():
+        for _escrow_name, registered_escrow in domain.escrows:
+            if registered_escrow is escrow:
+                assert int.from_bytes(activity[offset : offset + 8], "little") == 1
+                break
+            offset += 32
+        else:
+            continue
+        break
+    else:
+        raise AssertionError("frozen registry lost the pre-owner escrow")
+
+    finish_owner_install.set()
+    join_thread_or_fail(thread)
+    assert result["ticket"] is not None
+    assert escrow.release_rooted_owner(owner)
+    _reset_finalizer_registry_for_tests()
+
+
 def test_finalizer_registry_rejects_genuinely_different_duplicate_hooks() -> None:
     """Verify finalizer registry rejects genuinely different duplicate hooks."""
     from schema_sanitizer.core_impl.finalizer_registry import (
@@ -145,24 +337,70 @@ def test_reserved_fork_reset_is_idempotent_for_duplicate_child_callbacks() -> No
     assert escrow._fork_fresh is first_fresh
 
 
+def test_prepared_fork_reset_preserves_frozen_counter_capsule_identity() -> None:
+    """Keep a frozen registry's native counter view valid in a prepared child."""
+    from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
+    from schema_sanitizer.core_impl.finalizer_registry import (
+        _reset_finalizer_registry_for_tests,
+        finalizer_activity_buffer_size,
+        finalizer_domains,
+        freeze_finalizer_registry,
+        register_finalizer_domain,
+        write_finalizer_activity_into,
+    )
+
+    _reset_finalizer_registry_for_tests()
+    escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(1)
+    name = f"fixed-finalizer-epoch-fork-capsules-{id(escrow)}"
+    register_finalizer_domain(name, drain=lambda: 0, snapshot=lambda: (), escrows=((name, escrow),))
+    freeze_finalizer_registry()
+    counters = escrow.activity_counters()
+    capsules = tuple(counter.native_capsule for counter in counters)
+
+    escrow.prepare_for_fork()
+    escrow.reset_after_fork()
+
+    assert escrow.activity_counters() == counters
+    assert tuple(counter.native_capsule for counter in escrow.activity_counters()) == capsules
+    activity = bytearray(finalizer_activity_buffer_size())
+    write_finalizer_activity_into(activity)
+    offset = 9
+    for domain in finalizer_domains():
+        for _escrow_name, registered_escrow in domain.escrows:
+            if registered_escrow is escrow:
+                assert int.from_bytes(activity[offset : offset + 8], "little") == 0
+                break
+            offset += 32
+        else:
+            continue
+        break
+    else:
+        raise AssertionError("frozen registry lost the prepared escrow")
+    _reset_finalizer_registry_for_tests()
+
+
 def test_fork_quarantine_preserves_previous_generation_until_safe_point() -> None:
     """Verify fork quarantine preserves previous generation until safe point."""
-    from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
+    from schema_sanitizer.core_impl.finalizer_escrow import (
+        _FORK_ROOTS_PER_GENERATION,
+        ReservedFinalizerEscrow,
+    )
 
     escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(1)
     ticket = escrow.reserve_ticket()
     assert ticket is not None
     owner = object()
     assert escrow.publish_reserved(ticket, owner)
+    prepared_bank = escrow._fork_fresh
     escrow.prepare_for_fork()
     escrow.reset_after_fork()
     first_root = escrow._fork_roots[0]
     assert first_root is not None
+    assert escrow._fork_roots[_FORK_ROOTS_PER_GENERATION - 1] is prepared_bank
     escrow.prepare_for_fork()
     assert escrow._fork_roots[0] is first_root
-    # Exact ticket metadata belongs to each quarantined generation, so the
-    # fixed root stride expands from 14 to 16 while preserving prior roots.
-    assert escrow._fork_roots[16] is escrow._slots
+    # Exact ticket metadata belongs to each quarantined generation.
+    assert escrow._fork_roots[_FORK_ROOTS_PER_GENERATION] is escrow._slots
     escrow.reset_after_fork()
     assert escrow._fork_root_count == 2
     escrow.capacity_snapshot()  # explicit normal-runtime safe point

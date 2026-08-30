@@ -309,11 +309,12 @@ def registered_finalizer_escrows() -> tuple[tuple[str, ReservedFinalizerEscrow[A
 
 def _reset_finalizer_registry_for_tests() -> None:
     """Reopen registration only for isolated test-runtime resets."""
-    global _REGISTRY_FROZEN, _FROZEN_DOMAINS, _FROZEN_ESCROWS
+    global _REGISTRY_FROZEN, _FROZEN_DOMAINS, _FROZEN_ESCROWS, _FROZEN_ACTIVITY_NATIVE_CAPSULES
     with _REGISTRY_LOCK:
         _REGISTRY_FROZEN = False
         _FROZEN_DOMAINS = None
         _FROZEN_ESCROWS = None
+        _FROZEN_ACTIVITY_NATIVE_CAPSULES = None
 
 
 def _prepare_registry_for_fork() -> None:

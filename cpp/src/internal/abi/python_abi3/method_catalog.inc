@@ -72,13 +72,15 @@ SCHEMA_SANITIZER_ABI3_METHOD(operation_memory_ledger_snapshot, METH_VARARGS, "Re
 SCHEMA_SANITIZER_ABI3_METHOD(operation_memory_ledger_diagnostics, METH_VARARGS, "Return over-release diagnostics for an operation ledger.")
 SCHEMA_SANITIZER_ABI3_METHOD(atomic_epoch_create, METH_NOARGS, "Create a fixed-width atomic runtime epoch counter.")
 SCHEMA_SANITIZER_ABI3_METHOD(atomic_epoch_increment, METH_VARARGS, "Increment a fixed-width atomic runtime epoch without wrap.")
+SCHEMA_SANITIZER_ABI3_METHOD(atomic_epoch_increment_marked, METH_VARARGS,
+                             "Increment an atomic epoch and commit one preallocated byte marker exactly once.")
 SCHEMA_SANITIZER_ABI3_METHOD(atomic_epoch_decrement, METH_VARARGS, "Decrement a fixed-width atomic runtime counter without underflow.")
 SCHEMA_SANITIZER_ABI3_METHOD(atomic_epoch_value, METH_VARARGS, "Read a fixed-width atomic runtime epoch.")
 SCHEMA_SANITIZER_ABI3_METHOD(atomic_epoch_write_le, METH_VARARGS, "Write an atomic runtime epoch into an existing bytearray.")
 SCHEMA_SANITIZER_ABI3_METHOD(atomic_epoch_write_activity, METH_VARARGS,
                              "Write groups of four atomic activity counters "
                              "without PyLong materialization.")
-SCHEMA_SANITIZER_ABI3_METHOD(atomic_epoch_reset, METH_VARARGS, "Reset a child-process atomic runtime epoch.")
+SCHEMA_SANITIZER_ABI3_METHOD(atomic_epoch_set_exact, METH_VARARGS, "Store one exact atomic runtime epoch value.")
 SCHEMA_SANITIZER_ABI3_METHOD(schema_registry_merge, METH_VARARGS, "Merge inferred logical schema and registry state.")
 SCHEMA_SANITIZER_ABI3_METHOD(schema_registry_empty, METH_VARARGS, "Return an empty schema-registry JSON document.")
 SCHEMA_SANITIZER_ABI3_METHOD(schema_registry_contract_payload, METH_VARARGS, "Encode registry canonical_schema as a logical schema contract payload.")

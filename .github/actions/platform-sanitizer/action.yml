@@ -79,11 +79,50 @@ runs:
         python -m pip install -v --no-build-isolation
         --config-settings=cmake.define.CMAKE_C_COMPILER=clang-18
         --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++-18
+        --config-settings=build-dir=.work/build/platform-sanitizer
+        --config-settings=cmake.build-type=RelWithDebInfo
         --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF
+        --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_PCH=OFF
         --config-settings=cmake.define.SCHEMA_SANITIZER_SANITIZER=asan-ubsan
+        --config-settings=cmake.define.SCHEMA_SANITIZER_BUILD_FUZZERS=ON
+        --config-settings=cmake.define.SCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer
+        --config-settings=cmake.define.SCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
         --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON
         --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_WERROR=ON
         .
+    - name: Certify the reused Linux sanitizer build tree
+      if: inputs.mode == 'linux-full'
+      shell: bash
+      run: |
+        set -euo pipefail
+        cache=.work/build/platform-sanitizer/CMakeCache.txt
+        if [[ -L "${cache}" || ! -f "${cache}" ]]; then
+          echo "Linux sanitizer CMake cache is missing or unsafe: ${cache}" >&2
+          exit 2
+        fi
+        expected=(
+          'CMAKE_BUILD_TYPE:STRING=RelWithDebInfo'
+          'CMAKE_GENERATOR:INTERNAL=Ninja'
+          'CMAKE_PROJECT_NAME:STATIC=schema_sanitizer'
+          'SCHEMA_SANITIZER_BUILD_FUZZERS:BOOL=ON'
+          'SCHEMA_SANITIZER_ENABLE_LTO:BOOL=OFF'
+          'SCHEMA_SANITIZER_ENABLE_PCH:BOOL=OFF'
+          'SCHEMA_SANITIZER_ENABLE_WERROR:BOOL=ON'
+          'SCHEMA_SANITIZER_FUZZ_ENGINE:STRING=libfuzzer'
+          'SCHEMA_SANITIZER_REQUIRE_ZLIB:BOOL=ON'
+          'SCHEMA_SANITIZER_SANITIZER:STRING=asan-ubsan'
+          'SCHEMA_SANITIZER_ZLIB_PROVIDER:STRING=bundled'
+        )
+        for entry in "${expected[@]}"; do
+          grep -Fx -- "${entry}" "${cache}" >/dev/null || {
+            echo "Linux sanitizer build mismatch: missing '${entry}'" >&2
+            exit 2
+          }
+        done
+        grep -Eq '^CMAKE_C_COMPILER:(FILEPATH=/usr/bin/clang-18|UNINITIALIZED=clang-18)$' \
+          "${cache}"
+        grep -Eq '^CMAKE_CXX_COMPILER:(FILEPATH=/usr/bin/clang[+][+]-18|UNINITIALIZED=clang[+][+]-18)$' \
+          "${cache}"
     - name: Build the Linux sanitizer-first CPython launcher
       if: inputs.mode == 'linux-full'
       shell: bash
@@ -123,23 +162,6 @@ runs:
         tests/parquet/test_parquet_native_recursive_cases.py::test_native_recursive_case[native_parquet_stream_materializes_generated_extreme_recursive_shapes]
         tests/parquet/test_parquet_native_recursive_cases.py::test_native_recursive_case[native_parquet_stream_materializes_generated_recursive_shape_fuzzer]
         tests/pipeline/test_csv_union_projection.py
-    - name: Configure Linux ASan/UBSan
-      if: inputs.mode == 'linux-full'
-      env:
-        SANITIZER: ${{ inputs.sanitizer }}
-      shell: bash
-      run: >-
-        cmake -S . -B .work/build/platform-sanitizer -G Ninja
-        -DCMAKE_BUILD_TYPE=RelWithDebInfo
-        -DCMAKE_C_COMPILER=clang-18
-        -DCMAKE_CXX_COMPILER=clang++-18
-        -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
-        -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}"
-        -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
-        -DSCHEMA_SANITIZER_FUZZ_ENGINE=libfuzzer
-        -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
-        -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
-        -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
     - name: Configure Windows ASan
       if: runner.os == 'Windows'
       env:
@@ -149,6 +171,7 @@ runs:
         cmake -S . -B .work/build/platform-sanitizer
         -G "Visual Studio 17 2022" -A x64 -T v143,host=x64
         -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
+        -DSCHEMA_SANITIZER_ENABLE_PCH=OFF
         -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}"
         -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
         -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone
@@ -166,6 +189,7 @@ runs:
         -DCMAKE_BUILD_TYPE=RelWithDebInfo
         -DCMAKE_OSX_SYSROOT=macosx15.5
         -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
+        -DSCHEMA_SANITIZER_ENABLE_PCH=OFF
         -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}"
         -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
         -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone

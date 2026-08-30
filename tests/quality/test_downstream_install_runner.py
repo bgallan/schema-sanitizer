@@ -6,6 +6,7 @@ constraints for every published dependency group.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
 import shlex
@@ -31,6 +32,16 @@ def _module():
     return module
 
 
+def _seed_wheels(module, root: Path) -> Path:
+    """Create one test-owned pip seed and align the loaded helper's digest."""
+    seed_root = root / "seed-wheels"
+    seed_root.mkdir()
+    payload = b"deterministic virtualenv seed"
+    (seed_root / module._PIP_WHEEL_NAME).write_bytes(payload)
+    module._PIP_WHEEL_SHA256 = hashlib.sha256(payload).hexdigest()
+    return seed_root
+
+
 def test_every_extra_is_installed_and_imported_in_isolation(
     tmp_path: Path,
 ) -> None:
@@ -39,10 +50,15 @@ def test_every_extra_is_installed_and_imported_in_isolation(
     wheel = tmp_path / "schema_sanitizer-0.4.0-cp311-abi3-linux.whl"
     wheel.write_bytes(b"wheel")
     constraints = ROOT / "meta/ci/requirements/downstream.txt"
-    plan = module.shell_plan(wheel, tmp_path, SCRIPT.parent, constraints)
+    seed_wheels = _seed_wheels(module, tmp_path)
+    plan = module.shell_plan(wheel, tmp_path, SCRIPT.parent, constraints, seed_wheels)
 
-    assert plan.count(" -m venv ") == len(module.EXTRA_IMPORTS) + 1
-    assert plan.count("pip==26.2.1") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count(" -m virtualenv ") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("--seeder app-data") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("--no-download") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("--copies") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("--pip 26.2.1") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("pip.__version__") == len(module.EXTRA_IMPORTS) + 1
     assert plan.count("[downstream-extra]") == len(module.EXTRA_IMPORTS)
     for extra, imports in module.EXTRA_IMPORTS.items():
         assert f"[downstream-extra] {extra}" in plan
@@ -61,13 +77,16 @@ def test_downstream_plan_quotes_paths_and_owns_cleanup(tmp_path: Path) -> None:
     wheel = wheel_root / "schema sanitizer.whl"
     wheel.write_bytes(b"wheel")
     constraints = ROOT / "meta/ci/requirements/downstream.txt"
+    seed_wheels = _seed_wheels(module, tmp_path)
 
-    plan = module.shell_plan(wheel, tmp_path / "work root", SCRIPT.parent, constraints)
+    plan = module.shell_plan(wheel, tmp_path / "work root", SCRIPT.parent, constraints, seed_wheels)
 
     assert shlex.quote(wheel.as_posix()) in plan
     assert "trap cleanup_downstream EXIT" in plan
     assert 'rm -rf -- "${isolated_root}"' in plan
-    assert plan == module.shell_plan(wheel, tmp_path / "work root", SCRIPT.parent, constraints)
+    assert plan == module.shell_plan(
+        wheel, tmp_path / "work root", SCRIPT.parent, constraints, seed_wheels
+    )
 
 
 def test_downstream_command_output_is_atomic_and_rejects_symlinks(tmp_path: Path) -> None:
@@ -93,6 +112,40 @@ def test_downstream_command_output_is_atomic_and_rejects_symlinks(tmp_path: Path
     assert target.read_text(encoding="utf-8") == "preserve\n"
 
 
+def test_downstream_virtualenv_seed_is_exact_and_digest_verified(tmp_path: Path) -> None:
+    """Extra, renamed, or corrupted seed wheels fail before plan publication."""
+    module = _module()
+    seed_root = tmp_path / "seeds"
+    seed_root.mkdir()
+    expected = seed_root / module._PIP_WHEEL_NAME
+    expected.write_bytes(b"corrupt")
+
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        module._validated_seed_directory(seed_root)
+
+    module._PIP_WHEEL_SHA256 = hashlib.sha256(b"corrupt").hexdigest()
+    (seed_root / "unexpected.whl").write_bytes(b"extra")
+    with pytest.raises(ValueError, match="must contain exactly"):
+        module._validated_seed_directory(seed_root)
+
+
+def test_downstream_virtualenv_seed_rejects_symlinked_wheel(tmp_path: Path) -> None:
+    """A matching seed filename cannot redirect validation outside its root."""
+    module = _module()
+    seed_root = tmp_path / "seeds"
+    seed_root.mkdir()
+    target = tmp_path / "target.whl"
+    target.write_bytes(b"seed")
+    seed = seed_root / module._PIP_WHEEL_NAME
+    try:
+        seed.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+
+    with pytest.raises(ValueError, match="regular file"):
+        module._validated_seed_directory(seed_root)
+
+
 def test_downstream_plan_rejects_overlapping_owned_inputs_and_outputs(tmp_path: Path) -> None:
     """Owned cleanup and plan publication cannot consume or replace plan inputs."""
     module = _module()
@@ -104,26 +157,43 @@ def test_downstream_plan_rejects_overlapping_owned_inputs_and_outputs(tmp_path: 
     outside_wheel = tmp_path / "outside.whl"
     outside_wheel.write_bytes(b"wheel")
     constraints = ROOT / "meta/ci/requirements/downstream.txt"
+    seed_wheels = _seed_wheels(module, tmp_path)
     outside_output = tmp_path / "commands.sh"
     invalid = (
-        (owned_wheel, SCRIPT.parent, constraints, outside_output, "owned downstream root"),
-        (outside_wheel, SCRIPT.parent, constraints, outside_wheel, "command output"),
+        (
+            owned_wheel,
+            SCRIPT.parent,
+            constraints,
+            seed_wheels,
+            outside_output,
+            "owned downstream root",
+        ),
         (
             outside_wheel,
             SCRIPT.parent,
             constraints,
+            seed_wheels,
+            outside_wheel,
+            "command output",
+        ),
+        (
+            outside_wheel,
+            SCRIPT.parent,
+            constraints,
+            seed_wheels,
             SCRIPT.parent / "commands.sh",
             "scripts root",
         ),
     )
 
-    for wheel, scripts, constraint, command_output, message in invalid:
+    for wheel, scripts, constraint, seeds, command_output, message in invalid:
         with pytest.raises(ValueError, match=message):
             module.shell_plan(
                 wheel,
                 work_root,
                 scripts,
                 constraint,
+                seeds,
                 command_output=command_output,
             )
     assert owned_wheel.read_bytes() == b"preserve"
@@ -139,12 +209,14 @@ def test_downstream_plan_allows_read_only_inputs_to_share_a_tree(tmp_path: Path)
     constraints.write_text("dependency==1\n", encoding="utf-8")
     wheel = tmp_path / "package.whl"
     wheel.write_bytes(b"wheel")
+    seed_wheels = _seed_wheels(module, tmp_path)
 
     plan = module.shell_plan(
         wheel,
         tmp_path / "work",
         scripts,
         constraints,
+        seed_wheels,
         command_output=tmp_path / "commands.sh",
     )
 
@@ -162,11 +234,13 @@ def test_downstream_cleanup_traps_report_cleanup_only_failures(
     wheel = tmp_path / "package.whl"
     wheel.write_bytes(b"wheel")
     constraints = ROOT / "meta/ci/requirements/downstream.txt"
+    seed_wheels = _seed_wheels(module, tmp_path)
     generated = module.shell_plan(
         wheel,
         tmp_path / f"work-{primary_status}",
         SCRIPT.parent,
         constraints,
+        seed_wheels,
         command_output=tmp_path / f"commands-{primary_status}.sh",
     )
     wrapper = SCRIPT.with_suffix(".sh").read_text(encoding="utf-8")

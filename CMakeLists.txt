@@ -92,6 +92,9 @@ option(SCHEMA_SANITIZER_ENABLE_CLANG_TIDY
 set(SCHEMA_SANITIZER_CLANG_TIDY_CHECKS
     "clang-analyzer-*"
     CACHE STRING "clang-tidy checks used when clang-tidy is enabled")
+option(SCHEMA_SANITIZER_ENABLE_PCH
+       "Use target-private precompiled headers for production Release builds"
+       OFF)
 
 # Optional (Linux): link libstdc++/libgcc statically for our shared libraries.
 # This is OFF by default because manylinux images/toolchains may not ship static
@@ -115,6 +118,39 @@ set(SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN
     "schema-sanitizer-%p.profraw"
     CACHE STRING
           "LLVM raw profile path pattern embedded in instrumented targets")
+
+# PCH is a release-wheel compilation optimization, not part of the language or
+# dependency contract. Diagnostic builds deliberately parse every translation
+# unit from its declared includes so sanitizer, coverage, and include-hygiene
+# results cannot depend on a precompiled prefix.
+if(SCHEMA_SANITIZER_ENABLE_PCH)
+  if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
+    message(
+      FATAL_ERROR
+        "SCHEMA_SANITIZER_ENABLE_PCH is incompatible with sanitizer builds")
+  endif()
+  if(SCHEMA_SANITIZER_ENABLE_COVERAGE)
+    message(
+      FATAL_ERROR
+        "SCHEMA_SANITIZER_ENABLE_PCH is incompatible with coverage builds")
+  endif()
+  if(SCHEMA_SANITIZER_ENABLE_CLANG_TIDY)
+    message(
+      FATAL_ERROR
+        "SCHEMA_SANITIZER_ENABLE_PCH is incompatible with clang-tidy/include-hygiene builds"
+    )
+  endif()
+  get_property(_schema_sanitizer_multi_config GLOBAL
+               PROPERTY GENERATOR_IS_MULTI_CONFIG)
+  if(NOT _schema_sanitizer_multi_config AND NOT CMAKE_BUILD_TYPE STREQUAL
+                                            "Release")
+    message(
+      FATAL_ERROR
+        "SCHEMA_SANITIZER_ENABLE_PCH requires CMAKE_BUILD_TYPE=Release for single-config generators"
+    )
+  endif()
+  unset(_schema_sanitizer_multi_config)
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/SchemaSanitizerTargetOptions.cmake")
 
@@ -209,6 +245,13 @@ foreach(_schema_sanitizer_target sanitize_core
   target_include_directories(${_schema_sanitizer_target} PRIVATE cpp/src
                                                                  cpp/thirdparty)
 endforeach()
+
+# The core and ABI module intentionally own different PCHs. In particular, the
+# core never inherits Python.h, while the module PCH is compiled with the same
+# target-owned Py_LIMITED_API definition as every ABI3 translation unit.
+schema_sanitizer_enable_release_pch(sanitize_core core)
+schema_sanitizer_enable_release_pch(${_schema_sanitizer_pymod_target}
+                                    python_abi3)
 
 # Link
 target_link_libraries(sanitize_core PUBLIC Threads::Threads)

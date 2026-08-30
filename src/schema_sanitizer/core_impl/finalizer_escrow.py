@@ -21,19 +21,15 @@ _EMPTY = object()
 _ReservedForkBank: TypeAlias = tuple[
     list[object],
     bytearray,
+    bytearray,
+    bytearray,
     list[int],
     list[Lock],
     list[int | None],
     dict[int, int],
+    dict[int, int],
     list[int],
     Lock,
-    AtomicEpoch,
-    AtomicEpoch,
-    AtomicEpoch,
-    AtomicEpoch,
-    AtomicEpoch,
-    AtomicEpoch,
-    AtomicEpoch,
 ]
 
 _FREE = 0
@@ -43,18 +39,25 @@ _CLAIMED = 3
 _RETIRED = 4
 _RECYCLE_PENDING = 5
 _PROCESSED = 6
+_PUBLICATION_IDLE = 0
+_PUBLICATION_PENDING = 1
+_PUBLICATION_FAILURE_RECORDED = 2
 _MAX_TICKET = (1 << 63) - 1
 _MAX_FORK_QUARANTINE_GENERATIONS = 4
+# One prepared bank contains the eleven swapped authority/mirror objects plus
+# the next bank. Live AtomicEpoch wrappers stay attached to the escrow so a
+# frozen registry's native capsules remain valid across fork.
+_FORK_ROOTS_PER_GENERATION = 12
 
 _PTR_BYTES = max(8, sys.getsizeof([None]) - sys.getsizeof([]))
 _LIST_BASE_BYTES = sys.getsizeof([])
 _BYTEARRAY_BASE_BYTES = sys.getsizeof(bytearray())
 _LOCK_BYTES = sys.getsizeof(Lock())
 _FIXED_INT_BYTES = sys.getsizeof((1 << 63) - 1)
-# AtomicEpoch owns a Python wrapper and, with ABI3, a tiny native atomic/capsule.
-# Reserve a deliberately high fixed charge so the static baseline remains
-# conservative across supported Python allocators.
-_ATOMIC_EPOCH_BYTES = 256
+# AtomicEpoch owns a Python wrapper, three preallocated fallback fork locks and,
+# with ABI3, a tiny native atomic/capsule. Reserve a deliberately high fixed
+# charge so the static baseline remains conservative across supported allocators.
+_ATOMIC_EPOCH_BYTES = 512
 
 
 def _list_storage_bytes(count: int, *, element_bytes: int = 0) -> int:
@@ -68,16 +71,22 @@ def _reserved_escrow_static_bytes(capacity: int) -> int:
         _list_storage_bytes(capacity)  # owner slots
         + _BYTEARRAY_BASE_BYTES
         + capacity
+        + _BYTEARRAY_BASE_BYTES
+        + capacity  # durable owner-retirement commit markers
+        + _BYTEARRAY_BASE_BYTES
+        + capacity  # durable owner-publication commit markers
         + _list_storage_bytes(capacity, element_bytes=_FIXED_INT_BYTES)
         + _list_storage_bytes(capacity, element_bytes=_LOCK_BYTES)
         + _list_storage_bytes(capacity, element_bytes=_FIXED_INT_BYTES)
-        + _list_storage_bytes(capacity)  # exact ticket values by slot
+        + _list_storage_bytes(capacity, element_bytes=_FIXED_INT_BYTES)  # free-ring indices
         + capacity * 192  # bounded ticket->slot dict entries + allocator reserve
+        + capacity * 192  # bounded owner-id->slot derived entries + allocator reserve
         + _LOCK_BYTES
-        + 7 * _ATOMIC_EPOCH_BYTES
     )
-    roots = _list_storage_bytes(14 * _MAX_FORK_QUARANTINE_GENERATIONS)
-    raw = 3 * per_bank + roots + 4096
+    roots = _list_storage_bytes(_FORK_ROOTS_PER_GENERATION * _MAX_FORK_QUARANTINE_GENERATIONS)
+    # Three fixed banks hold only swapped arrays/locks. The escrow itself owns
+    # the one stable seven-counter set used by frozen activity observation.
+    raw = 3 * per_bank + 7 * _ATOMIC_EPOCH_BYTES + roots + 4096
     # 25% allocator/alignment reserve keeps this a conservative footprint, not
     # the former unexplained bytes-per-slot heuristic.
     return max(4096, raw + raw // 4)
@@ -194,14 +203,20 @@ class ReservedFinalizerEscrow(Generic[T]):
         "_max_generation",
         "_slots",
         "_states",
+        "_owner_retirements",
+        "_owner_publications",
         "_generations",
         "_slot_locks",
         "_tickets",
         "_ticket_slots",
+        "_owner_slots",
+        "_capacity_mirrors_dirty",
+        "_owner_slots_dirty",
         "_free_ring",
         "_free_head",
         "_free_tail",
         "_free_count",
+        "_pending_hint",
         "_consume_cursor",
         "_reserve_lock",
         "_overflowed",
@@ -242,6 +257,8 @@ class ReservedFinalizerEscrow(Generic[T]):
             self._max_generation = _MAX_TICKET >> self._slot_bits
             self._slots: list[object] = [_EMPTY] * capacity
             self._states = bytearray(capacity)
+            self._owner_retirements = bytearray(capacity)
+            self._owner_publications = bytearray(capacity)
             self._generations: list[int] = [0] * capacity
             self._slot_locks: list[Lock] = [Lock() for _ in range(capacity)]
             # Exact ticket metadata is prepared before reservation commit. Finalizer
@@ -249,10 +266,14 @@ class ReservedFinalizerEscrow(Generic[T]):
             # assignments; it never decodes a PyLong with allocating arithmetic.
             self._tickets: list[int | None] = [None] * capacity
             self._ticket_slots: dict[int, int] = {}
+            self._owner_slots: dict[int, int] = {}
+            self._capacity_mirrors_dirty = False
+            self._owner_slots_dirty = False
             self._free_ring = list(range(capacity))
             self._free_head = 0
             self._free_tail = 0
             self._free_count = capacity
+            self._pending_hint = -1
             self._consume_cursor = 0
             self._reserve_lock = Lock()
             self._overflowed = False
@@ -263,7 +284,9 @@ class ReservedFinalizerEscrow(Generic[T]):
             self._publication_failures_counter = AtomicEpoch()
             self._publication_epoch_counter = AtomicEpoch()
             self._progress_epoch_counter = AtomicEpoch()
-            self._fork_roots: list[object | None] = [None] * (16 * _MAX_FORK_QUARANTINE_GENERATIONS)
+            self._fork_roots: list[object | None] = [None] * (
+                _FORK_ROOTS_PER_GENERATION * _MAX_FORK_QUARANTINE_GENERATIONS
+            )
             self._fork_root_count = 0
             self._fork_prepare_index = -1
             self._fork_fresh: _ReservedForkBank | None
@@ -297,19 +320,15 @@ class ReservedFinalizerEscrow(Generic[T]):
         return (
             [_EMPTY] * self._capacity,
             bytearray(self._capacity),
+            bytearray(self._capacity),
+            bytearray(self._capacity),
             [0] * self._capacity,
             [Lock() for _ in range(self._capacity)],
             [None] * self._capacity,
             {},
+            {},
             list(range(self._capacity)),
             Lock(),
-            AtomicEpoch(),
-            AtomicEpoch(),
-            AtomicEpoch(),
-            AtomicEpoch(),
-            AtomicEpoch(),
-            AtomicEpoch(),
-            AtomicEpoch(),
         )
 
     def _safe_point_after_fork(self) -> None:
@@ -324,10 +343,20 @@ class ReservedFinalizerEscrow(Generic[T]):
         except BaseException:
             return
         self._post_fork_quarantine_pending = False
-        limit = self._fork_root_count * 16
+        limit = self._fork_root_count * _FORK_ROOTS_PER_GENERATION
         for index in range(limit):
             self._fork_roots[index] = None
         self._fork_root_count = 0
+        for counter in (
+            self._active_counter,
+            self._published_counter,
+            self._retired_counter,
+            self._admission_rejections_counter,
+            self._publication_failures_counter,
+            self._publication_epoch_counter,
+            self._progress_epoch_counter,
+        ):
+            counter.replenish_fork_locks()
         if self._fork_fresh is None:
             self._fork_fresh = self._make_fresh_bank()
         if self._fork_spare2 is None:
@@ -384,14 +413,16 @@ class ReservedFinalizerEscrow(Generic[T]):
         """Return whether the value is armed for the supplied escrow ticket."""
         return ticket is not None and ticket > 0 and cls._armed_ticket(value) == ticket
 
-    @staticmethod
-    def _arm_value_for(value: object, ticket: int) -> bool:
-        """Arm a retained value with its authoritative escrow ticket."""
+    @classmethod
+    def _arm_value_for(cls, value: object, ticket: int) -> bool:
+        """Arm a retained value and verify the exact postcondition."""
         try:
             value.arm_for_ticket(ticket)  # type: ignore[attr-defined]
-            return True
         except BaseException:
-            return False
+            # The owner assignment may commit before an asynchronous exception
+            # reaches the caller. Exact armed authority wins over control flow.
+            return cls._is_armed_for(value, ticket)
+        return cls._is_armed_for(value, ticket)
 
     @staticmethod
     def _disarm_value_for(value: object, ticket: int | None = None) -> None:
@@ -447,6 +478,49 @@ class ReservedFinalizerEscrow(Generic[T]):
         self._free_tail = next_tail
         self._free_count = next_count
 
+    def _slot_for_rooted_owner_locked(self, value: object) -> int:
+        """Resolve a rooted owner from the derived id index with exact validation."""
+        self._ensure_owner_slots_locked()
+        slot = self._owner_slots.get(id(value), -1)
+        if 0 <= slot < self._capacity and self._slots[slot] is value:
+            return slot
+        if slot >= 0:
+            self._owner_slots_dirty = True
+            self._rebuild_owner_slots_locked()
+            slot = self._owner_slots.get(id(value), -1)
+            if 0 <= slot < self._capacity and self._slots[slot] is value:
+                return slot
+        return -1
+
+    def _rebuild_owner_slots_locked(self) -> None:
+        """Rebuild only the derived owner identity index under admission serialization."""
+        self._owner_slots_dirty = True
+        rebuilt: dict[int, int] = {}
+        for slot in range(self._capacity):
+            with self._slot_locks[slot]:
+                value = self._slots[slot]
+                if value is _EMPTY or self._states[slot] in (_FREE, _RETIRED, _RECYCLE_PENDING):
+                    continue
+                owner_id = id(value)
+                existing = rebuilt.get(owner_id, -1)
+                if existing >= 0 and self._slots[existing] is value:
+                    self._overflowed = True
+                    self._publication_failures_counter.increment()
+                    continue
+                rebuilt[owner_id] = slot
+        self._owner_slots = rebuilt
+        self._owner_slots_dirty = False
+
+    def _ensure_owner_slots_locked(self) -> None:
+        """Repair the owner identity index without rebuilding capacity mirrors."""
+        if self._owner_slots_dirty:
+            self._rebuild_owner_slots_locked()
+
+    def _ensure_capacity_mirrors_locked(self) -> None:
+        """Repair ticket, ring, and counter mirrors under the admission lock."""
+        if self._capacity_mirrors_dirty:
+            self._rebuild_capacity_mirrors_locked()
+
     def _recycle_one_pending_locked(self) -> bool:
         """Return one owner-free pending slot to the free ring.
 
@@ -456,6 +530,23 @@ class ReservedFinalizerEscrow(Generic[T]):
         """
         if self._free_count >= self._capacity:
             return False
+        hinted = self._pending_hint
+        if 0 <= hinted < self._capacity:
+            with self._slot_locks[hinted]:
+                if self._states[hinted] == _RECYCLE_PENDING and self._slots[hinted] is _EMPTY:
+                    prepared = self._ring_prepare_push_locked(hinted)
+                    if prepared is not None:
+                        tail, next_tail, next_count = prepared
+                        mirrors_were_dirty = self._capacity_mirrors_dirty
+                        self._capacity_mirrors_dirty = True
+                        self._ring_commit_push_locked(hinted, tail, next_tail, next_count)
+                        self._states[hinted] = _FREE
+                        self._pending_hint = -1
+                        self._capacity_mirrors_dirty = mirrors_were_dirty
+                        return True
+            self._pending_hint = -1
+        # A bounded scan is the recovery path for an interruption before the
+        # retiring producer could publish its exact pending-slot hint.
         for slot in range(self._capacity):
             if self._states[slot] != _RECYCLE_PENDING:
                 continue
@@ -467,8 +558,13 @@ class ReservedFinalizerEscrow(Generic[T]):
             with self._slot_locks[slot]:
                 if self._states[slot] != _RECYCLE_PENDING or self._slots[slot] is not _EMPTY:
                     continue
+                mirrors_were_dirty = self._capacity_mirrors_dirty
+                self._capacity_mirrors_dirty = True
                 self._ring_commit_push_locked(slot, tail, next_tail, next_count)
                 self._states[slot] = _FREE
+                if self._pending_hint == slot:
+                    self._pending_hint = -1
+                self._capacity_mirrors_dirty = mirrors_were_dirty
                 return True
         return False
 
@@ -478,6 +574,7 @@ class ReservedFinalizerEscrow(Generic[T]):
             return None
         self._safe_point_after_fork()
         with self._reserve_lock:
+            self._ensure_capacity_mirrors_locked()
             while True:
                 prepared = self._ring_prepare_pop_locked()
                 if prepared is None:
@@ -494,16 +591,20 @@ class ReservedFinalizerEscrow(Generic[T]):
                     if self._states[slot] != _FREE:
                         # Ring corruption is terminal; consume this bad entry so
                         # repeated reservations cannot spin on it forever.
+                        self._capacity_mirrors_dirty = True
                         self._ring_commit_pop_locked(next_head, next_count)
                         self._overflowed = True
                         self._publication_failures_counter.increment()
+                        self._capacity_mirrors_dirty = False
                         continue
                     generation = self._generations[slot] + 1
                     if generation > self._max_generation:
+                        self._capacity_mirrors_dirty = True
                         self._ring_commit_pop_locked(next_head, next_count)
                         self._states[slot] = _RETIRED
                         self._retired_counter.increment()
                         self._bump_progress()
+                        self._capacity_mirrors_dirty = False
                         continue
                     # Ticket construction is deliberately before active/state/ring
                     # publication. A PyLong OOM therefore leaves no hidden owner.
@@ -511,6 +612,7 @@ class ReservedFinalizerEscrow(Generic[T]):
                     # Prepublish the exact ticket lookup before any authoritative
                     # reservation state changes. Dict growth/OOM is therefore a
                     # pre-commit failure, while finalizer publication is lookup-only.
+                    self._capacity_mirrors_dirty = True
                     self._ticket_slots[ticket] = slot
                     if not self._active_counter.increment():
                         self._ticket_slots.pop(ticket, None)
@@ -519,6 +621,7 @@ class ReservedFinalizerEscrow(Generic[T]):
                         self._publication_failures_counter.increment()
                         self._states[slot] = _RETIRED
                         self._retired_counter.increment()
+                        self._capacity_mirrors_dirty = False
                         continue
                     # Commit tail: only assignments to already allocated storage.
                     self._ring_commit_pop_locked(next_head, next_count)
@@ -526,58 +629,115 @@ class ReservedFinalizerEscrow(Generic[T]):
                     self._tickets[slot] = ticket
                     self._states[slot] = _RESERVED
                     self._bump_progress()
+                    self._capacity_mirrors_dirty = False
                     return ticket
 
     def _rebuild_capacity_mirrors_locked(self) -> None:
         """Rebuild free-ring/cardinality mirrors from fixed slot authority.
 
-        Admission-side recovery may allocate fresh AtomicEpoch wrappers. Exact
-        slot owner/state/ticket arrays remain the authority and cleanup never
-        waits on this repair.
+        Exact slot owner/state/ticket arrays remain the authority and cleanup
+        never waits on this repair.  Counter wrappers are reset in place: the
+        finalizer registry caches their native capsules after freeze.
         """
+        self._capacity_mirrors_dirty = True
         free_count = 0
         active = 0
         published = 0
         retired = 0
         rebuilt_tickets: dict[int, int] = {}
+        rebuilt_owners: dict[int, int] = {}
         for slot in range(self._capacity):
-            state = self._states[slot]
-            value = self._slots[slot]
-            ticket = self._tickets[slot]
-            if value is not _EMPTY and state not in (_FREE, _RETIRED, _RECYCLE_PENDING):
-                active += 1
-                if state in (_PUBLISHED, _CLAIMED, _PROCESSED):
-                    published += 1
-                if ticket is not None:
-                    rebuilt_tickets[ticket] = slot
-                continue
-            if state == _RETIRED:
-                retired += 1
-                continue
-            # Owner-free pending/free state is admission capacity.
-            self._slots[slot] = _EMPTY
-            self._states[slot] = _FREE
-            self._tickets[slot] = None
-            self._free_ring[free_count] = slot
-            free_count += 1
+            with self._slot_locks[slot]:
+                state = self._states[slot]
+                value = self._slots[slot]
+                ticket = self._tickets[slot]
+                publication_marker = self._owner_publications[slot]
+                publication_pending = publication_marker != _PUBLICATION_IDLE
+                if publication_pending and value is not _EMPTY and state == _RESERVED:
+                    # Direct-ticket publication commits through exact owner retention.
+                    # If its following state write was interrupted, complete
+                    # that handoff before deriving counters and ticket maps.
+                    self._states[slot] = _PUBLISHED
+                    state = _PUBLISHED
+                elif (
+                    publication_pending
+                    and value is _EMPTY
+                    and state in (_RESERVED, _RECYCLE_PENDING)
+                ):
+                    # Publication never acquired owner authority. Cancel its
+                    # naked reservation, but first make the loss visible to
+                    # frozen shutdown observers as a durable failure.
+                    self._states[slot] = _RECYCLE_PENDING
+                    state = _RECYCLE_PENDING
+                    self._overflowed = True
+                    if publication_marker == _PUBLICATION_PENDING and not (
+                        self._publication_failures_counter.increment_marked(
+                            self._owner_publications, slot
+                        )
+                    ):
+                        raise RuntimeError(
+                            "reserved finalizer publication failure counter is unavailable"
+                        )
+                    if self._owner_publications[slot] != _PUBLICATION_FAILURE_RECORDED:
+                        raise RuntimeError(
+                            "reserved finalizer publication failure marker is invalid"
+                        )
+                self._owner_publications[slot] = _PUBLICATION_IDLE
+                retirement_committed = bool(self._owner_retirements[slot]) and value is _EMPTY
+                is_reserved_ticket = (
+                    not retirement_committed
+                    and state == _RESERVED
+                    and ticket is not None
+                    and value is _EMPTY
+                )
+                if is_reserved_ticket or (
+                    not retirement_committed
+                    and value is not _EMPTY
+                    and state not in (_FREE, _RETIRED, _RECYCLE_PENDING)
+                ):
+                    active += 1
+                    if state in (_PUBLISHED, _CLAIMED, _PROCESSED):
+                        published += 1
+                    if ticket is not None:
+                        rebuilt_tickets[ticket] = slot
+                    if value is not _EMPTY:
+                        rebuilt_owners[id(value)] = slot
+                    self._owner_retirements[slot] = 0
+                    continue
+                if state == _RETIRED or (
+                    retirement_committed and self._generations[slot] >= self._max_generation
+                ):
+                    self._states[slot] = _RETIRED
+                    self._tickets[slot] = None
+                    retired += 1
+                    self._owner_retirements[slot] = 0
+                    continue
+                # Owner-free pending/free state is admission capacity.
+                self._slots[slot] = _EMPTY
+                self._states[slot] = _FREE
+                self._tickets[slot] = None
+                self._free_ring[free_count] = slot
+                free_count += 1
+                self._owner_retirements[slot] = 0
         for index in range(free_count, self._capacity):
             self._free_ring[index] = 0
         self._free_head = 0
         self._free_count = free_count
         self._free_tail = 0 if free_count == self._capacity else free_count
         self._ticket_slots = rebuilt_tickets
-        active_counter = AtomicEpoch()
-        published_counter = AtomicEpoch()
-        retired_counter = AtomicEpoch()
-        for _ in range(active):
-            active_counter.increment()
-        for _ in range(published):
-            published_counter.increment()
-        for _ in range(retired):
-            retired_counter.increment()
-        self._active_counter = active_counter
-        self._published_counter = published_counter
-        self._retired_counter = retired_counter
+        self._owner_slots = rebuilt_owners
+        self._owner_slots_dirty = False
+        self._pending_hint = -1
+        if not self._active_counter.set_exact(active):
+            self._overflowed = True
+            self._publication_failures_counter.increment()
+        if not self._published_counter.set_exact(published):
+            self._overflowed = True
+            self._publication_failures_counter.increment()
+        if not self._retired_counter.set_exact(retired):
+            self._overflowed = True
+            self._publication_failures_counter.increment()
+        self._capacity_mirrors_dirty = False
 
     def reserve_rooted(self, value: T) -> int | None:
         """Reserve a generation with *value* rooted before token handoff.
@@ -592,15 +752,16 @@ class ReservedFinalizerEscrow(Generic[T]):
         self._safe_point_after_fork()
         slot = -1
         ticket: int | None = None
-        rollback_owner = False
+        rollback_needed = False
         try:
             with self._reserve_lock:
-                # One exact owner may occupy at most one generation.  This
-                # scan is bounded by escrow capacity and runs only on admission;
-                # it avoids a second dynamically-grown authority index.
-                for existing_slot in range(self._capacity):
-                    if self._slots[existing_slot] is not value:
-                        continue
+                self._ensure_capacity_mirrors_locked()
+                self._ensure_owner_slots_locked()
+                # One exact owner may occupy at most one generation. Object ids
+                # are never authority: owner-carried tickets are validated
+                # against both the ticket map and the exact rooted slot.
+                existing_slot = self._slot_for_rooted_owner_locked(value)
+                if existing_slot >= 0:
                     with self._slot_locks[existing_slot]:
                         existing_ticket = self._tickets[existing_slot]
                         existing_state = self._states[existing_slot]
@@ -628,26 +789,27 @@ class ReservedFinalizerEscrow(Generic[T]):
                     slot, next_head, next_count = prepared
                     with self._slot_locks[slot]:
                         if self._states[slot] != _FREE or self._slots[slot] is not _EMPTY:
+                            self._capacity_mirrors_dirty = True
                             self._ring_commit_pop_locked(next_head, next_count)
                             self._overflowed = True
                             self._publication_failures_counter.increment()
+                            self._capacity_mirrors_dirty = False
                             continue
                         generation = self._generations[slot] + 1
                         if generation > self._max_generation:
+                            self._capacity_mirrors_dirty = True
                             self._ring_commit_pop_locked(next_head, next_count)
                             self._states[slot] = _RETIRED
                             self._retired_counter.increment()
                             self._bump_progress()
+                            self._capacity_mirrors_dirty = False
                             continue
                         ticket = self._encode_ticket(slot, generation)
-                        # Exact owner first. From this assignment onward a
-                        # rollback can locate authority without the returned int.
-                        rollback_owner = True
-                        self._slots[slot] = value
-                        try:
-                            setattr(value, "ticket", ticket)
-                        except BaseException:
-                            pass
+                        # Keep frozen activity observation conservative: the
+                        # active counter reaches its exact-or-overcounted state
+                        # before an owner becomes reachable in the slot.
+                        self._capacity_mirrors_dirty = True
+                        rollback_needed = True
                         self._ticket_slots[ticket] = slot
                         if not self._active_counter.increment():
                             raise RuntimeError("reserved finalizer active counter exhausted")
@@ -655,34 +817,32 @@ class ReservedFinalizerEscrow(Generic[T]):
                         self._generations[slot] = generation
                         self._tickets[slot] = ticket
                         self._states[slot] = _RESERVED
+                        # Exact owner authority commits only after all activity
+                        # mirrors conservatively report the reservation.
+                        self._slots[slot] = value
+                        self._owner_slots[id(value)] = slot
+                        try:
+                            setattr(value, "ticket", ticket)
+                        except BaseException:
+                            pass
                         self._bump_progress()
+                        self._capacity_mirrors_dirty = False
                         return ticket
         except BaseException:
-            if not rollback_owner:
+            if not rollback_needed:
                 raise
-            # The owner identity is available even when ``ticket = CALL`` never
-            # reached its STORE in the caller. Recover the slot from fixed arrays.
+            # A pre-owner interruption can leave only ticket/state mirrors;
+            # reconstruct first, then use the local exact ticket to retire the
+            # reservation. A post-owner interruption follows the same path and
+            # remains recoverable even when ``ticket = CALL`` never reached its
+            # caller-side STORE.
             try:
                 with self._reserve_lock:
-                    found = -1
-                    for candidate in range(self._capacity):
-                        if self._slots[candidate] is value:
-                            found = candidate
-                            break
-                    if found >= 0:
-                        with self._slot_locks[found]:
-                            old_ticket = self._tickets[found]
-                            published_ticket = old_ticket if old_ticket is not None else ticket
-                            self._slots[found] = _EMPTY
-                            self._tickets[found] = None
-                            self._states[found] = _RECYCLE_PENDING
-                            if old_ticket is not None:
-                                self._ticket_slots.pop(old_ticket, None)
-                            if ticket is not None:
-                                self._ticket_slots.pop(ticket, None)
-                            self._disarm_value_for(value, published_ticket)
-                            self._clear_value_ticket(value, published_ticket)
-                        self._rebuild_capacity_mirrors_locked()
+                    self._rebuild_capacity_mirrors_locked()
+                if ticket is not None:
+                    self.release_ticket(ticket)
+                self._disarm_value_for(value, ticket)
+                self._clear_value_ticket(value, ticket)
             except BaseException:
                 self._overflowed = True
                 self._publication_failures_counter.increment()
@@ -692,33 +852,85 @@ class ReservedFinalizerEscrow(Generic[T]):
         """Idempotently retire an unarmed rooted reservation by identity."""
         if self._fork_unusable_after_fork:
             return False
-        with self._reserve_lock:
-            for slot in range(self._capacity):
-                if self._slots[slot] is not value:
-                    continue
+        committed = False
+        try:
+            with self._reserve_lock:
+                self._ensure_capacity_mirrors_locked()
+                self._ensure_owner_slots_locked()
+                slot = self._slot_for_rooted_owner_locked(value)
+                if slot < 0:
+                    # Already retired is success for exact-owner rollback/retry.
+                    stale_ticket = None
+                    try:
+                        stale_ticket = int(getattr(value, "ticket", 0) or 0)
+                    except BaseException:
+                        pass
+                    self._disarm_value_for(value, stale_ticket)
+                    self._clear_value_ticket(value, stale_ticket)
+                    return True
+                retiring = self._generations[slot] >= self._max_generation
+                prepared_push = None if retiring else self._ring_prepare_push_locked(slot)
+                if not retiring and prepared_push is None:
+                    # Repair outside every private slot lock so reconstruction
+                    # can take a stable reserve->slot lock order.
+                    self._rebuild_capacity_mirrors_locked()
+                    slot = self._slot_for_rooted_owner_locked(value)
+                    if slot < 0:
+                        return True
+                    retiring = self._generations[slot] >= self._max_generation
+                    prepared_push = None if retiring else self._ring_prepare_push_locked(slot)
+                    if not retiring and prepared_push is None:
+                        self._overflowed = True
+                        self._publication_failures_counter.increment()
+                        return False
                 with self._slot_locks[slot]:
                     ticket = self._tickets[slot]
+                    previous_state = self._states[slot]
                     if self._is_armed_for(value, ticket):
                         return False
+                    self._capacity_mirrors_dirty = True
+                    self._owner_retirements[slot] = 1
                     self._slots[slot] = _EMPTY
+                    self._owner_slots.pop(id(value), None)
+                    committed = True
                     self._tickets[slot] = None
                     self._states[slot] = _RECYCLE_PENDING
+                    self._pending_hint = slot
                     if ticket is not None:
                         self._ticket_slots.pop(ticket, None)
-                self._rebuild_capacity_mirrors_locked()
+                    if not self._active_counter.decrement():
+                        self._overflowed = True
+                        self._publication_failures_counter.increment()
+                    if previous_state in (_PUBLISHED, _CLAIMED, _PROCESSED):
+                        if not self._published_counter.decrement():
+                            self._overflowed = True
+                            self._publication_failures_counter.increment()
+                    if retiring:
+                        self._states[slot] = _RETIRED
+                        self._pending_hint = -1
+                        self._retired_counter.increment()
+                    else:
+                        assert prepared_push is not None
+                        tail, next_tail, next_count = prepared_push
+                        self._ring_commit_push_locked(slot, tail, next_tail, next_count)
+                        self._states[slot] = _FREE
+                        self._pending_hint = -1
+                    self._owner_retirements[slot] = 0
+                    self._capacity_mirrors_dirty = False
                 self._disarm_value_for(value, ticket)
                 self._clear_value_ticket(value, ticket)
                 self._bump_progress()
                 return True
-        # Already retired is success for exact-owner rollback/retry.
-        stale_ticket = None
-        try:
-            stale_ticket = int(getattr(value, "ticket", 0) or 0)
         except BaseException:
-            pass
-        self._disarm_value_for(value, stale_ticket)
-        self._clear_value_ticket(value, stale_ticket)
-        return True
+            try:
+                with self._reserve_lock:
+                    self._rebuild_capacity_mirrors_locked()
+            except BaseException:
+                self._capacity_mirrors_dirty = True
+                if committed:
+                    self._overflowed = True
+                    self._publication_failures_counter.increment()
+            raise
 
     def root_reserved(self, ticket: int, value: T) -> bool:
         """Root *value* in an exact RESERVED generation before finalizer exposure.
@@ -729,17 +941,26 @@ class ReservedFinalizerEscrow(Generic[T]):
         """
         if self._fork_unusable_after_fork:
             return False
-        slot = self._ticket_slots.get(ticket, -1)
-        if slot < 0 or slot >= self._capacity:
-            return False
-        with self._slot_locks[slot]:
-            if self._tickets[slot] != ticket:
+        with self._reserve_lock:
+            self._ensure_capacity_mirrors_locked()
+            self._ensure_owner_slots_locked()
+            slot = self._ticket_slots.get(ticket, -1)
+            if slot < 0 or slot >= self._capacity:
                 return False
-            if self._states[slot] != _RESERVED or self._slots[slot] is not _EMPTY:
+            existing_slot = self._slot_for_rooted_owner_locked(value)
+            if existing_slot >= 0:
                 return False
-            self._slots[slot] = value
-            self._bump_progress()
-            return True
+            with self._slot_locks[slot]:
+                if self._tickets[slot] != ticket:
+                    return False
+                if self._states[slot] != _RESERVED or self._slots[slot] is not _EMPTY:
+                    return False
+                self._capacity_mirrors_dirty = True
+                self._slots[slot] = value
+                self._owner_slots[id(value)] = slot
+                self._bump_progress()
+                self._capacity_mirrors_dirty = False
+                return True
 
     def release_rooted_ticket(self, ticket: int, value: T) -> bool:
         """Idempotently retire one unarmed rooted owner generation.
@@ -749,52 +970,56 @@ class ReservedFinalizerEscrow(Generic[T]):
         """
         if self._fork_unusable_after_fork:
             return False
-        slot = self._ticket_slots.get(ticket, -1)
-        if slot < 0 or slot >= self._capacity:
-            # If the exact rooted owner no longer exists, a previous retirement
-            # may already have committed before its caller observed success.
-            for candidate in range(self._capacity):
-                if self._slots[candidate] is value:
+        owner_retired = False
+        with self._reserve_lock:
+            self._ensure_capacity_mirrors_locked()
+            slot = self._ticket_slots.get(ticket, -1)
+            if slot < 0 or slot >= self._capacity:
+                # If the exact rooted owner no longer exists, a previous retirement
+                # may already have committed before its caller observed success.
+                if self._slot_for_rooted_owner_locked(value) >= 0:
                     return False
-            self._disarm_value_for(value, ticket)
-            self._clear_value_ticket(value, ticket)
-            return True
-        committed = False
-        try:
-            with self._slot_locks[slot]:
-                if self._tickets[slot] != ticket:
-                    return False
-                if self._states[slot] != _RESERVED or self._slots[slot] is not value:
-                    return False
-                if self._is_armed_for(value, ticket):
-                    return False
-                self._slots[slot] = _EMPTY
-                self._states[slot] = _RECYCLE_PENDING
-                self._tickets[slot] = None
-                self._ticket_slots.pop(ticket, None)
-                committed = True
-                if not self._active_counter.decrement():
-                    self._overflowed = True
-                    self._publication_failures_counter.increment()
-                self._bump_progress()
-            try:
-                with self._reserve_lock:
-                    self._recycle_one_pending_locked()
-            except BaseException:
-                # Owner retirement already committed. RECYCLE_PENDING is an
-                # explicit recoverable capacity state, not corruption.
-                pass
-            self._disarm_value_for(value, ticket)
-            self._clear_value_ticket(value, ticket)
-            return True
-        except BaseException:
-            if committed:
-                # Do not report a replayable primary failure after exact owner
-                # retirement. Capacity bookkeeping can be scavenged later.
                 self._disarm_value_for(value, ticket)
                 self._clear_value_ticket(value, ticket)
                 return True
-            raise
+            try:
+                with self._slot_locks[slot]:
+                    if self._tickets[slot] != ticket:
+                        return False
+                    if self._states[slot] != _RESERVED or self._slots[slot] is not value:
+                        return False
+                    if self._is_armed_for(value, ticket):
+                        return False
+                    # Dirty is durable before the authoritative owner-removal
+                    # assignment, closing every post-assignment interrupt gap.
+                    self._capacity_mirrors_dirty = True
+                    self._owner_retirements[slot] = 1
+                    self._slots[slot] = _EMPTY
+                    self._owner_slots.pop(id(value), None)
+                    owner_retired = True
+                    self._states[slot] = _RECYCLE_PENDING
+                    self._pending_hint = slot
+                    self._tickets[slot] = None
+                    self._ticket_slots.pop(ticket, None)
+                    if not self._active_counter.decrement():
+                        self._overflowed = True
+                        self._publication_failures_counter.increment()
+                    self._bump_progress()
+                    self._owner_retirements[slot] = 0
+                    self._capacity_mirrors_dirty = False
+                self._recycle_one_pending_locked()
+            except BaseException:
+                owner_retired = owner_retired or self._slots[slot] is _EMPTY
+                if self._capacity_mirrors_dirty:
+                    try:
+                        self._rebuild_capacity_mirrors_locked()
+                    except BaseException:
+                        self._capacity_mirrors_dirty = True
+                if not owner_retired:
+                    raise
+        self._disarm_value_for(value, ticket)
+        self._clear_value_ticket(value, ticket)
+        return True
 
     def publish_rooted(self, ticket: int, value: T) -> bool:
         """Arm one pre-rooted owner for eventual safe-point processing.
@@ -806,86 +1031,119 @@ class ReservedFinalizerEscrow(Generic[T]):
         """
         if self._fork_unusable_after_fork:
             return False
-        slot = self._ticket_slots.get(ticket, -1)
-        if slot < 0 or slot >= self._capacity:
-            # A stale wrapper may retain its mirror after exact owner rollback.
-            # If the owner no longer authenticates this generation, retirement
-            # already won and publication is an idempotent ACK, not corruption.
-            for candidate in range(self._capacity):
-                if self._slots[candidate] is value:
-                    self._overflowed = True
-                    self._publication_failures_counter.increment()
-                    return False
-            try:
-                if int(getattr(value, "ticket", 0) or 0) != int(ticket):
-                    self._disarm_value_for(value, ticket)
-                    return True
-            except BaseException:
-                pass
-            self._overflowed = True
-            self._publication_failures_counter.increment()
-            return False
-        if not self._arm_value_for(value, ticket):
-            self._overflowed = True
-            self._publication_failures_counter.increment()
-            return False
-        lock = self._slot_locks[slot]
-        if not lock.acquire(blocking=False):
-            # Durable handoff already committed via the rooted, armed owner.
+        if not self._reserve_lock.acquire(blocking=False):
+            # Rooted-owner publication remains non-blocking. Arming is the
+            # durable handoff; a governed safe point promotes it later.
+            if not self._arm_value_for(value, ticket):
+                self._overflowed = True
+                self._publication_failures_counter.increment()
+                return False
             self._bump_progress()
             return True
         try:
-            if self._tickets[slot] != ticket:
-                self._disarm_value_for(value, ticket)
-                return False
-            if self._states[slot] == _PUBLISHED and self._slots[slot] is value:
+            if self._capacity_mirrors_dirty:
+                if not self._arm_value_for(value, ticket):
+                    self._overflowed = True
+                    self._publication_failures_counter.increment()
+                    return False
+                self._bump_progress()
                 return True
-            if self._states[slot] != _RESERVED or self._slots[slot] is not value:
-                self._disarm_value_for(value, ticket)
+            slot = self._ticket_slots.get(ticket, -1)
+            if slot < 0 or slot >= self._capacity:
+                # A stale wrapper may retain its mirror after exact owner rollback.
+                # If the owner no longer authenticates this generation, retirement
+                # already won and publication is an idempotent ACK, not corruption.
+                try:
+                    if int(getattr(value, "ticket", 0) or 0) != int(ticket):
+                        self._disarm_value_for(value, ticket)
+                        return True
+                except BaseException:
+                    pass
+                self._overflowed = True
+                self._publication_failures_counter.increment()
                 return False
-            self._states[slot] = _PUBLISHED
-            self._published_counter.increment()
-            self._bump_publication()
-            return True
+            if not self._arm_value_for(value, ticket):
+                self._overflowed = True
+                self._publication_failures_counter.increment()
+                return False
+            lock = self._slot_locks[slot]
+            if not lock.acquire(blocking=False):
+                # Durable handoff already committed via the rooted, armed owner.
+                self._bump_progress()
+                return True
+            try:
+                if self._tickets[slot] != ticket:
+                    self._disarm_value_for(value, ticket)
+                    return False
+                if self._states[slot] == _PUBLISHED and self._slots[slot] is value:
+                    return True
+                if self._states[slot] != _RESERVED or self._slots[slot] is not value:
+                    self._disarm_value_for(value, ticket)
+                    return False
+                self._capacity_mirrors_dirty = True
+                self._states[slot] = _PUBLISHED
+                self._published_counter.increment()
+                self._bump_publication()
+                self._capacity_mirrors_dirty = False
+                return True
+            finally:
+                lock.release()
         finally:
-            lock.release()
+            self._reserve_lock.release()
 
     def release_ticket(self, ticket: int) -> bool:
         """Idempotently release an unarmed RESERVED generation."""
         if self._fork_unusable_after_fork:
             return False
-        slot = self._ticket_slots.get(ticket, -1)
-        if slot < 0 or slot >= self._capacity:
-            return True
         committed = False
-        try:
-            with self._slot_locks[slot]:
-                if self._tickets[slot] != ticket:
-                    return True
-                rooted = self._slots[slot]
-                if self._states[slot] != _RESERVED:
-                    return False
-                if rooted is not _EMPTY and self._is_armed_for(rooted, ticket):
-                    return False
-                self._slots[slot] = _EMPTY
-                self._states[slot] = _RECYCLE_PENDING
-                self._tickets[slot] = None
-                self._ticket_slots.pop(ticket, None)
-                committed = True
-                if not self._active_counter.decrement():
-                    self._overflowed = True
-                    self._publication_failures_counter.increment()
-                self._bump_progress()
-            try:
-                with self._reserve_lock:
-                    self._recycle_one_pending_locked()
-            except BaseException:
-                pass
-            return True
-        except BaseException:
-            if committed:
+        with self._reserve_lock:
+            self._ensure_capacity_mirrors_locked()
+            slot = self._ticket_slots.get(ticket, -1)
+            if slot < 0 or slot >= self._capacity:
                 return True
-            raise
+            rooted: object = _EMPTY
+            try:
+                with self._slot_locks[slot]:
+                    if self._tickets[slot] != ticket:
+                        return True
+                    rooted = self._slots[slot]
+                    if self._states[slot] != _RESERVED:
+                        return False
+                    if rooted is not _EMPTY and self._is_armed_for(rooted, ticket):
+                        return False
+                    self._capacity_mirrors_dirty = True
+                    if rooted is not _EMPTY:
+                        # A rooted reservation commits through owner removal.
+                        self._owner_retirements[slot] = 1
+                        self._slots[slot] = _EMPTY
+                        self._owner_slots.pop(id(rooted), None)
+                    # An unrooted reservation commits through this state;
+                    # rooted authority has already been removed above.
+                    self._states[slot] = _RECYCLE_PENDING
+                    committed = True
+                    self._pending_hint = slot
+                    self._tickets[slot] = None
+                    self._ticket_slots.pop(ticket, None)
+                    if not self._active_counter.decrement():
+                        self._overflowed = True
+                        self._publication_failures_counter.increment()
+                    self._bump_progress()
+                    self._owner_retirements[slot] = 0
+                    self._capacity_mirrors_dirty = False
+                self._recycle_one_pending_locked()
+                return True
+            except BaseException:
+                committed = committed or self._states[slot] == _RECYCLE_PENDING
+                if rooted is not _EMPTY:
+                    committed = committed or self._slots[slot] is _EMPTY
+                if self._capacity_mirrors_dirty:
+                    try:
+                        self._rebuild_capacity_mirrors_locked()
+                    except BaseException:
+                        self._capacity_mirrors_dirty = True
+                if committed:
+                    return True
+                raise
 
     def publish_reserved(self, ticket: int, value: T) -> bool:
         """Publish into an exclusive generation without waiting or allocation.
@@ -895,28 +1153,107 @@ class ReservedFinalizerEscrow(Generic[T]):
         """
         if self._fork_unusable_after_fork:
             return False
-        slot = self._ticket_slots.get(ticket, -1)
-        if slot < 0 or slot >= self._capacity:
-            self._overflowed = True
-            self._publication_failures_counter.increment()
-            return False
-        lock = self._slot_locks[slot]
-        if not lock.acquire(blocking=False):
+        if not self._reserve_lock.acquire(blocking=False):
             self._overflowed = True
             self._publication_failures_counter.increment()
             return False
         try:
-            if self._tickets[slot] != ticket:
+            slot = self._ticket_slots.get(ticket, -1)
+            if self._capacity_mirrors_dirty:
+                # A previous call may have committed exact owner retention and
+                # then been interrupted. Acknowledge that durable handoff in
+                # O(1); a normal safe point will finish its derived mirrors.
+                if (
+                    0 <= slot < self._capacity
+                    and self._tickets[slot] == ticket
+                    and self._slots[slot] is value
+                    and (
+                        self._states[slot] == _PUBLISHED
+                        or (
+                            self._states[slot] == _RESERVED
+                            and self._owner_publications[slot] == _PUBLICATION_PENDING
+                        )
+                    )
+                ):
+                    return True
+                if (
+                    0 <= slot < self._capacity
+                    and self._tickets[slot] == ticket
+                    and self._states[slot] == _RESERVED
+                    and self._owner_publications[slot] == _PUBLICATION_PENDING
+                    and self._slots[slot] is _EMPTY
+                ):
+                    # The pending marker committed before owner retention. A
+                    # retry carrying that exact owner can finish the authority
+                    # handoff without allocating or trusting derived counters.
+                    lock = self._slot_locks[slot]
+                    if not lock.acquire(blocking=False):
+                        self._overflowed = True
+                        self._publication_failures_counter.increment()
+                        return False
+                    try:
+                        if (
+                            self._tickets[slot] != ticket
+                            or self._states[slot] != _RESERVED
+                            or self._owner_publications[slot] != _PUBLICATION_PENDING
+                            or self._slots[slot] is not _EMPTY
+                        ):
+                            return False
+                        for candidate in range(self._capacity):
+                            if self._slots[candidate] is value:
+                                return False
+                        self._owner_slots_dirty = True
+                        self._slots[slot] = value
+                        self._states[slot] = _PUBLISHED
+                        return True
+                    finally:
+                        lock.release()
+                self._overflowed = True
+                self._publication_failures_counter.increment()
                 return False
-            if self._states[slot] != _RESERVED or self._slots[slot] is not _EMPTY:
+            if slot < 0 or slot >= self._capacity:
+                self._overflowed = True
+                self._publication_failures_counter.increment()
                 return False
-            self._slots[slot] = value
-            self._states[slot] = _PUBLISHED
-            self._published_counter.increment()
-            self._bump_publication()
-            return True
+            lock = self._slot_locks[slot]
+            if not lock.acquire(blocking=False):
+                self._overflowed = True
+                self._publication_failures_counter.increment()
+                return False
+            try:
+                if self._tickets[slot] != ticket:
+                    return False
+                if self._states[slot] == _PUBLISHED and self._slots[slot] is value:
+                    return True
+                if self._states[slot] != _RESERVED or self._slots[slot] is not _EMPTY:
+                    return False
+                # Finalizer-tail publication never grows owner metadata. Capacity
+                # commits complete here; only the owner index stays dirty for a
+                # later serialized admission/release rebuild.
+                if self._owner_slots_dirty:
+                    for candidate in range(self._capacity):
+                        if self._slots[candidate] is value:
+                            return False
+                else:
+                    existing = self._owner_slots.get(id(value), -1)
+                    if 0 <= existing < self._capacity and self._slots[existing] is value:
+                        return False
+                self._capacity_mirrors_dirty = True
+                self._owner_slots_dirty = True
+                # This preallocated marker distinguishes direct-ticket publication
+                # from an interrupted split-root operation during reconstruction.
+                self._owner_publications[slot] = _PUBLICATION_PENDING
+                self._slots[slot] = value
+                self._states[slot] = _PUBLISHED
+                self._published_counter.increment()
+                self._bump_publication()
+                self._owner_publications[slot] = _PUBLICATION_IDLE
+                self._capacity_mirrors_dirty = False
+                return True
+            finally:
+                lock.release()
         finally:
-            lock.release()
+            self._reserve_lock.release()
 
     def process_one(self, processor: Callable[[int, T], object]) -> bool:
         """Process one exact owner with recoverable claim bookkeeping.
@@ -938,26 +1275,138 @@ class ReservedFinalizerEscrow(Generic[T]):
         ticket = 0
         value: object = _EMPTY
         try:
-            start = self._consume_cursor
-            for offset in range(self._capacity):
-                candidate = start + offset
-                if candidate >= self._capacity:
-                    candidate -= self._capacity
-                state = self._states[candidate]
-                if state == _PROCESSED:
+            with self._reserve_lock:
+                self._ensure_capacity_mirrors_locked()
+                start = self._consume_cursor
+                for offset in range(self._capacity):
+                    candidate = start + offset
+                    if candidate >= self._capacity:
+                        candidate -= self._capacity
+                    state = self._states[candidate]
+                    if state == _PROCESSED:
+                        lock = self._slot_locks[candidate]
+                        if not lock.acquire(blocking=False):
+                            continue
+                        try:
+                            if self._states[candidate] != _PROCESSED:
+                                continue
+                            processed_ticket = self._tickets[candidate]
+                            processed_value = self._slots[candidate]
+                            self._capacity_mirrors_dirty = True
+                            self._owner_retirements[candidate] = 1
+                            self._slots[candidate] = _EMPTY
+                            self._owner_slots.pop(id(processed_value), None)
+                            self._states[candidate] = _RECYCLE_PENDING
+                            self._pending_hint = candidate
+                            self._tickets[candidate] = None
+                            if processed_ticket is not None:
+                                self._ticket_slots.pop(processed_ticket, None)
+                            if not self._active_counter.decrement():
+                                self._overflowed = True
+                                self._publication_failures_counter.increment()
+                            if not self._published_counter.decrement():
+                                self._overflowed = True
+                                self._publication_failures_counter.increment()
+                            self._bump_progress()
+                            self._owner_retirements[candidate] = 0
+                            self._capacity_mirrors_dirty = False
+                        finally:
+                            lock.release()
+                        if processed_value is not _EMPTY:
+                            self._disarm_value_for(processed_value, processed_ticket)
+                            self._clear_value_ticket(processed_value, processed_ticket)
+                        try:
+                            self._recycle_one_pending_locked()
+                        except BaseException:
+                            pass
+                        return True
+                    if state not in (_PUBLISHED, _RESERVED):
+                        continue
+                    if state == _RESERVED:
+                        rooted = self._slots[candidate]
+                        if rooted is _EMPTY or not self._is_armed_for(
+                            rooted, self._tickets[candidate]
+                        ):
+                            continue
                     lock = self._slot_locks[candidate]
                     if not lock.acquire(blocking=False):
                         continue
                     try:
-                        if self._states[candidate] != _PROCESSED:
+                        if self._states[candidate] == _RESERVED:
+                            rooted = self._slots[candidate]
+                            if rooted is _EMPTY or not self._is_armed_for(
+                                rooted, self._tickets[candidate]
+                            ):
+                                continue
+                            self._capacity_mirrors_dirty = True
+                            self._states[candidate] = _PUBLISHED
+                            self._published_counter.increment()
+                            self._bump_publication()
+                            self._capacity_mirrors_dirty = False
+                        if self._states[candidate] != _PUBLISHED:
                             continue
-                        processed_ticket = self._tickets[candidate]
-                        processed_value = self._slots[candidate]
-                        self._slots[candidate] = _EMPTY
-                        self._states[candidate] = _RECYCLE_PENDING
-                        self._tickets[candidate] = None
-                        if processed_ticket is not None:
-                            self._ticket_slots.pop(processed_ticket, None)
+                        generation = self._generations[candidate]
+                        found_ticket = self._tickets[candidate]
+                        if found_ticket is None:
+                            self._overflowed = True
+                            self._publication_failures_counter.increment()
+                            continue
+                        next_cursor = candidate + 1
+                        if next_cursor == self._capacity:
+                            next_cursor = 0
+                        # Prepare every recovery local before the CLAIMED
+                        # commit. An asynchronous exception delivered by the
+                        # state write can then always restore PUBLISHED.
+                        slot = candidate
+                        ticket = found_ticket
+                        value = self._slots[candidate]
+                        if value is _EMPTY:
+                            self._overflowed = True
+                            self._publication_failures_counter.increment()
+                            slot = -1
+                            continue
+                        self._consume_cursor = next_cursor
+                        self._states[candidate] = _CLAIMED
+                        break
+                    finally:
+                        lock.release()
+                if slot < 0 or value is _EMPTY:
+                    return False
+
+            processor(ticket, value)  # type: ignore[arg-type]
+
+            with self._reserve_lock:
+                self._ensure_capacity_mirrors_locked()
+                # Publish the no-replay marker before owner/ring bookkeeping.
+                with self._slot_locks[slot]:
+                    if (
+                        self._generations[slot] == generation
+                        and self._states[slot] == _CLAIMED
+                        and self._slots[slot] is value
+                    ):
+                        self._states[slot] = _PROCESSED
+                        self._bump_progress()
+                    elif self._states[slot] != _PROCESSED:
+                        self._overflowed = True
+                        self._publication_failures_counter.increment()
+                        return True
+
+                # Complete owner retirement. If interrupted, dirty authority is
+                # reconstructed before the slot can be admitted again.
+                with self._slot_locks[slot]:
+                    if (
+                        self._generations[slot] == generation
+                        and self._states[slot] == _PROCESSED
+                        and self._slots[slot] is value
+                    ):
+                        self._capacity_mirrors_dirty = True
+                        self._owner_retirements[slot] = 1
+                        self._slots[slot] = _EMPTY
+                        self._owner_slots.pop(id(value), None)
+                        self._states[slot] = _RECYCLE_PENDING
+                        self._pending_hint = slot
+                        self._tickets[slot] = None
+                        self._ticket_slots.pop(ticket, None)
                         if not self._active_counter.decrement():
                             self._overflowed = True
                             self._publication_failures_counter.increment()
@@ -965,115 +1414,31 @@ class ReservedFinalizerEscrow(Generic[T]):
                             self._overflowed = True
                             self._publication_failures_counter.increment()
                         self._bump_progress()
-                    finally:
-                        lock.release()
-                    if processed_value is not _EMPTY:
-                        self._disarm_value_for(processed_value, processed_ticket)
-                        self._clear_value_ticket(processed_value, processed_ticket)
-                    try:
-                        with self._reserve_lock:
-                            self._recycle_one_pending_locked()
-                    except BaseException:
-                        pass
-                    return True
-                if state not in (_PUBLISHED, _RESERVED):
-                    continue
-                if state == _RESERVED:
-                    rooted = self._slots[candidate]
-                    if rooted is _EMPTY or not self._is_armed_for(rooted, self._tickets[candidate]):
-                        continue
-                lock = self._slot_locks[candidate]
-                if not lock.acquire(blocking=False):
-                    continue
+                        self._owner_retirements[slot] = 0
+                        self._capacity_mirrors_dirty = False
+                self._disarm_value_for(value, ticket)
+                self._clear_value_ticket(value, ticket)
                 try:
-                    if self._states[candidate] == _RESERVED:
-                        rooted = self._slots[candidate]
-                        if rooted is _EMPTY or not self._is_armed_for(
-                            rooted, self._tickets[candidate]
-                        ):
-                            continue
-                        self._states[candidate] = _PUBLISHED
-                        self._published_counter.increment()
-                        self._bump_publication()
-                    if self._states[candidate] != _PUBLISHED:
-                        continue
-                    generation = self._generations[candidate]
-                    found_ticket = self._tickets[candidate]
-                    if found_ticket is None:
-                        self._overflowed = True
-                        self._publication_failures_counter.increment()
-                        continue
-                    next_cursor = candidate + 1
-                    if next_cursor == self._capacity:
-                        next_cursor = 0
-                    self._states[candidate] = _CLAIMED
-                    slot = candidate
-                    ticket = found_ticket
-                    value = self._slots[candidate]
-                    self._consume_cursor = next_cursor
-                    break
-                finally:
-                    lock.release()
-            if slot < 0 or value is _EMPTY:
-                return False
-
-            processor(ticket, value)  # type: ignore[arg-type]
-
-            # Publish the no-replay marker before any owner/ring bookkeeping.
-            with self._slot_locks[slot]:
-                if (
-                    self._generations[slot] == generation
-                    and self._states[slot] == _CLAIMED
-                    and self._slots[slot] is value
-                ):
-                    self._states[slot] = _PROCESSED
-                    self._bump_progress()
-                elif self._states[slot] != _PROCESSED:
-                    self._overflowed = True
-                    self._publication_failures_counter.increment()
-                    return True
-
-            # Complete owner retirement. If interrupted, PROCESSED is consumed
-            # by the next safe point without callback replay.
-            with self._slot_locks[slot]:
-                if (
-                    self._generations[slot] == generation
-                    and self._states[slot] == _PROCESSED
-                    and self._slots[slot] is value
-                ):
-                    self._slots[slot] = _EMPTY
-                    self._states[slot] = _RECYCLE_PENDING
-                    self._tickets[slot] = None
-                    self._ticket_slots.pop(ticket, None)
-                    if not self._active_counter.decrement():
-                        self._overflowed = True
-                        self._publication_failures_counter.increment()
-                    if not self._published_counter.decrement():
-                        self._overflowed = True
-                        self._publication_failures_counter.increment()
-                    self._bump_progress()
-            self._disarm_value_for(value, ticket)
-            self._clear_value_ticket(value, ticket)
-            try:
-                with self._reserve_lock:
                     self._recycle_one_pending_locked()
-            except BaseException:
-                pass
+                except BaseException:
+                    pass
             return True
         except BaseException:
             # Covers the formerly unprotected PUBLISHED->CLAIMED handoff too.
             if slot >= 0 and value is not _EMPTY:
                 try:
-                    with self._slot_locks[slot]:
-                        if (
-                            self._generations[slot] == generation
-                            and self._states[slot] == _CLAIMED
-                            and self._slots[slot] is value
-                        ):
-                            self._states[slot] = _PUBLISHED
-                            self._bump_progress()
-                        # PROCESSED is intentionally not rolled back: the next
-                        # safe point performs bookkeeping only.
+                    with self._reserve_lock:
+                        self._ensure_capacity_mirrors_locked()
+                        with self._slot_locks[slot]:
+                            if (
+                                self._generations[slot] == generation
+                                and self._states[slot] == _CLAIMED
+                                and self._slots[slot] is value
+                            ):
+                                self._states[slot] = _PUBLISHED
+                                self._bump_progress()
+                            # PROCESSED is intentionally not rolled back: the
+                            # next safe point performs bookkeeping only.
                 except BaseException:
                     self._overflowed = True
             raise
@@ -1207,10 +1572,13 @@ class ReservedFinalizerEscrow(Generic[T]):
         return (
             self._slots,
             self._states,
+            self._owner_retirements,
+            self._owner_publications,
             self._generations,
             self._slot_locks,
             self._tickets,
             self._ticket_slots,
+            self._owner_slots,
         )
 
     def prepare_for_fork(self) -> None:
@@ -1228,22 +1596,21 @@ class ReservedFinalizerEscrow(Generic[T]):
         current = (
             self._slots,
             self._states,
+            self._owner_retirements,
+            self._owner_publications,
             self._generations,
             self._slot_locks,
             self._tickets,
             self._ticket_slots,
+            self._owner_slots,
             self._free_ring,
             self._reserve_lock,
-            self._active_counter,
-            self._published_counter,
-            self._retired_counter,
-            self._admission_rejections_counter,
-            self._publication_failures_counter,
-            self._publication_epoch_counter,
-            self._progress_epoch_counter,
-            self._fork_spare2,
+            # The child consumes this tuple to install its eleven state objects.
+            # Retain the wrapper itself until a normal safe point so no
+            # inherited prepared bank is decref'd inside the at-fork callback.
+            self._fork_fresh,
         )
-        base = generation * 16
+        base = generation * _FORK_ROOTS_PER_GENERATION
         for offset, value in enumerate(current):
             roots[base + offset] = value
         self._fork_prepare_index = generation
@@ -1252,8 +1619,8 @@ class ReservedFinalizerEscrow(Generic[T]):
         """Parent drops only the newest temporary root generation."""
         generation = self._fork_prepare_index
         if generation >= 0:
-            base = generation * 16
-            for offset in range(16):
+            base = generation * _FORK_ROOTS_PER_GENERATION
+            for offset in range(_FORK_ROOTS_PER_GENERATION):
                 self._fork_roots[base + offset] = None
         self._fork_prepare_index = -1
         self._fork_prepare_exhausted = False
@@ -1273,27 +1640,44 @@ class ReservedFinalizerEscrow(Generic[T]):
             return
         fresh = self._fork_fresh
         if fresh is None:
-            fresh = self._make_fresh_bank()
+            # ``prepare_for_fork`` authorizes a child swap only after checking
+            # this bank. Never allocate or touch inherited fallback state from
+            # an at-fork callback if that invariant was somehow lost.
+            self._fork_unusable_after_fork = True
+            self._fork_prepare_index = -1
+            self._post_fork_quarantine_pending = False
+            return
         (
             self._slots,
             self._states,
+            self._owner_retirements,
+            self._owner_publications,
             self._generations,
             self._slot_locks,
             self._tickets,
             self._ticket_slots,
+            self._owner_slots,
             self._free_ring,
             self._reserve_lock,
-            self._active_counter,
-            self._published_counter,
-            self._retired_counter,
-            self._admission_rejections_counter,
-            self._publication_failures_counter,
-            self._publication_epoch_counter,
-            self._progress_epoch_counter,
         ) = fresh
+        # Do not swap the counter wrappers. Shutdown may already have frozen
+        # their native capsules, while AtomicEpoch can safely reset each native
+        # value in place after fork.
+        counters_reset = (
+            self._active_counter.reset_after_fork()
+            and self._published_counter.reset_after_fork()
+            and self._retired_counter.reset_after_fork()
+            and self._admission_rejections_counter.reset_after_fork()
+            and self._publication_failures_counter.reset_after_fork()
+            and self._publication_epoch_counter.reset_after_fork()
+            and self._progress_epoch_counter.reset_after_fork()
+        )
         self._free_head = 0
         self._free_tail = 0
         self._free_count = self._capacity
+        self._pending_hint = -1
+        self._capacity_mirrors_dirty = False
+        self._owner_slots_dirty = False
         self._consume_cursor = 0
         self._overflowed = False
         self._pid = child_pid
@@ -1302,7 +1686,7 @@ class ReservedFinalizerEscrow(Generic[T]):
             self._fork_root_count = prepared + 1
         self._fork_prepare_index = -1
         self._post_fork_quarantine_pending = True
-        self._fork_unusable_after_fork = False
+        self._fork_unusable_after_fork = not counters_reset
         # The second preallocated bank becomes the child's immediate next-fork bank.
         self._fork_fresh = self._fork_spare2
         self._fork_spare2 = None

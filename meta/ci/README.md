@@ -28,6 +28,11 @@ a CI gate and therefore lives at
   `source-distribution`, `native-llvm-coverage`, `thread-sanitizer`, and
   `platform-sanitizer` workloads through repository-owned composite actions.
   The manual publication workflow reuses it unchanged.
+- [`.github/actions/restore-pip-cache/action.yml`](../../.github/actions/restore-pip-cache/action.yml)
+  owns optional validation-cache identity. Its caller supplies one workload
+  owner, exact Python patch, and the complete dependency-input files; the action
+  adds the runner operating system and architecture and hashes those inputs
+  before accessing an exact cache key.
 - [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml) owns the local
   cleanup and fuzz-integrity gates.
 - [`CMakeLists.txt`](../../CMakeLists.txt) exposes
@@ -51,6 +56,13 @@ cibuildwheel's container and test environment; `pre-commit-hooks.txt` constrains
 each independently bootstrapped hook environment. The dependency audit evaluates
 each real lock separately and statically rejects a declared project or CI tool
 without a compatible owner pin, rather than resolving a floating synthetic union.
+Validation pip caches are disposable download accelerators, not environments:
+their exact keys include workload, operating system, architecture, Python patch,
+and a digest over that workload's lock-owning inputs, without partial restore
+prefixes. Installation and `pip check` remain authoritative after every restore.
+The exact pre-commit environment cache follows the same boundary; every hook is
+still bootstrapped and run, and a failed bootstrap clears only its owned cache
+before retrying.
 Apt-owned toolchains add repository, connection, and dpkg-lock bounds. Release preflight
 retries transport failures, HTTP 429, server errors, and HTTP 403 only with an
 official GitHub rate-limit header; its server-requested delay is capped at 30
@@ -64,6 +76,24 @@ The canonical sdist encodes the checked-out commit time through
 `SOURCE_DATE_EPOCH`, which its archive validator checks explicitly. CI builds it
 twice from clean owned directories and requires byte-identical archives before
 downstream validation.
+
+The downstream installer creates one environment per published extra through
+the pinned `virtualenv` app-data seeder. Its source-distribution owner prepares
+exactly one SHA-256-verified pip wheel; environment creation is offline, uses
+copies rather than links, and checks the interpreter patch, pointer width, and
+pip version before installation. App-data and environment roots are distinct,
+owned cleanup locations, while the wheel, constraints, scripts, seed directory,
+and generated command file must remain outside them.
+
+Native build acceleration stays outside `meta/ci` helper semantics. Production
+wheel actions alone enable target-private Release PCH profiles, while sanitizer,
+coverage, and include-hygiene graphs explicitly keep PCH disabled. Linux
+ASan/UBSan installs the extension and builds its executor and fuzz targets from
+one named, configuration-certified CMake graph. Windows may restore the exact
+CPython NuGet package, but verifies its digest, link safety, AMD64 PE identity,
+interpreter patch, and pointer width before cibuildwheel may consume it. None of
+these paths remove a test, sanitizer target, platform cell, or release artifact;
+cache availability and runner speed never determine a gate result.
 
 ## Local checks
 

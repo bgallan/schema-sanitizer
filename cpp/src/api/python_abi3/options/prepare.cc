@@ -678,6 +678,55 @@ PyObject *py_atomic_epoch_increment(PyObject *, PyObject *args) {
   }
 }
 
+/// Atomically increments an epoch and commits one preallocated byte marker.
+PyObject *py_atomic_epoch_increment_marked(PyObject *, PyObject *args) {
+  PyObject *capsule = nullptr;
+  PyObject *markers = nullptr;
+  Py_ssize_t index = 0;
+  if (!PyArg_ParseTuple(args, "OOn:atomic_epoch_increment_marked", &capsule,
+                        &markers, &index)) {
+    return nullptr;
+  }
+  AtomicEpochCounter *counter = nullptr;
+  if (!resolve_atomic_epoch_counter(capsule, &counter)) {
+    return nullptr;
+  }
+  if (!PyByteArray_Check(markers)) {
+    PyErr_SetString(PyExc_TypeError,
+                    "atomic epoch commit markers must be bytearray");
+    return nullptr;
+  }
+  const Py_ssize_t size = PyByteArray_Size(markers);
+  if (index < 0 || index >= size) {
+    PyErr_SetString(PyExc_ValueError,
+                    "atomic epoch commit marker index is invalid");
+    return nullptr;
+  }
+  auto *data = reinterpret_cast<unsigned char *>(PyByteArray_AsString(markers));
+  if (!data) {
+    return nullptr;
+  }
+  constexpr unsigned char kPending = 1U;
+  constexpr unsigned char kRecorded = 2U;
+  if (data[index] == kRecorded) {
+    Py_RETURN_TRUE;
+  }
+  if (data[index] != kPending) {
+    Py_RETURN_FALSE;
+  }
+  std::uint64_t current = counter->value.load(std::memory_order_relaxed);
+  while (current != UINT64_MAX &&
+         !counter->value.compare_exchange_weak(current, current + 1U,
+                                               std::memory_order_acq_rel,
+                                               std::memory_order_relaxed)) {
+  }
+  // Python signals are observed only after this extension call returns. The
+  // counter publication and byte transition therefore form one retry-visible
+  // commit even if control flow is interrupted at the call boundary.
+  data[index] = kRecorded;
+  Py_RETURN_TRUE;
+}
+
 /// Atomically decrements an epoch counter unless it is already zero.
 PyObject *py_atomic_epoch_decrement(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
@@ -796,17 +845,24 @@ PyObject *py_atomic_epoch_write_activity(PyObject *, PyObject *args) {
   Py_RETURN_FALSE;
 }
 
-/// Resets an atomic epoch counter to zero with release ordering.
-PyObject *py_atomic_epoch_reset(PyObject *, PyObject *args) {
+/// Stores one exact epoch value with release ordering.
+PyObject *py_atomic_epoch_set_exact(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
-  if (!PyArg_ParseTuple(args, "O:atomic_epoch_reset", &capsule)) {
+  PyObject *value_object = nullptr;
+  if (!PyArg_ParseTuple(args, "OO:atomic_epoch_set_exact", &capsule,
+                        &value_object)) {
     return nullptr;
   }
   AtomicEpochCounter *counter = nullptr;
   if (!resolve_atomic_epoch_counter(capsule, &counter)) {
     return nullptr;
   }
-  counter->value.store(0, std::memory_order_release);
+  const unsigned long long value = PyLong_AsUnsignedLongLong(value_object);
+  if (PyErr_Occurred()) {
+    return nullptr;
+  }
+  counter->value.store(static_cast<std::uint64_t>(value),
+                       std::memory_order_release);
   Py_RETURN_NONE;
 }
 

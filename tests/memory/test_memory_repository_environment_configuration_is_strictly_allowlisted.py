@@ -62,6 +62,8 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
             yaml_env_blocks.append(path.relative_to(ROOT).as_posix())
     allowed_environment_files = {
         ".github/actions/build-platform-wheel/action.yml",
+        ".github/actions/quality-validation/action.yml",
+        ".github/actions/restore-pip-cache/action.yml",
         "cpp/src/internal/runtime/operation_task_arena.cc",
         "meta/ci/release/check_distribution_contents.py",
         "meta/ci/release/check_github_release_state.py",
@@ -109,6 +111,32 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
     }
     configured_names = {f"SCHEMA_SANITIZER_{name}" for name in configured_names}
     assert configured_names == allowed_names
+    cache_action = (ROOT / ".github/actions/restore-pip-cache/action.yml").read_text(
+        encoding="utf-8"
+    )
+    environment_lookup = "os." + 'environ["'
+    assert {
+        token.split('"', 1)[0]
+        for token in cache_action.split(environment_lookup)[1:]
+        if '"' in token
+    } == {
+        "CACHE_DIRECTORY",
+        "CACHE_DEPENDENCY_PATHS",
+        "CACHE_OWNER",
+        "CACHE_PYTHON_VERSION",
+        "CACHE_RESTORE_OUTCOME",
+        "GITHUB_ENV",
+        "GITHUB_OUTPUT",
+        "GITHUB_WORKSPACE",
+    }
+    quality_action = (ROOT / ".github/actions/quality-validation/action.yml").read_text(
+        encoding="utf-8"
+    )
+    assert {
+        token.split('"', 1)[0]
+        for token in quality_action.split(environment_lookup)[1:]
+        if '"' in token
+    } == {"GITHUB_WORKSPACE"}
     # YAML environment mappings are limited to composite-action input isolation,
     # exact dependency constraints, the final validation result handoff, and the
     # untrusted-input-safe release preflight boundary. Keeping the expected file
@@ -118,6 +146,7 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         ".github/actions/native-llvm-coverage/action.yml",
         ".github/actions/platform-sanitizer/action.yml",
         ".github/actions/quality-validation/action.yml",
+        ".github/actions/restore-pip-cache/action.yml",
         ".github/actions/source-distribution/action.yml",
         ".github/actions/test-platform-wheel/action.yml",
         ".github/actions/thread-sanitizer/action.yml",

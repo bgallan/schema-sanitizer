@@ -1,6 +1,10 @@
 ---
 name: Run quality, security, and Python coverage
 description: Execute source-only quality, security, audit, and coverage checks.
+inputs:
+  python-version:
+    description: Exact quality-runner Python patch included in environment-cache keys.
+    required: true
 runs:
   using: composite
   steps:
@@ -13,19 +17,54 @@ runs:
         set -euo pipefail
         rm -rf -- .work/build
         python -m pip install pip==26.2.1
-        python -m pip install -c meta/ci/requirements/quality.txt \
-          '.[dev]' coverage==7.15.4 pip-audit==2.10.1 \
-          bandit==1.9.4 tomli==2.4.1
+        python -m pip install --no-deps -r meta/ci/requirements/quality.txt
+        python -m pip install --no-deps '.[dev]'
+        python -m pip check
+    - name: Reset the owned pre-commit cache path
+      shell: bash
+      run: |-
+        set -euo pipefail
+        python - <<'PY'
+        import os
+        import shutil
+        from pathlib import Path
+        workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+        work_root = workspace / ".work"
+        if work_root.is_symlink() or (work_root.exists() and not work_root.is_dir()):
+            raise SystemExit(f"pre-commit cache parent is unsafe: {work_root}")
+        work_root.mkdir(parents=True, exist_ok=True)
+        cache = work_root / "pre-commit-cache"
+        if cache.is_symlink() or (cache.exists() and not cache.is_dir()):
+            cache.unlink()
+        elif cache.exists():
+            shutil.rmtree(cache)
+        PY
+    - name: Restore the exact pre-commit environment cache
+      continue-on-error: true
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: .work/pre-commit-cache
+        key: >-
+          pre-commit-v1-${{ runner.os }}-${{ runner.arch
+          }}-python-${{ inputs.python-version }}-${{ hashFiles('.pre-commit-config.yaml',
+          'meta/ci/requirements/quality.txt',
+          'meta/ci/requirements/pre-commit-hooks.txt') }}
     - name: Lint, format, and static typing
       env:
         PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/pre-commit-hooks.txt
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/pre-commit-hooks.txt
+        PRE_COMMIT_HOME: ${{ github.workspace }}/.work/pre-commit-cache
         VIRTUALENV_NO_PERIODIC_UPDATE: '1'
         VIRTUALENV_PIP: 26.2.1
         VIRTUALENV_SETUPTOOLS: 84.0.0
       shell: bash
       run: |-
         set -euo pipefail
+        if [[ -L "${PRE_COMMIT_HOME}" || \
+          ( -e "${PRE_COMMIT_HOME}" && ! -d "${PRE_COMMIT_HOME}" ) ]]; then
+          rm -rf -- "${PRE_COMMIT_HOME}"
+        fi
+        mkdir -p -- "${PRE_COMMIT_HOME}"
         for attempt in 1 2 3; do
           if timeout --signal=TERM --kill-after=15s 120s pre-commit install-hooks; then
             break
@@ -33,6 +72,8 @@ runs:
           if (( attempt == 3 )); then
             exit 1
           fi
+          rm -rf -- "${PRE_COMMIT_HOME}"
+          mkdir -p -- "${PRE_COMMIT_HOME}"
           sleep $((attempt * 2))
         done
         pre-commit run --all-files
