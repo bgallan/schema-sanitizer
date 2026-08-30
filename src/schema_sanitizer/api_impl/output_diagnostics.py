@@ -192,7 +192,9 @@ def _metadata_uncompressed_bytes(metadata: Any) -> int:
     for index in range(getattr(metadata, "num_row_groups", 0) or 0):
         try:
             total += int(metadata.row_group(index).total_byte_size or 0)
-        except Exception:
+        # Malformed advisory metadata is intentionally skipped.
+        except Exception as ignored_error:
+            del ignored_error
             continue
     return total
 

@@ -377,6 +377,151 @@ jobs:
           path: download/wheels
           pattern: dist-wheels-*
           merge-multiple: true
+      - id: download-platform-test-evidence
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: download/platform-tests
+          pattern: platform-test-evidence-*
+      - name: Remove partial platform-test evidence before retrying
+        id: reset-platform-test-evidence
+        if: ${{ always() && steps.download-platform-test-evidence.outcome == 'failure' }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          rm -rf -- download/platform-tests
+      - name: Retry the platform-test evidence download
+        if: ${{ always() && steps.download-platform-test-evidence.outcome == 'failure' && steps.reset-platform-test-evidence.outcome == 'success' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: download/platform-tests
+          pattern: platform-test-evidence-*
+      - id: download-native-coverage-certificate
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: native-coverage-certificate
+          path: download/native-coverage
+      - name: Remove a partial native-coverage certificate before retrying
+        id: reset-native-coverage-certificate
+        if: ${{ always() && steps.download-native-coverage-certificate.outcome == 'failure' }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          rm -rf -- download/native-coverage
+      - name: Retry the native-coverage certificate download
+        if: ${{ always() && steps.download-native-coverage-certificate.outcome == 'failure' && steps.reset-native-coverage-certificate.outcome == 'success' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: native-coverage-certificate
+          path: download/native-coverage
+      - id: download-sanitizer-certificates
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: download/sanitizers
+          pattern: sanitizer-certificate-*
+          merge-multiple: true
+      - name: Remove partial sanitizer certificates before retrying
+        id: reset-sanitizer-certificates
+        if: ${{ always() && steps.download-sanitizer-certificates.outcome == 'failure' }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          rm -rf -- download/sanitizers
+      - name: Retry the sanitizer certificate downloads
+        if: ${{ always() && steps.download-sanitizer-certificates.outcome == 'failure' && steps.reset-sanitizer-certificates.outcome == 'success' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          path: download/sanitizers
+          pattern: sanitizer-certificate-*
+          merge-multiple: true
+      - name: Verify the native-coverage gate evidence
+        shell: bash
+        run: |-
+          set -euo pipefail
+          python meta/ci/native/check_llvm_coverage.py verify \
+            --certificate download/native-coverage/native-coverage-certificate.json \
+            --github-sha "${GITHUB_SHA}" \
+            --github-run-id "${GITHUB_RUN_ID}" \
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+      - name: Verify every platform-wheel certificate
+        shell: bash
+        run: |-
+          set -euo pipefail
+          shopt -s nullglob
+          certificates=(download/wheels/platform-wheel-certificate-*.json)
+          if [[ "${#certificates[@]}" -ne 4 ]]; then
+            echo "Expected four platform-wheel certificates, found ${#certificates[@]}" >&2
+            exit 2
+          fi
+          platforms=(linux-x86_64 macos-arm64 macos-x86_64 windows-amd64)
+          for platform in "${platforms[@]}"; do
+            certificate="download/wheels/platform-wheel-certificate-${platform}.json"
+            if [[ ! -f "${certificate}" || -L "${certificate}" ]]; then
+              echo "Missing regular platform-wheel certificate: ${certificate}" >&2
+              exit 2
+            fi
+            python meta/ci/native/certify_platform_wheel.py verify \
+              --certificate "${certificate}" \
+              --wheel-directory download/wheels \
+              --platform "${platform}" \
+              --github-sha "${GITHUB_SHA}" \
+              --github-run-id "${GITHUB_RUN_ID}" \
+              --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+          done
+      - name: Verify the complete sanitizer evidence matrix
+        shell: bash
+        run: |-
+          set -euo pipefail
+          python meta/ci/sanitizers/certify_sanitizer_run.py verify-directory \
+            --evidence-directory download/sanitizers \
+            --github-sha "${GITHUB_SHA}" \
+            --github-run-id "${GITHUB_RUN_ID}" \
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+      - name: Verify every platform-test evidence set
+        shell: bash
+        run: |-
+          set -euo pipefail
+          shopt -s nullglob
+          expected=(
+            'platform-test-evidence-linux-x86_64-concurrency:linux:concurrency'
+            'platform-test-evidence-linux-x86_64-io-pipeline:linux:io-pipeline'
+            'platform-test-evidence-linux-x86_64-memory-parquet:linux:memory-parquet'
+            'platform-test-evidence-macos-arm64-concurrency:macos-arm64:concurrency'
+            'platform-test-evidence-macos-arm64-io-pipeline:macos-arm64:io-pipeline'
+            'platform-test-evidence-macos-arm64-memory-parquet:macos-arm64:memory-parquet'
+            'platform-test-evidence-macos-x86_64-concurrency:macos-x86_64:concurrency'
+            'platform-test-evidence-macos-x86_64-io-pipeline:macos-x86_64:io-pipeline'
+            'platform-test-evidence-macos-x86_64-memory-parquet:macos-x86_64:memory-parquet'
+            'platform-test-evidence-windows-amd64-concurrency:windows:concurrency'
+            'platform-test-evidence-windows-amd64-io-pipeline:windows:io-pipeline'
+            'platform-test-evidence-windows-amd64-memory-parquet:windows:memory-parquet'
+          )
+          actual=(download/platform-tests/platform-test-evidence-*)
+          if [[ "${#actual[@]}" -ne "${#expected[@]}" ]]; then
+            echo "Expected ${#expected[@]} platform-test evidence sets, found ${#actual[@]}" >&2
+            exit 2
+          fi
+          for specification in "${expected[@]}"; do
+            artifact=${specification%%:*}
+            remainder=${specification#*:}
+            platform=${remainder%%:*}
+            shard=${remainder#*:}
+            directory="download/platform-tests/${artifact}"
+            [[ -d "${directory}" && ! -L "${directory}" ]] || {
+              echo "Platform-test evidence directory is missing or unsafe: ${directory}" >&2
+              exit 2
+            }
+            python meta/ci/quality/platform_test_evidence.py verify \
+              --evidence-dir "${directory}" \
+              --certificate "${directory}/platform-test-certificate-${platform}-${shard}.json" \
+              --platform "${platform}" \
+              --shard "${shard}" \
+              --github-sha "${GITHUB_SHA}" \
+              --github-run-id "${GITHUB_RUN_ID}" \
+              --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+          done
       - name: Validate the complete release artifact set
         env:
           PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt

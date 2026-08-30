@@ -19,7 +19,8 @@ import schema_sanitizer as ss
 def _assert_rows(path: Path, expected: int) -> None:
     """Assert that a JSONL output contains the expected number of rows."""
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    assert len(rows) == expected, (path, rows)
+    if len(rows) != expected:
+        raise AssertionError((path, rows))
 
 
 def main() -> None:
@@ -37,7 +38,8 @@ def main() -> None:
         jsonl_source.write_text('{"id":1,"value":"x"}\n{"id":2,"value":"y"}\n', encoding="utf-8")
         jsonl_csv = root / "jsonl.csv"
         ss.to_csv(jsonl_source, jsonl_csv, input_format="jsonl")
-        assert len(jsonl_csv.read_text(encoding="utf-8").splitlines()) == 3
+        if len(jsonl_csv.read_text(encoding="utf-8").splitlines()) != 3:
+            raise AssertionError("JSONL-to-CSV smoke output must contain a header and two rows")
 
         xml_source = root / "events.xml"
         xml_source.write_text(
@@ -51,8 +53,10 @@ def main() -> None:
         parquet_output = root / "events.parquet"
         ss.to_parquet(jsonl_source, parquet_output, input_format="jsonl")
         table = pq.read_table(parquet_output)
-        assert table.num_rows == 2
-        assert {"id", "value"}.issubset(table.column_names)
+        if table.num_rows != 2:
+            raise AssertionError("JSONL-to-Parquet smoke output must contain two rows")
+        if not {"id", "value"}.issubset(table.column_names):
+            raise AssertionError("JSONL-to-Parquet smoke output lost required columns")
 
     print(f"downstream smoke passed with schema-sanitizer {ss.__version__}")
 

@@ -6,6 +6,7 @@ metadata identity, scratch-file rejection, and manifest verification.
 
 from __future__ import annotations
 
+import base64
 import gzip
 import hashlib
 import importlib.util
@@ -277,14 +278,79 @@ def _release_artifacts(
         "macosx_11_0_arm64",
     ):
         wheel = tmp_path / f"schema_sanitizer-{version}-cp311-abi3-{platform}.whl"
+        dist_info = f"schema_sanitizer-{version}.dist-info"
+        metadata_member = f"{wheel_metadata_project}-{version}.dist-info/METADATA"
+        tags = "".join(f"Tag: cp311-abi3-{tag}\n" for tag in platform.split("."))
+        wheel_metadata = (
+            f"Wheel-Version: 1.0\nGenerator: fixture\nRoot-Is-Purelib: false\n{tags}\n"
+        ).encode()
+        extension = (
+            "schema_sanitizer/_core_abi3.abi3.pyd"
+            if platform == "win_amd64"
+            else "schema_sanitizer/_core_abi3.abi3.so"
+        )
+        payloads = {
+            "schema_sanitizer/py.typed": b"",
+            extension: b"native-fixture",
+            f"{dist_info}/licenses/LICENSE": b"Apache-2.0\n",
+            metadata_member: metadata,
+            f"{dist_info}/WHEEL": wheel_metadata,
+        }
+        record_member = f"{dist_info}/RECORD"
+        record_lines = []
+        for name, payload in sorted(payloads.items()):
+            digest = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(b"=")
+            record_lines.append(f"{name},sha256={digest.decode('ascii')},{len(payload)}")
+        record_lines.append(f"{record_member},,")
+        payloads[record_member] = ("\n".join(record_lines) + "\n").encode()
         with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("schema_sanitizer/py.typed", b"")
-            archive.writestr(
-                f"schema_sanitizer-{version}.dist-info/licenses/LICENSE", b"Apache-2.0\n"
-            )
-            archive.writestr(f"{wheel_metadata_project}-{version}.dist-info/METADATA", metadata)
+            for name, payload in payloads.items():
+                archive.writestr(name, payload)
         wheels.append(wheel)
     return [wheels[2], sdist, wheels[0], wheels[3], wheels[1]]
+
+
+def test_sdist_source_manifest_requires_exact_tracked_file_parity(tmp_path: Path) -> None:
+    """Tracked release sources cannot silently disappear from or enter the sdist."""
+    validator = _load_validator()
+    sdist = tmp_path / "fixture.tar.gz"
+    with tarfile.open(sdist, "w:gz") as archive:
+        _add_tar_file(archive, "fixture/source.py")
+        _add_tar_file(archive, "fixture/PKG-INFO")
+        _add_tar_file(archive, "fixture/src/schema_sanitizer.egg-info/SOURCES.txt")
+    manifest = tmp_path / "tracked-files"
+    manifest.write_bytes(b"source.py\0")
+    validator.validate_sdist_source_manifest(sdist, manifest)
+
+    manifest.write_bytes(b"source.py\0missing.py\0")
+    with pytest.raises(AssertionError, match="missing=.*missing.py"):
+        validator.validate_sdist_source_manifest(sdist, manifest)
+
+    manifest.write_bytes(b"")
+    with pytest.raises(AssertionError, match="extra=.*source.py"):
+        validator.validate_sdist_source_manifest(sdist, manifest)
+
+
+def test_wheel_record_and_tags_authenticate_the_complete_archive(tmp_path: Path) -> None:
+    """Wheel validation rejects payload drift and filename/control-tag disagreement."""
+    validator = _load_validator()
+    wheel = _release_artifacts(tmp_path)[0]
+    assert validator._wheel_dist_info_root(wheel) == "schema_sanitizer-0.4.0.dist-info"
+    validator.validate(wheel)
+    with zipfile.ZipFile(wheel, "a") as archive:
+        archive.writestr("schema_sanitizer/unrecorded.py", b"payload")
+    with pytest.raises(AssertionError, match="RECORD member inventory mismatch"):
+        validator.validate(wheel)
+
+
+def test_sdist_downstream_rebuild_cannot_reuse_pip_wheel_cache() -> None:
+    """Same-version source changes always force a fresh downstream wheel build."""
+    action = (
+        Path(__file__).parents[2] / ".github/actions/source-distribution/action.yml"
+    ).read_text(encoding="utf-8")
+    rebuild = action.split("Rebuild and test as an isolated downstream consumer", 1)[1]
+    rebuild = rebuild.split("Upload the validated source distribution", 1)[0]
+    assert "python -m pip wheel --no-cache-dir --no-deps" in rebuild
 
 
 def test_release_manifest_is_canonical_complete_and_verifiable(tmp_path: Path) -> None:
@@ -340,7 +406,7 @@ def test_release_manifest_verification_rejects_tampering(tmp_path: Path) -> None
     helper.write_release_manifest(manifest, artifacts, **options)
     with zipfile.ZipFile(artifacts[0], "a") as archive:
         archive.writestr("schema_sanitizer/tampered.txt", b"changed")
-    with pytest.raises(AssertionError, match="digest mismatch"):
+    with pytest.raises(AssertionError, match="digest mismatch|RECORD member inventory mismatch"):
         helper.verify_release_manifest(manifest, artifacts, **options)
 
     artifacts = _release_artifacts(tmp_path / "fresh")

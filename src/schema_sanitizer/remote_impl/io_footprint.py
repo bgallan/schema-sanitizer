@@ -187,7 +187,8 @@ def open_remote_local_file(
                         opened = False
             raise
         else:
-            assert handle is not None
+            if handle is None:
+                raise AssertionError("successful footprint handle creation cannot return None")
             try:
                 handle.close()
             except BaseException:

@@ -72,7 +72,8 @@ runs:
       shell: bash
       run: |-
         set -euo pipefail
-        rm -rf -- .work/build .work/bin/python-asan
+        rm -rf -- .work/build .work/bin/python-asan .work/sanitizer-evidence
+        mkdir -p .work/sanitizer-evidence
     - name: Build and install the Linux instrumented extension
       if: inputs.mode == 'linux-full'
       env:
@@ -186,9 +187,22 @@ runs:
           "${python_embed_ldflags[@]}"
     - name: Exercise malformed input, lifecycle, and nested Parquet
       if: inputs.mode == 'linux-full'
+      env:
+        ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:strict_string_checks=1
+        LSAN_OPTIONS: ''
+        TSAN_OPTIONS: ''
+        UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
       shell: bash
       run: >-
-        .work/bin/python-asan -m pytest -q
+        python meta/ci/sanitizers/run_with_watchdog.py
+        --certificate .work/sanitizer-evidence/watchdog-asan-ubsan-linux-full-Linux-X64-extension.json
+        --environment "ASAN_OPTIONS=${ASAN_OPTIONS}"
+        --environment "LSAN_OPTIONS=${LSAN_OPTIONS}"
+        --environment "TSAN_OPTIONS=${TSAN_OPTIONS}"
+        --environment "UBSAN_OPTIONS=${UBSAN_OPTIONS}"
+        --label Linux-X64-asan-ubsan-linux-full-extension
+        --timeout 900
+        -- .work/bin/python-asan -m pytest -q
         tests/io/test_input_python_and_local.py
         tests/schema/test_options_bytes.py
         tests/concurrency/test_runtime_stream_materialization_and_registry_probes.py
@@ -245,7 +259,10 @@ runs:
         -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
     - name: Build native concurrency and fuzz targets
       env:
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
         RUNNER_SYSTEM: ${{ runner.os }}
+        SANITIZER_MODE: ${{ inputs.mode }}
+        SANITIZER_NAME: ${{ inputs.sanitizer }}
       shell: bash
       run: |
         set -euo pipefail
@@ -261,43 +278,184 @@ runs:
         export CMAKE_BUILD_PARALLEL_LEVEL
         cmake --build .work/build/platform-sanitizer \
           --config RelWithDebInfo \
-          --target schema_sanitizer_sanitized_ordered_executor \
+          --target _core_abi3 schema_sanitizer_sanitizer_python_launcher \
+          schema_sanitizer_sanitized_ordered_executor \
           schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv \
           schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
     - name: Require capacity for complete native concurrency coverage
       if: inputs.mode == 'native' && runner.os != 'Windows'
+      env:
+        ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:strict_string_checks=1
+        LSAN_OPTIONS: ''
+        TSAN_OPTIONS: ''
+        UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
       shell: bash
       run: |-
         set -euo pipefail
         .work/build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor \
           --require-cpu-capacity 3
-    - name: Run fixed-round sanitized concurrency probe
-      # MSVC ASan can hang outside the probe watchdog. Windows still builds
-      # the probe and executes all four native fuzzers below; Linux TSan owns
-      # the repeated race-sensitive concurrency gate.
-      if: inputs.mode == 'native' && runner.os != 'Windows'
+    - name: Run externally bounded sanitized concurrency probe
+      if: inputs.mode == 'native'
+      env:
+        ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:strict_string_checks=1
+        LSAN_OPTIONS: ''
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        RUNNER_SYSTEM: ${{ runner.os }}
+        SANITIZER_MODE: ${{ inputs.mode }}
+        SANITIZER_NAME: ${{ inputs.sanitizer }}
+        TSAN_OPTIONS: ''
+        UBSAN_OPTIONS: ${{ inputs.sanitizer == 'asan-ubsan' && 'halt_on_error=1:print_stacktrace=1' || '' }}
       shell: bash
-      run: >-
-        ctest --test-dir .work/build/platform-sanitizer
-        -C RelWithDebInfo
-        -R '^schema_sanitizer_sanitized_ordered_executor$'
-        --output-on-failure
+      run: |-
+        set -euo pipefail
+        mkdir -p .work/sanitizer-evidence
+        if [[ "${RUNNER_SYSTEM}" == 'Windows' ]]; then
+          executable=.work/build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor.exe
+          arguments=(--case arena_backpressure_deadline)
+          timeout_seconds=60
+        else
+          executable=.work/build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor
+          arguments=(--rounds 100)
+          timeout_seconds=300
+        fi
+        [[ -f "${executable}" && ! -L "${executable}" ]] || {
+          echo "Sanitized concurrency executable is missing or unsafe: ${executable}" >&2
+          exit 2
+        }
+        python meta/ci/sanitizers/run_with_watchdog.py \
+          --certificate ".work/sanitizer-evidence/watchdog-${SANITIZER_NAME}-${SANITIZER_MODE}-${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-concurrency.json" \
+          --environment "ASAN_OPTIONS=${ASAN_OPTIONS}" \
+          --environment "LSAN_OPTIONS=${LSAN_OPTIONS}" \
+          --environment "TSAN_OPTIONS=${TSAN_OPTIONS}" \
+          --environment "UBSAN_OPTIONS=${UBSAN_OPTIONS}" \
+          --label "${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-${SANITIZER_NAME}-${SANITIZER_MODE}-concurrency" \
+          --timeout "${timeout_seconds}" \
+          -- "${executable}" "${arguments[@]}"
+    - name: Exercise the instrumented extension through public conversions
+      if: inputs.mode == 'native'
+      env:
+        ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:strict_string_checks=1
+        LSAN_OPTIONS: ''
+        PYTHONPATH: ${{ github.workspace }}/src
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        RUNNER_SYSTEM: ${{ runner.os }}
+        SANITIZER_MODE: ${{ inputs.mode }}
+        SANITIZER_NAME: ${{ inputs.sanitizer }}
+        SCHEMA_SANITIZER_ABI_SMOKE_NATIVE_ROOT: ${{ github.workspace }}/.work/build/platform-sanitizer
+        TSAN_OPTIONS: ''
+        UBSAN_OPTIONS: ${{ inputs.sanitizer == 'asan-ubsan' && 'halt_on_error=1:print_stacktrace=1' || '' }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        launcher=.work/build/platform-sanitizer/schema_sanitizer_sanitizer_python_launcher
+        if [[ "${RUNNER_SYSTEM}" == 'Windows' ]]; then
+          launcher="${launcher}.exe"
+        fi
+        [[ -f "${launcher}" && ! -L "${launcher}" ]] || {
+          echo "Sanitizer-first Python launcher is missing or unsafe: ${launcher}" >&2
+          exit 2
+        }
+        python meta/ci/sanitizers/run_with_watchdog.py \
+          --certificate ".work/sanitizer-evidence/watchdog-${SANITIZER_NAME}-${SANITIZER_MODE}-${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-extension.json" \
+          --environment "ASAN_OPTIONS=${ASAN_OPTIONS}" \
+          --environment "LSAN_OPTIONS=${LSAN_OPTIONS}" \
+          --environment "TSAN_OPTIONS=${TSAN_OPTIONS}" \
+          --environment "UBSAN_OPTIONS=${UBSAN_OPTIONS}" \
+          --label "${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-${SANITIZER_NAME}-${SANITIZER_MODE}-extension" \
+          --timeout 120 \
+          -- "${launcher}" -u meta/ci/release/abi_public_smoke.py
     - name: Run platform fuzz regressions and mutation campaigns
       if: inputs.mode == 'native'
+      env:
+        ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:strict_string_checks=1
+        LSAN_OPTIONS: ''
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        RUNNER_SYSTEM: ${{ runner.os }}
+        SANITIZER_MODE: ${{ inputs.mode }}
+        SANITIZER_NAME: ${{ inputs.sanitizer }}
+        TSAN_OPTIONS: ''
+        UBSAN_OPTIONS: ${{ inputs.sanitizer == 'asan-ubsan' && 'halt_on_error=1:print_stacktrace=1' || '' }}
       shell: bash
       run: >-
-        meta/ci/fuzz/run_fuzz_regressions.sh
+        python meta/ci/sanitizers/run_with_watchdog.py
+        --certificate ".work/sanitizer-evidence/watchdog-${SANITIZER_NAME}-${SANITIZER_MODE}-${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-fuzz.json"
+        --environment "ASAN_OPTIONS=${ASAN_OPTIONS}"
+        --environment "LSAN_OPTIONS=${LSAN_OPTIONS}"
+        --environment "TSAN_OPTIONS=${TSAN_OPTIONS}"
+        --environment "UBSAN_OPTIONS=${UBSAN_OPTIONS}"
+        --label "${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-${SANITIZER_NAME}-${SANITIZER_MODE}-fuzz"
+        --timeout 900
+        -- bash meta/ci/fuzz/run_fuzz_regressions.sh
         --build-root .work/build/platform-sanitizer/fuzz
         --campaign-runs 500
         --seed 15172026
         --max-len 262144
     - name: Run Linux ASan/UBSan fuzz regressions and mutation campaigns
       if: inputs.mode == 'linux-full'
+      env:
+        # CPython itself is not instrumented, so its extension suite keeps LSan
+        # disabled. These standalone, fully instrumented binaries own the leak gate.
+        ASAN_OPTIONS: detect_leaks=1:halt_on_error=1:strict_string_checks=1
+        LSAN_OPTIONS: exitcode=23
+        TSAN_OPTIONS: ''
+        UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
       shell: bash
       run: >-
-        meta/ci/fuzz/run_fuzz_regressions.sh
+        python meta/ci/sanitizers/run_with_watchdog.py
+        --certificate .work/sanitizer-evidence/watchdog-asan-ubsan-linux-full-Linux-X64-fuzz.json
+        --environment "ASAN_OPTIONS=${ASAN_OPTIONS}"
+        --environment "LSAN_OPTIONS=${LSAN_OPTIONS}"
+        --environment "TSAN_OPTIONS=${TSAN_OPTIONS}"
+        --environment "UBSAN_OPTIONS=${UBSAN_OPTIONS}"
+        --label Linux-X64-asan-ubsan-linux-full-fuzz
+        --timeout 900
+        -- bash meta/ci/fuzz/run_fuzz_regressions.sh
         --build-root .work/build/platform-sanitizer/fuzz
         --engine libfuzzer
         --campaign-runs 1000
         --seed 15172026
         --max-len 262144
+    - name: Certify the completed platform sanitizer workload
+      env:
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        RUNNER_SYSTEM: ${{ runner.os }}
+        SANITIZER_MODE: ${{ inputs.mode }}
+        SANITIZER_NAME: ${{ inputs.sanitizer }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        certificate=".work/sanitizer-evidence/sanitizer-run-${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-${SANITIZER_NAME}.json"
+        python meta/ci/sanitizers/certify_sanitizer_run.py create \
+          --certificate "${certificate}" \
+          --evidence-directory .work/sanitizer-evidence \
+          --sanitizer "${SANITIZER_NAME}" \
+          --mode "${SANITIZER_MODE}" \
+          --runner-os "${RUNNER_SYSTEM}" \
+          --runner-arch "${RUNNER_ARCHITECTURE}" \
+          --github-sha "${GITHUB_SHA}" \
+          --github-run-id "${GITHUB_RUN_ID}" \
+          --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+        cat "${certificate}"
+    - name: Upload platform sanitizer evidence
+      id: upload-platform-sanitizer-evidence
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-${{ inputs.sanitizer
+          }}
+        path: .work/sanitizer-evidence/*.json
+        if-no-files-found: error
+        retention-days: 7
+        compression-level: 0
+        overwrite: true
+    - name: Retry platform sanitizer evidence upload
+      if: ${{ always() && steps.upload-platform-sanitizer-evidence.outcome == 'failure' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-${{ inputs.sanitizer
+          }}
+        path: .work/sanitizer-evidence/*.json
+        if-no-files-found: error
+        retention-days: 7
+        compression-level: 0
+        overwrite: true

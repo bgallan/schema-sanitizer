@@ -339,7 +339,8 @@ class _ProcessTemporaryStorageGovernor:
                 # capability immediately so a losing constructor cannot leak a
                 # host-wide storage-account owner.
                 close_cross_process_storage_account(candidate.cross_account)
-        assert state is not None
+        if state is None:
+            raise AssertionError("created storage governor state cannot be absent")
         try:
             with state.lock:  # type: ignore[attr-defined]
                 if not self._reconcile_state_authority_locked(device, state):

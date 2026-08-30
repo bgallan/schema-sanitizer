@@ -116,8 +116,9 @@ def _run_operation_resource_finalizer(authority: RootedFinalizerAuthority) -> No
             complete_operation(
                 str(operation_id), {"operation_id": str(operation_id), "state": "closed"}
             )
-        except Exception:
-            pass
+        # Finalizer diagnostics cannot block cleanup.
+        except Exception as ignored_error:
+            del ignored_error
         authority.arg5 = None
 
 
@@ -517,8 +518,9 @@ class _OperationExecutionResources:
                     self.operation_id,
                     {"operation_id": self.operation_id, "pid": self.pid, "state": "closed"},
                 )
-            except Exception:
-                pass
+            # Finalizer diagnostics are best effort.
+            except Exception as ignored_error:
+                del ignored_error
 
     def __del__(self) -> None:
         """Arm the pre-rooted resource authority without blocking."""

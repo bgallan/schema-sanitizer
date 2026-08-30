@@ -579,7 +579,8 @@ def read_effective_cgroup_integer(
                     sample = current
                     break
                 if current.state is CgroupValueState.VALUE:
-                    assert current.value is not None
+                    if current.value is None:
+                        raise AssertionError("VALUE cgroup sample must carry a value")
                     if best is None or current.value < best:
                         best = current.value
                         best_path = path
@@ -634,7 +635,8 @@ def read_effective_cgroup_headroom(
                 if usage_sample.state is not CgroupValueState.VALUE:
                     sample = CgroupIntegerSample(CgroupValueState.UNKNOWN, path=usage_path)
                     break
-                assert limit_sample.value is not None and usage_sample.value is not None
+                if limit_sample.value is None or usage_sample.value is None:
+                    raise AssertionError("VALUE cgroup samples must carry values")
                 saw_bounded = True
                 headroom = max(0, limit_sample.value - usage_sample.value)
                 if best is None or headroom < best:
@@ -671,7 +673,8 @@ def read_effective_cgroup_usage_ratio(
             and view.hierarchy_is_complete(controller=controller)
         )
         if valid:
-            assert limit_paths is not None and usage_paths is not None
+            if limit_paths is None or usage_paths is None:
+                raise AssertionError("complete cgroup hierarchy must carry paired paths")
             pairs = zip(limit_paths, usage_paths, strict=True)
             for index, (limit_path, usage_path) in enumerate(pairs):
                 limit_raw, limit_missing = _read_text_path_sample(limit_path, limit=64)
@@ -694,7 +697,8 @@ def read_effective_cgroup_usage_ratio(
                 if usage_sample.state is not CgroupValueState.VALUE:
                     valid = False
                     break
-                assert limit_sample.value is not None and usage_sample.value is not None
+                if limit_sample.value is None or usage_sample.value is None:
+                    raise AssertionError("VALUE cgroup samples must carry values")
                 if limit_sample.value <= 0:
                     current = float("inf") if usage_sample.value > 0 else 1.0
                 else:

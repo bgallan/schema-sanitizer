@@ -99,14 +99,14 @@ runs:
         done
     - name: Static Python security scan
       shell: bash
-      run: bandit -r src meta/ci -ll
+      run: bandit -r src meta/ci -l
     - name: Secret scan
       shell: bash
       run: |
         set -euo pipefail
         detect-secrets scan \
           --no-verify \
-          --exclude-files '^(\.git/|\.work/|dist/|\.venv/|fuzz/(corpus|regressions)/(csv|json|parquet|xml)/)' \
+          --exclude-files '^(\.git/|\.work/|dist/|\.venv/|fuzz/(corpus|regressions)/parquet/|fuzz/regressions/(csv|json|parquet|xml)\.sha1\.zip$|fuzz/corpus/json/invalid-utf8\.json$)' \
           > .work/audit/detect-secrets.json
         python meta/ci/quality/check_detect_secrets_report.py \
           .work/audit/detect-secrets.json

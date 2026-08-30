@@ -99,14 +99,33 @@ runs:
       run: |
         set -euo pipefail
         python - <<'PY'
+        import importlib
+        import sys
         from pathlib import Path
-        import schema_sanitizer as package
-        import schema_sanitizer._core_abi3 as core
+        required = (
+            "schema_sanitizer",
+            "schema_sanitizer._core_abi3",
+            "schema_sanitizer.api_impl.execution_context",
+            "schema_sanitizer.core_impl.native_runtime",
+        )
+        for name in required:
+            importlib.import_module(name)
         checkout = Path.cwd().resolve()
-        extension = Path(core.__file__).resolve()
-        if extension.is_relative_to(checkout):
-            raise SystemExit(f"native extension came from checkout, not wheel: {extension}")
-        print(package.__version__, extension)
+        provenance = {}
+        for name, module in sorted(sys.modules.items()):
+            if name != "schema_sanitizer" and not name.startswith("schema_sanitizer."):
+                continue
+            raw_path = getattr(module, "__file__", None)
+            if not raw_path:
+                continue
+            path = Path(raw_path).resolve()
+            provenance[name] = str(path)
+            if path.is_relative_to(checkout):
+                raise SystemExit(f"{name} came from checkout, not wheel: {path}")
+        missing = sorted(set(required) - set(provenance))
+        if missing:
+            raise SystemExit(f"wheel provenance is incomplete: {missing}")
+        print(provenance["schema_sanitizer"], provenance["schema_sanitizer._core_abi3"])
         PY
     - name: Require the declared concurrency-workload CPU capacity
       if: inputs.shard == 'concurrency' || inputs.shard == 'memory-parquet'
@@ -181,6 +200,12 @@ runs:
       if: inputs.shard == 'concurrency'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        SCHEMA_SANITIZER_EXPECT_NATIVE_STRESS_NODEIDS: tests/concurrency/test_ordered_executor_completion_probe.py::test_completion_probe_sustains_many_ring_generations
+        SCHEMA_SANITIZER_INTEGRITY_EVIDENCE: artifacts/integrity-native-stress-${{ inputs.artifact }}.json
+        SCHEMA_SANITIZER_PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        SCHEMA_SANITIZER_STRICT_TEST_RUNTIME: '1'
+        SCHEMA_SANITIZER_TEST_SHARD: native-stress
       shell: bash
       run: |
         set -euo pipefail
@@ -189,11 +214,35 @@ runs:
           --durations=10 \
           --durations-min=0.05 \
           --junitxml="artifacts/pytest-native-stress-${PLATFORM_ARTIFACT}.xml" \
-          tests/concurrency/test_ordered_executor_completion_probe.py \
+          tests/concurrency \
           2>&1 | tee "artifacts/pytest-native-stress-durations-${PLATFORM_ARTIFACT}.log"
+    - name: Run the clean public 8-by-7 release matrix
+      if: inputs.shard == 'concurrency'
+      env:
+        PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        SCHEMA_SANITIZER_INTEGRITY_EVIDENCE: artifacts/integrity-release-matrix-${{ inputs.artifact }}.json
+        SCHEMA_SANITIZER_PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        SCHEMA_SANITIZER_STRICT_TEST_RUNTIME: '1'
+        SCHEMA_SANITIZER_TEST_SHARD: release-matrix
+      shell: bash
+      run: |
+        set -euo pipefail
+        pytest -q -o pythonpath=. \
+          --durations=5 \
+          --durations-min=0.05 \
+          --junitxml="artifacts/pytest-release-matrix-${PLATFORM_ARTIFACT}.xml" \
+          tests/concurrency/test_concurrency_route_release_gate.py \
+          2>&1 | tee "artifacts/pytest-release-matrix-durations-${PLATFORM_ARTIFACT}.log"
     - name: Run functional test shard
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        SCHEMA_SANITIZER_INTEGRITY_EVIDENCE: artifacts/integrity-${{ inputs.artifact }}-${{
+          inputs.shard }}.json
+        SCHEMA_SANITIZER_PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        SCHEMA_SANITIZER_STRICT_TEST_RUNTIME: '1'
+        SCHEMA_SANITIZER_TEST_SHARD: ${{ inputs.shard }}
         TEST_SHARD: ${{ inputs.shard }}
       shell: bash
       run: |-
@@ -234,8 +283,9 @@ runs:
           --junitxml="artifacts/pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml"
         )
         if [[ "${TEST_SHARD}" == 'concurrency' ]]; then
-          # The release gate owns sticky process-wide counters, so it stays here.
+          # The release matrix runs in a fresh process and owns its complete evidence.
           pytest_command+=(
+            --ignore=tests/concurrency/test_concurrency_route_release_gate.py
             --ignore=tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py
           )
         elif [[ "${TEST_SHARD}" == 'memory-parquet' ]]; then
@@ -257,3 +307,43 @@ runs:
         python meta/ci/parquet/check_parquet_contract_runtime_suite.py \
           --junit-xml "artifacts/pytest-${PLATFORM_ARTIFACT}-memory-parquet.xml" \
           --certificate-output "artifacts/parquet-contract-runtime-certificate-${PLATFORM_ARTIFACT}.json"
+    - name: Consolidate the exact platform-job evidence
+      if: always()
+      env:
+        PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        TEST_SHARD: ${{ inputs.shard }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        python meta/ci/quality/platform_test_evidence.py create \
+          --evidence-dir artifacts \
+          --certificate "artifacts/platform-test-certificate-${PLATFORM_ARTIFACT}-${TEST_SHARD}.json" \
+          --platform "${PLATFORM_ARTIFACT}" \
+          --shard "${TEST_SHARD}" \
+          --github-sha "${GITHUB_SHA}" \
+          --github-run-id "${GITHUB_RUN_ID}" \
+          --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+    - name: Upload compact platform-test evidence
+      if: always()
+      id: upload-platform-test-evidence
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: platform-test-evidence-${{ inputs.platform-name }}-${{ inputs.shard
+          }}
+        path: artifacts
+        if-no-files-found: error
+        retention-days: 7
+        compression-level: 6
+        overwrite: true
+    - name: Retry the exact platform-test evidence upload
+      if: ${{ always() && steps.upload-platform-test-evidence.outcome == 'failure' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: platform-test-evidence-${{ inputs.platform-name }}-${{ inputs.shard
+          }}
+        path: artifacts
+        if-no-files-found: error
+        retention-days: 7
+        compression-level: 6
+        overwrite: true

@@ -7,6 +7,7 @@ secret-scanner finding and failure message.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -160,3 +161,30 @@ def test_check_report_retains_actionable_failure_output(
         check_report(report_path, tmp_path)
 
     assert "src/config.py:1: Secret Keyword" in capsys.readouterr().out
+
+
+def test_ci_scans_textual_fuzz_assets_and_excludes_only_binary_inputs() -> None:
+    """CSV, JSON, and XML regressions stay visible to the secret scanner."""
+    action = (
+        Path(__file__).parents[2] / ".github/actions/quality-validation/action.yml"
+    ).read_text(encoding="utf-8")
+    match = re.search(r"--exclude-files '([^']+)'", action)
+    assert match is not None
+    excluded = re.compile(match.group(1))
+
+    for path in (
+        "fuzz/corpus/csv/basic.csv",
+        "fuzz/corpus/json/object.json",
+        "fuzz/corpus/xml/basic.xml",
+        "fuzz/regressions/csv/unterminated.csv",
+        "fuzz/regressions/json/truncated.json",
+        "fuzz/regressions/xml/mismatched.xml",
+    ):
+        assert excluded.search(path) is None
+    for path in (
+        "fuzz/corpus/parquet/minimal.parquet",
+        "fuzz/regressions/parquet/truncated.parquet",
+        "fuzz/regressions/json.sha1.zip",
+        "fuzz/corpus/json/invalid-utf8.json",
+    ):
+        assert excluded.search(path) is not None

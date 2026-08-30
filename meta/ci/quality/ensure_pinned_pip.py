@@ -38,7 +38,8 @@ def ensure_pinned_pip() -> bool:
         "--only-binary=:all:",
         f"pip=={PIP_VERSION}",
     ]
-    status = os.spawnv(os.P_WAIT, sys.executable, command)
+    # Fixed argv execution deliberately avoids a shell and command parsing.
+    status = os.spawnv(os.P_WAIT, sys.executable, command)  # nosec B606
     if status != 0:
         raise RuntimeError(f"pip bootstrap failed with status {status}")
     installed = installed_pip_version()

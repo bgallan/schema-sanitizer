@@ -358,7 +358,8 @@ class RemoteIoCoordinator:
             name="shutdown_timeout_seconds",
             allow_zero=False,
         )
-        assert normalized_shutdown_timeout is not None
+        if normalized_shutdown_timeout is None:
+            raise AssertionError("validated coordinator shutdown timeout cannot be absent")
         self._context_factory = context_factory or _empty_async_context
         self._pid = os.getpid()
         self._operation_id = _bounded_metadata(
@@ -1000,7 +1001,8 @@ class RemoteIoCoordinator:
             name="remote coordinator runtime shutdown deadline",
             allow_zero=True,
         )
-        assert remaining is not None
+        if remaining is None:
+            raise AssertionError("validated coordinator shutdown deadline cannot be absent")
         previous = self._shutdown_timeout_seconds
         self._shutdown_timeout_seconds = min(previous, remaining)
         try:
@@ -1056,7 +1058,8 @@ class RemoteIoCoordinator:
             remaining = deadline - monotonic()
             if remaining <= 0:
                 check_operation_cancelled(stage="remote_fd_admission")
-                assert last_error is not None
+                if last_error is None:
+                    raise AssertionError("expired descriptor admission must retain its error")
                 raise last_error
             # Keep the event-loop thread available to tasks that can release the
             # composite credit, while the operation token/deadline can wake us.

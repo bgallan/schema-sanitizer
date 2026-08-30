@@ -67,13 +67,15 @@ def build_operation_resource_diagnostic_snapshot(resources: Any) -> dict[str, ob
             continue
         try:
             payload[key] = asdict(diagnostics())
-        except Exception:
-            pass
+        # Diagnostics must not affect resource ownership.
+        except Exception as ignored_error:
+            del ignored_error
     if coordinator is not None:
         try:
             payload["remote_io"] = asdict(coordinator.permit_snapshot())
-        except Exception:
-            pass
+        # Diagnostics must not affect resource ownership.
+        except Exception as ignored_error:
+            del ignored_error
     return payload
 
 

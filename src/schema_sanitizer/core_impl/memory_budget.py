@@ -478,7 +478,8 @@ class OperationMemoryLease:
                     if isinstance(current_owner, RootedFinalizerAuthority):
                         current_owner.make_ack_only()
                 elif successor_committed is False:
-                    assert successor is not None
+                    if successor is None:
+                        raise AssertionError("uncommitted successor authority cannot be absent")
                     try:
                         retire_or_ack_rooted_finalizer_authority(
                             _MEMORY_LEASE_ROOTED_FINALIZER_ESCROW, ticket, successor_owner
@@ -872,14 +873,16 @@ class OperationMemoryLedger:
             if replay_committed:
                 entry = None
             else:
-                assert entry is not None
+                if entry is None:
+                    raise AssertionError("pending memory replay entry cannot be absent")
         if replay_committed:
             try:
                 self._maybe_finish_deferred_close()
             except BaseException:
                 self._schedule_deferred_close_cleanup_noexcept()
             return
-        assert entry is not None
+        if entry is None:
+            raise AssertionError("pending memory release entry cannot be absent")
         with self._lock:
             amount = max(entry.size_bytes, entry.physical_size_bytes)
             physical_released = entry.physical_released
@@ -1136,8 +1139,9 @@ class OperationMemoryLedger:
                 peak_bytes=max(0, int(peak_bytes)),
                 untracked_rss_bytes=pressure.untracked_rss_bytes,
             )
-        except Exception:
-            pass
+        # Close-path telemetry is advisory.
+        except Exception as ignored_error:
+            del ignored_error
 
     def reserve(
         self, size_bytes: int, *, stage: str, _exact_receipt: bool = False
@@ -2217,7 +2221,8 @@ def acquire_parallel_admission(
                 slots = min(slots, 1 + max(0, granted))
             control_reservation = _reserve_stage_control(slots, stage)
             control_ticket = control_reservation.ticket
-            assert control_ticket is not None
+            if control_ticket is None:
+                raise AssertionError("stage control reservation must issue a ticket")
             control_bytes = control_reservation.control_bytes
             construction.control_ticket = control_ticket
             construction.control_bytes = control_bytes
@@ -2275,7 +2280,8 @@ def acquire_parallel_admission(
                     resize(final_slots * per_slot_bytes)
             control_reservation = _reserve_stage_control(final_slots, stage)
             control_ticket = control_reservation.ticket
-            assert control_ticket is not None
+            if control_ticket is None:
+                raise AssertionError("resized stage control reservation must issue a ticket")
             control_bytes = control_reservation.control_bytes
             construction.control_ticket = control_ticket
             construction.control_bytes = control_bytes

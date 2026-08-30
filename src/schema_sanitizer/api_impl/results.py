@@ -177,7 +177,9 @@ def _reader_batch_count(reader: Any) -> int:
         try:
             if value is not None:
                 return max(0, int(value))
-        except Exception:
+        # Unsupported advisory counters are intentionally skipped.
+        except Exception as ignored_error:
+            del ignored_error
             continue
     return 0
 
@@ -571,8 +573,9 @@ class Result(DiagnosticsAccessMixin):
                 self._finalizer_ticket = 0
                 self._finalizer_capsule = None
                 self._finalizer_state = None
-        except Exception:
-            pass
+        # Destructors cannot raise.
+        except Exception as ignored_error:
+            del ignored_error
 
     def __repr__(self) -> str:
         """Return a compact row and column count representation."""
@@ -638,8 +641,9 @@ class SinkResult(DiagnosticsAccessMixin, ClosableContextManagerMixin):
                 self._raw = None
                 self._finalizer_ticket = 0
                 self._finalizer_capsule = None
-        except Exception:
-            pass
+        # Destructors cannot raise.
+        except Exception as ignored_error:
+            del ignored_error
 
     @property
     def table(self):

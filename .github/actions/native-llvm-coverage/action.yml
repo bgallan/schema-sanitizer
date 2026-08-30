@@ -103,4 +103,37 @@ runs:
           -compilation-dir="${GITHUB_WORKSPACE}" \
           -instr-profile=coverage-native/combined.profdata \
           > coverage-native/combined-summary.txt
+        llvm-cov-18 export "${EXTENSION}" \
+          -compilation-dir="${GITHUB_WORKSPACE}" \
+          -instr-profile=coverage-native/combined.profdata \
+          -summary-only \
+          > coverage-native/combined-summary.json
+        python meta/ci/native/check_llvm_coverage.py create \
+          --report coverage-native/combined-summary.json \
+          --certificate coverage-native/native-coverage-certificate.json \
+          --github-sha "${GITHUB_SHA}" \
+          --github-run-id "${GITHUB_RUN_ID}" \
+          --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
         cat coverage-native/combined-summary.txt
+        cat coverage-native/native-coverage-certificate.json
+    - name: Upload the native coverage certificate
+      id: upload-native-coverage-certificate
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: native-coverage-certificate
+        path: coverage-native/native-coverage-certificate.json
+        if-no-files-found: error
+        retention-days: 7
+        compression-level: 0
+        overwrite: true
+    - name: Retry the native coverage certificate upload
+      if: ${{ always() && steps.upload-native-coverage-certificate.outcome == 'failure' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: native-coverage-certificate
+        path: coverage-native/native-coverage-certificate.json
+        if-no-files-found: error
+        retention-days: 7
+        compression-level: 0
+        overwrite: true

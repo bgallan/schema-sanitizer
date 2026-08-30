@@ -13,7 +13,6 @@ import json
 import sys
 from pathlib import Path
 from typing import Any
-from xml.etree import ElementTree
 
 from defusedxml import ElementTree as DefusedElementTree
 from defusedxml.common import DefusedXmlException
@@ -179,7 +178,7 @@ def _xml_local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
-def _junit_testcase_report(testcase: ElementTree.Element) -> dict[str, Any]:
+def _junit_testcase_report(testcase: Any) -> dict[str, Any]:
     """Convert one pytest JUnit testcase element to a normalized report."""
     classname = str(testcase.get("classname") or "").strip()
     test_name = str(testcase.get("name") or "").strip()
@@ -209,7 +208,7 @@ def _junit_testcase_report(testcase: ElementTree.Element) -> dict[str, Any]:
 
 
 def _junit_suite_count(
-    suite: ElementTree.Element,
+    suite: Any,
     attribute: str,
     issues: list[str],
 ) -> int | None:
@@ -239,7 +238,7 @@ def _load_junit_evidence(path: str | Path) -> tuple[dict[str, Any], list[dict[st
     else:
         try:
             root = DefusedElementTree.parse(source).getroot()
-        except (DefusedXmlException, ElementTree.ParseError, OSError) as exc:
+        except (DefusedXmlException, DefusedElementTree.ParseError, OSError) as exc:
             issues.append(f"JUnit report is not valid XML: {exc}")
         else:
             root_name = _xml_local_name(root.tag)

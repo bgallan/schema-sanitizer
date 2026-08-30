@@ -310,7 +310,8 @@ class _CleanupDispatcher:
                 self._queues.pop(subsystem, None)
                 raise
         else:
-            assert queue is not None
+            if queue is None:
+                raise AssertionError("existing cleanup subsystem must have a queue")
             queue.append(call)
         call.next_attempt_ns = 0
         call.state = _CleanupState.RUNNABLE

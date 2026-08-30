@@ -257,10 +257,14 @@ def shell_plan(
             )
         )
         identity_check = (
-            "import pip, struct, sys; "
-            f"assert tuple(sys.version_info[:3]) == {expected_python!r}; "
-            f"assert struct.calcsize('P') * 8 == {expected_pointer_bits}; "
-            f"assert pip.__version__ == {_PIP_VERSION!r}"
+            "import pip, struct, sys\n"
+            f"expected_python = {expected_python!r}\n"
+            "if tuple(sys.version_info[:3]) != expected_python:\n"
+            "    raise SystemExit(f'unexpected Python version: {sys.version_info[:3]}')\n"
+            f"if struct.calcsize('P') * 8 != {expected_pointer_bits}:\n"
+            "    raise SystemExit('unexpected Python pointer width')\n"
+            f"if pip.__version__ != {_PIP_VERSION!r}:\n"
+            "    raise SystemExit('unexpected pip version')"
         )
         lines.append(_command([python, "-I", "-c", identity_check]))
         return python

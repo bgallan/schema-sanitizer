@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("isolated_external_runtime_coordinator")
+
 
 def _root() -> Path:
     """Return the repository root used by source-contract checks."""

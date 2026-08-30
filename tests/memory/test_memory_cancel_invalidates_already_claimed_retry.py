@@ -5,15 +5,11 @@ while permanent cleanup failures remain explicitly parked."""
 
 from __future__ import annotations
 
-import os
+import sys
 import time
 
 import pytest
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
-
-pytestmark = pytest.mark.skipif(
-    os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
-)
 
 
 def _move_pending_to_ready(scheduler):
@@ -106,6 +102,7 @@ def test_release_guardian_dead_letters_permanent_failure(monkeypatch: pytest.Mon
     assert snap.dead_letter_bytes == 32
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX hard-link claim reader required")
 def test_claim_reader_rejects_hardlinks(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Verify claim reader rejects hardlinks."""
     import schema_sanitizer.core_impl.path_identity as module

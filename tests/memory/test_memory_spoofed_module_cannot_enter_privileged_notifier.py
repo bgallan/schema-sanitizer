@@ -14,10 +14,6 @@ from pathlib import Path
 import pytest
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
-pytestmark = pytest.mark.skipif(
-    os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
-)
-
 
 def _delivery(module: object, governor: object, event: object) -> object:
     """Deliver the notifier callback under the spoofed caller context."""
@@ -143,6 +139,7 @@ def test_scheduler_failed_lease_transfer_is_per_item_transactional(
         assert tuple(scheduler._failed_worker_leases) == (first, second)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX quarantine ownership descriptor required")
 def test_quarantine_root_owner_survives_guardian_rejection(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

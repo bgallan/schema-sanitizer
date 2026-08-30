@@ -12,6 +12,8 @@ from time import monotonic
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures("isolated_external_runtime_coordinator")
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]

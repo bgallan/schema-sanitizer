@@ -98,11 +98,17 @@ runs:
         windows_python=$(
           python meta/ci/native/install_windows_cpython.py "${PYTHON_NUPKG_SHA256}"
         )
-        "${windows_python}" -I -c \
-          "import platform,struct,sys; \
-          assert sys.version_info[:3] == (3, 11, 9); \
-          assert struct.calcsize('P') == 8; \
-          assert platform.machine().upper() == 'AMD64'"
+        "${windows_python}" -I - <<'PY'
+        import platform
+        import struct
+        import sys
+        if sys.version_info[:3] != (3, 11, 9):
+            raise SystemExit(f"unexpected Windows Python version: {sys.version_info[:3]}")
+        if struct.calcsize("P") != 8:
+            raise SystemExit("the Windows wheel build requires a 64-bit interpreter")
+        if platform.machine().upper() != "AMD64":
+            raise SystemExit(f"unexpected Windows Python architecture: {platform.machine()}")
+        PY
     - name: Prevent Arrow C++ headers
       if: runner.os == 'Linux'
       shell: bash
@@ -120,20 +126,32 @@ runs:
         clang_version=$(xcrun --sdk macosx15.5 clang --version)
         [[ "${clang_version%%$'\n'*}" == \
           'Apple clang version 17.0.0 (clang-1700.0.13.5)' ]]
-    - name: Select the Windows v143 redistributable
+    - name: Select the reviewed Windows release toolchain
       if: runner.os == 'Windows'
       shell: bash
       run: |
         set -euo pipefail
         vs_root='C:/Program Files/Microsoft Visual Studio/2022/Enterprise'
+        tools_version_file="${vs_root}/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt"
         version_file="${vs_root}/VC/Auxiliary/Build/Microsoft.VCRedistVersion.default.txt"
-        [[ -f "${version_file}" ]] || {
-          echo "VS 2022 v143 redistributable version file is missing: ${version_file}" >&2
+        [[ -f "${tools_version_file}" && -f "${version_file}" ]] || {
+          echo "VS 2022 toolchain version files are missing below ${vs_root}" >&2
           exit 2
         }
+        tools_version=$(tr -d '\r\n' < "${tools_version_file}")
         redist_version=$(tr -d '\r\n' < "${version_file}")
-        [[ "${redist_version}" =~ ^14[.]4[0-9][.][0-9]+$ ]] || {
-          echo "Expected a VS 2022 v143 redistributable, got ${redist_version}" >&2
+        [[ "${tools_version}" == '14.44.35207' ]] || {
+          echo "Unreviewed VS 2022 compiler tools: ${tools_version}" >&2
+          exit 2
+        }
+        [[ "${redist_version}" == '14.44.35211' ]] || {
+          echo "Unreviewed VS 2022 redistributable: ${redist_version}" >&2
+          exit 2
+        }
+        compiler="${vs_root}/VC/Tools/MSVC/${tools_version}/bin/Hostx64/x64/cl.exe"
+        sdk_root='C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0'
+        [[ -f "${compiler}" && -d "${sdk_root}" ]] || {
+          echo 'The reviewed MSVC 14.44.35207 / Windows SDK 10.0.26100.0 is unavailable' >&2
           exit 2
         }
         redist_directory="${vs_root}/VC/Redist/MSVC/${redist_version}/x64/Microsoft.VC143.CRT"
@@ -226,9 +244,67 @@ runs:
             exit 2
           }
         done
+        grep -F -- '-- The CXX compiler identification is MSVC 19.44.35228.0' \
+          .work/cibuildwheel.log >/dev/null || {
+          echo 'Windows compiler version is not the reviewed MSVC 19.44.35228.0' >&2
+          exit 2
+        }
+        grep -F -- '-- Selecting Windows SDK version 10.0.26100.0 ' \
+          .work/cibuildwheel.log >/dev/null || {
+          echo 'Windows SDK version is not the reviewed 10.0.26100.0' >&2
+          exit 2
+        }
+        python - "${cache}" <<'PY'
+        import sys
+        from pathlib import Path
+        values = {}
+        for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+            key_and_type, separator, value = line.partition("=")
+            key, type_separator, _cache_type = key_and_type.partition(":")
+            if separator and type_separator:
+                values[key] = value.replace("\\", "/")
+        expected_compiler = (
+            "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/"
+            "MSVC/14.44.35207/bin/Hostx64/x64/cl.exe"
+        )
+        for key in ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER"):
+            if values.get(key) != expected_compiler:
+                raise SystemExit(
+                    f"Windows release {key} mismatch: {values.get(key)!r} != {expected_compiler!r}"
+                )
+        if values.get("CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION") != "10.0.26100.0":
+            raise SystemExit(
+                "Windows release SDK mismatch: "
+                f"{values.get('CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION')!r}"
+            )
+        PY
     - name: Audit the CPython stable ABI
       shell: bash
-      run: python -m abi3audit --strict --report wheelhouse/*.whl
+      run: |
+        set -euo pipefail
+        python -m abi3audit --strict --report wheelhouse/*.whl
+        python meta/ci/release/check_distribution_contents.py wheelhouse/*.whl
+    - name: Certify the platform-native wheel payload
+      env:
+        PLATFORM_NAME: ${{ inputs.platform-name }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        shopt -s nullglob
+        wheels=(wheelhouse/*.whl)
+        if [[ "${#wheels[@]}" -ne 1 ]]; then
+          echo "Expected exactly one platform wheel, found ${#wheels[@]}" >&2
+          exit 2
+        fi
+        certificate="wheelhouse/platform-wheel-certificate-${PLATFORM_NAME}.json"
+        python meta/ci/native/certify_platform_wheel.py create \
+          --wheel "${wheels[0]}" \
+          --certificate "${certificate}" \
+          --platform "${PLATFORM_NAME}" \
+          --github-sha "${GITHUB_SHA}" \
+          --github-run-id "${GITHUB_RUN_ID}" \
+          --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+        cat "${certificate}"
     - name: Install the built wheel without adapters
       env:
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
@@ -300,8 +376,9 @@ runs:
       run: |
         set -euo pipefail
         python meta/ci/quality/ensure_pinned_pip.py
-        python -m pip install --only-binary=:all: wheelhouse/*.whl
+        python -m pip install --only-binary=:all: pyarrow==25.0.1 wheelhouse/*.whl
         python -c "import sys, schema_sanitizer as s, schema_sanitizer._core_abi3 as c; print(sys.version.split()[0], s.__version__, c.__file__)"
+        python -I meta/ci/release/abi_public_smoke.py
     - name: Exercise the ABI3 wheel on CPython 3.14
       if: inputs.artifact == 'linux'
       env:
@@ -311,13 +388,31 @@ runs:
         set -euo pipefail
         python -m pip install --only-binary=:all: pyarrow==25.0.1
         python -I meta/ci/release/downstream_smoke.py
+    - name: Set up the next CPython release candidate outside pull requests
+      if: inputs.artifact == 'linux' && github.event_name != 'pull_request'
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: 3.15.0-rc.1
+    - name: Probe the ABI3 wheel on CPython 3.15 RC
+      if: inputs.artifact == 'linux' && github.event_name != 'pull_request'
+      env:
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+      shell: bash
+      run: |-
+        set -euo pipefail
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m pip install --only-binary=:all: wheelhouse/*.whl
+        python -I -c \
+          "import sys, schema_sanitizer as s, schema_sanitizer._core_abi3 as c; options=s.SanitizeOptions(); print(sys.version.split()[0], s.__version__, type(options).__name__, c.__file__)"
     - name: Upload the certified platform wheel
       id: upload-certified-platform-wheel
       continue-on-error: true
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
         name: dist-wheels-${{ inputs.platform-name }}
-        path: wheelhouse/*.whl
+        path: |-
+          wheelhouse/*.whl
+          wheelhouse/platform-wheel-certificate-*.json
         if-no-files-found: error
         retention-days: 7
         compression-level: 0
@@ -327,7 +422,9 @@ runs:
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
         name: dist-wheels-${{ inputs.platform-name }}
-        path: wheelhouse/*.whl
+        path: |-
+          wheelhouse/*.whl
+          wheelhouse/platform-wheel-certificate-*.json
         if-no-files-found: error
         retention-days: 7
         compression-level: 0

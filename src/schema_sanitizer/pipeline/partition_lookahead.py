@@ -909,7 +909,8 @@ class PartitionSourceLookahead:
             name="partition lookahead shutdown deadline",
             allow_zero=True,
         )
-        assert normalized is not None
+        if normalized is None:
+            raise AssertionError("validated lookahead shutdown deadline cannot be absent")
         previous = self._close_timeout_seconds
         self._close_timeout_seconds = min(previous, normalized)
         try:

@@ -277,7 +277,8 @@ class BoundedGenerationPool:
                 self._states[slot] = _RETIRED
                 self._retired = self._retired + 1
             else:
-                assert prepared_push is not None
+                if prepared_push is None:
+                    raise AssertionError("free-slot push was not prepared")
                 tail, next_tail, next_count = prepared_push
                 self._commit_free_push(slot, tail, next_tail, next_count)
                 self._states[slot] = _FREE

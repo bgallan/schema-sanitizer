@@ -1437,7 +1437,8 @@ class RemoteIoPermitGovernor:
                 if head.bypasses >= _MAX_HEAD_BYPASSES:
                     return weight
             else:
-                assert weight is not None
+                if weight is None:
+                    raise AssertionError("eligible bypass scan must retain a weight")
                 weight = min(weight, self._effective_weight(waiter))
             examined += 1
             if examined >= _MAX_LOCAL_BYPASS_SCAN + 1:

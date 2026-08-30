@@ -565,7 +565,8 @@ class RemoteProviderSessionPool:
                         self._entries.pop(pool_key, None)
                         entry.recycle()
                     raise RuntimeError("remote provider session pool is closed")
-        assert entry.value is not None
+        if entry.value is None:
+            raise AssertionError("ready provider session entry cannot be empty")
         return _BorrowedManager(entry.value)
 
     async def _get_or_create_client(

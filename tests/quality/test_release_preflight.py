@@ -81,7 +81,7 @@ def _verified_attestation(checker: ModuleType, **overrides: object) -> object:
         "github_publisher": True,
         "repository": "bgallan/schema-sanitizer",
         "workflow": "publish.yml",
-        "environment": None,
+        "environment": "pypi",
         "predicate_type": "https://docs.pypi.org/attestations/publish/v1",
         "predicate": {},
         "claims": {
@@ -872,7 +872,7 @@ def test_pypi_attestation_boundary_invokes_crypto_verification_offline(
     publisher = FakePublisher(
         repository="bgallan/schema-sanitizer",
         workflow="publish.yml",
-        environment=None,
+        environment="pypi",
     )
     provenance = SimpleNamespace(
         attestation_bundles=[SimpleNamespace(publisher=publisher, attestations=[FakeAttestation()])]
@@ -893,6 +893,7 @@ def test_pypi_attestation_boundary_invokes_crypto_verification_offline(
     assert len(records) == 1
     assert calls[:2] == [("model-validate", provenance), ("distribution", package)]
     assert calls[2][0] == "verify"
+    assert calls[2][1].environment == "pypi"
     assert calls[2][3] is True
 
 
@@ -902,6 +903,7 @@ def test_pypi_attestation_boundary_invokes_crypto_verification_offline(
         ((), "no authenticated attestations"),
         (({"predicate_type": "https://slsa.dev/provenance/v1"},), "unexpected predicate"),
         (({"repository": "other/project"},), "unexpected GitHub publisher identity"),
+        (({"environment": None},), "unexpected GitHub publisher identity"),
         (
             (
                 {
@@ -925,7 +927,7 @@ def test_pypi_attestation_boundary_invokes_crypto_verification_offline(
             "source repository ref",
         ),
     ),
-    ids=("missing", "predicate", "publisher", "source-sha", "source-ref"),
+    ids=("missing", "predicate", "publisher", "environment", "source-sha", "source-ref"),
 )
 def test_pypi_publish_attestation_policy_rejects_missing_or_wrong_identity(
     tmp_path: Path,

@@ -1069,7 +1069,8 @@ def fragile_cpp_assertions(path: Path) -> tuple[tuple[int, str], ...]:
             continue
         left, right, end = parsed
         relation = re.search(r"_(LT|LE|GT|GE)", match.group())
-        assert relation is not None
+        if relation is None:
+            raise AssertionError("parsed C++ comparison must retain its relation")
         operator = {"LT": "<", "LE": "<=", "GT": ">", "GE": ">="}[relation.group(1)]
         record(left, operator, right, match.start(), source[match.start() : end])
     return tuple(dict.fromkeys(findings))

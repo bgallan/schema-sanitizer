@@ -108,7 +108,7 @@ def _http_retry_delay(headers: Mapping[str, str], fallback: float, now: float) -
 
 def _github_json(
     url: str,
-    token: str = "",
+    token: str | None = None,
     *,
     sleeper: Callable[[float], object] = time.sleep,
     clock: Callable[[], float] = time.time,

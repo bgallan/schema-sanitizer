@@ -140,7 +140,8 @@ def run(profile: str, suite: str) -> None:
             )
         data_file.parent.mkdir(parents=True, exist_ok=True)
     command = coverage_command(profile, suite)
-    os.execv(command[0], command)
+    # The command is a repository-owned argv tuple and never invokes a shell.
+    os.execv(command[0], command)  # nosec B606
 
 
 def main(argv: Sequence[str] | None = None) -> None:

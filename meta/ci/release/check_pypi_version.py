@@ -40,6 +40,7 @@ _INTEGRITY_TRANSIENT_HTTP_STATUSES = {403, *_TRANSIENT_HTTP_STATUSES}
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _EXPECTED_GITHUB_REPOSITORY = "bgallan/schema-sanitizer"
 _EXPECTED_GITHUB_WORKFLOW = "publish.yml"
+_EXPECTED_PUBLISH_ENVIRONMENT = "pypi"
 _EXPECTED_GITHUB_REF = "refs/heads/main"
 _SOURCE_REPOSITORY_DIGEST_OID = "1.3.6.1.4.1.57264.1.13"
 _SOURCE_REPOSITORY_REF_OID = "1.3.6.1.4.1.57264.1.14"
@@ -356,7 +357,7 @@ def _cryptographically_verified_attestations(
         expected_publisher = github_publisher_type(
             repository=_EXPECTED_GITHUB_REPOSITORY,
             workflow=_EXPECTED_GITHUB_WORKFLOW,
-            environment=None,
+            environment=_EXPECTED_PUBLISH_ENVIRONMENT,
         )
     except (TypeError, ValueError) as exc:
         raise RuntimeError(f"malformed PyPI provenance for {package.name}: {exc}") from exc
@@ -412,7 +413,7 @@ def _verify_publish_provenance(
             not attestation.github_publisher
             or attestation.repository != _EXPECTED_GITHUB_REPOSITORY
             or attestation.workflow != _EXPECTED_GITHUB_WORKFLOW
-            or attestation.environment not in {None, ""}
+            or attestation.environment != _EXPECTED_PUBLISH_ENVIRONMENT
         ):
             failures.append("unexpected GitHub publisher identity")
             continue

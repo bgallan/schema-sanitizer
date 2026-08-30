@@ -119,7 +119,8 @@ class SharedDownloadSessionCloser:
         timeout = normalize_duration(
             timeout_seconds, name="remote session close timeout", allow_zero=True
         )
-        assert timeout is not None
+        if timeout is None:
+            raise AssertionError("validated remote session close timeout cannot be absent")
         deadline = monotonic() + timeout
         with self._lock:
             if self._closed:
@@ -139,7 +140,8 @@ class SharedDownloadSessionCloser:
                     )
                 )
             future = attempt.future
-        assert future is not None
+        if future is None:
+            raise AssertionError("started remote session close must retain its future")
 
         try:
             future.result(timeout=max(0.0, deadline - monotonic()))
@@ -264,7 +266,8 @@ def enter_shared_download_session(
     timeout = normalize_duration(
         timeout_seconds, name="remote session startup timeout", allow_zero=True
     )
-    assert timeout is not None
+    if timeout is None:
+        raise AssertionError("validated remote session startup timeout cannot be absent")
     deadline = monotonic() + timeout
     try:
         if not attempt.entered.wait(timeout=max(0.0, deadline - monotonic())):

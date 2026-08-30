@@ -448,7 +448,8 @@ class _ProcessControlPlaneBudget:
         self.prewarm_native_shadow()
         ticket = ControlPlaneTicket(amount, kind, os.getpid())
         capability = ticket.capability
-        assert isinstance(capability, _ControlPlaneCapability)
+        if not isinstance(capability, _ControlPlaneCapability):
+            raise AssertionError("control-plane ticket must carry its private capability")
         with _GOVERNED_MEMORY_ADMISSION_LOCK:
             with self._lock:
                 self._ensure_process_locked()

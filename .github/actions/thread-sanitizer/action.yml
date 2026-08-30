@@ -29,7 +29,8 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        rm -rf -- .work/build/tsan .work/bin/python-tsan
+        rm -rf -- .work/build/tsan .work/bin/python-tsan .work/sanitizer-evidence
+        mkdir -p .work/sanitizer-evidence
         cmake -S . -B .work/build/tsan -G Ninja \
           -DCMAKE_BUILD_TYPE=RelWithDebInfo \
           -DCMAKE_C_COMPILER=gcc-14 \
@@ -50,9 +51,22 @@ runs:
         export CMAKE_BUILD_PARALLEL_LEVEL
         cmake --build .work/build/tsan
     - name: Run TSan fuzz regressions and mutation campaigns
+      env:
+        ASAN_OPTIONS: ''
+        LSAN_OPTIONS: ''
+        TSAN_OPTIONS: halt_on_error=1:history_size=7:second_deadlock_stack=1
+        UBSAN_OPTIONS: ''
       shell: bash
       run: >-
-        meta/ci/fuzz/run_fuzz_regressions.sh
+        python meta/ci/sanitizers/run_with_watchdog.py
+        --certificate .work/sanitizer-evidence/watchdog-tsan-thread-Linux-X64-fuzz.json
+        --environment "ASAN_OPTIONS=${ASAN_OPTIONS}"
+        --environment "LSAN_OPTIONS=${LSAN_OPTIONS}"
+        --environment "TSAN_OPTIONS=${TSAN_OPTIONS}"
+        --environment "UBSAN_OPTIONS=${UBSAN_OPTIONS}"
+        --label Linux-X64-tsan-thread-fuzz
+        --timeout 900
+        -- bash meta/ci/fuzz/run_fuzz_regressions.sh
         --build-root .work/build/tsan/fuzz
         --campaign-runs 1000
         --seed 15172026
@@ -71,14 +85,63 @@ runs:
           -o .work/bin/python-tsan \
           "${python_embed_ldflags[@]}"
     - name: Require capacity for complete TSan concurrency coverage
+      env:
+        ASAN_OPTIONS: ''
+        LSAN_OPTIONS: ''
+        TSAN_OPTIONS: halt_on_error=1:history_size=7:second_deadlock_stack=1
+        UBSAN_OPTIONS: ''
       shell: bash
       run: |-
         set -euo pipefail
         .work/build/tsan/schema_sanitizer_sanitized_ordered_executor \
           --require-cpu-capacity 3
     - name: Run the executor and all full-extension TSan domains
+      env:
+        ASAN_OPTIONS: ''
+        LSAN_OPTIONS: ''
+        TSAN_OPTIONS: halt_on_error=1:history_size=7:second_deadlock_stack=1
+        UBSAN_OPTIONS: ''
       shell: bash
       run: >-
         meta/ci/sanitizers/run_tsan_extension_suite.sh
         .work/build/tsan .work/bin/python-tsan 2
-        "$(python -c 'import site; print(site.getsitepackages()[0])')"
+    - name: Certify the completed ThreadSanitizer workload
+      env:
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        RUNNER_SYSTEM: ${{ runner.os }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        certificate=".work/sanitizer-evidence/sanitizer-run-${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-tsan.json"
+        python meta/ci/sanitizers/certify_sanitizer_run.py create \
+          --certificate "${certificate}" \
+          --evidence-directory .work/sanitizer-evidence \
+          --sanitizer tsan \
+          --mode thread \
+          --runner-os "${RUNNER_SYSTEM}" \
+          --runner-arch "${RUNNER_ARCHITECTURE}" \
+          --github-sha "${GITHUB_SHA}" \
+          --github-run-id "${GITHUB_RUN_ID}" \
+          --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+        cat "${certificate}"
+    - name: Upload ThreadSanitizer evidence
+      id: upload-thread-sanitizer-evidence
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-tsan
+        path: .work/sanitizer-evidence/*.json
+        if-no-files-found: error
+        retention-days: 7
+        compression-level: 0
+        overwrite: true
+    - name: Retry ThreadSanitizer evidence upload
+      if: ${{ always() && steps.upload-thread-sanitizer-evidence.outcome == 'failure' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-tsan
+        path: .work/sanitizer-evidence/*.json
+        if-no-files-found: error
+        retention-days: 7
+        compression-level: 0
+        overwrite: true

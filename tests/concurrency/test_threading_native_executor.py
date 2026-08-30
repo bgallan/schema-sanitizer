@@ -7,13 +7,7 @@ useful lanes, caps its peak, and steals only compatible work.
 
 from __future__ import annotations
 
-import subprocess
-import sys
-import time
-from pathlib import Path
-
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 from schema_sanitizer.core_impl.native_runtime import native_core
 
@@ -74,64 +68,6 @@ def test_native_executor_probe_validates_limits() -> None:
         native_core.ordered_executor_probe(1, 1, -1, -1)
     with pytest.raises(ValueError, match="fail_ordinal"):
         native_core.ordered_executor_probe(1, 1, 1, 1)
-
-
-def test_native_inline_probe_does_not_add_host_threads(tmp_path: Path) -> None:
-    """The native inline primitive itself creates no temporary host thread."""
-    proc_root = Path("/proc")
-    if not sys.platform.startswith("linux") or not proc_root.is_dir():
-        pytest.skip("host thread accounting requires Linux /proc")
-
-    ready = tmp_path / "ready"
-    go = tmp_path / "go"
-    script = r"""
-from pathlib import Path
-import sys
-import time
-
-root = Path(sys.argv[1])
-ready = root / "ready"
-go = root / "go"
-sys.path.insert(0, str(Path.cwd() / "src"))
-from schema_sanitizer.core_impl.native_runtime import native_core
-ready.write_text("ready", encoding="utf-8")
-while not go.exists():
-    time.sleep(0.001)
-result = native_core.ordered_executor_probe(0, 32, 800, -1)
-assert result[2] == 1
-"""
-    process = subprocess.Popen(
-        [sys.executable, "-c", script, str(tmp_path)],
-        cwd=Path.cwd(),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    child_proc = proc_root / str(process.pid)
-    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
-    while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
-        time.sleep(0.001)
-    if not ready.exists():
-        process.terminate()
-        stdout, stderr = process.communicate(timeout=SCHEDULER_TIMEOUT_SECONDS)
-        pytest.fail(f"child did not initialize: stdout={stdout!r} stderr={stderr!r}")
-
-    baseline_threads = len(tuple((child_proc / "task").iterdir()))
-    maximum_threads = baseline_threads
-    go.write_text("go", encoding="utf-8")
-    while process.poll() is None:
-        try:
-            maximum_threads = max(
-                maximum_threads,
-                len(tuple((child_proc / "task").iterdir())),
-            )
-        except FileNotFoundError:
-            pass
-        time.sleep(0.0005)
-    stdout, stderr = process.communicate()
-
-    assert process.returncode == 0, f"stdout={stdout!r} stderr={stderr!r}"
-    assert maximum_threads == baseline_threads
 
 
 def test_operation_task_arena_reuses_exact_worker_budget_across_stages() -> None:

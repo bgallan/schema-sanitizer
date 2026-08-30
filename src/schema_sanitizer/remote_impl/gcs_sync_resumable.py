@@ -230,8 +230,9 @@ def upload_gcs_resumable_file(
                 headers=auth_headers,
                 timeout=budget.async_timeout_seconds,
             )
-        except Exception:
-            pass
+        # Cancellation cleanup cannot mask the upload failure.
+        except Exception as ignored_error:
+            del ignored_error
         raise
     final_stat = source.stat()
     if (final_stat.st_size, final_stat.st_mtime_ns) != (

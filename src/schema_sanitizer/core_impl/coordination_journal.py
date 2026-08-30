@@ -85,7 +85,8 @@ def coordination_file_lock(
         name="coordination lock timeout",
         allow_zero=True,
     )
-    assert timeout is not None
+    if timeout is None:
+        raise AssertionError("validated coordination timeout cannot be absent")
     deadline = monotonic() + timeout
     descriptor = handle.fileno()
     while True:

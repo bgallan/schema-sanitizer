@@ -48,12 +48,14 @@ def parquet_resource_diagnostics(info: dict[str, Any]) -> dict[str, Any]:
                 continue
             try:
                 compressed += max(0, int(column.get("total_compressed_size") or 0))
-            except Exception:
-                pass
+            # Malformed advisory footer counters are intentionally ignored.
+            except Exception as ignored_error:
+                del ignored_error
             try:
                 decompressed += max(0, int(column.get("total_uncompressed_size") or 0))
-            except Exception:
-                pass
+            # Malformed advisory footer counters are intentionally ignored.
+            except Exception as ignored_error:
+                del ignored_error
     return {
         "compressed_bytes": compressed,
         "decompressed_bytes": decompressed,

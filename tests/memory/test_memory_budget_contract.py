@@ -1,7 +1,7 @@
 """Defines the public and native contract for one bounded, monotonic per-operation memory
 control, including the default policy, multi-worker headroom, streamed output, and
 invalid limits. It also checks documentation and environment access so unbudgeted result
-ownership is disclosed and resource hardening remains the only configuration exception."""
+ownership is disclosed and every runtime or CI configuration boundary remains reviewed."""
 
 from __future__ import annotations
 
@@ -176,8 +176,8 @@ def test_invalid_memory_limits_fail_before_native_execution() -> None:
             normalize_memory_limit(value)
 
 
-def test_repository_environment_access_is_limited_to_resource_hardening() -> None:
-    """Only documented resource owners and the release preflight inspect the environment."""
+def test_repository_environment_access_is_strictly_reviewed() -> None:
+    """Only reviewed resource, test-integrity, and CI helpers inspect the environment."""
     root = Path(__file__).resolve().parents[2]
     ignored = {".git", ".work", ".venv", "__pycache__", ".pytest_cache"}
     offenders: list[str] = []
@@ -215,8 +215,10 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
         ".github/actions/quality-validation/action.yml",
         ".github/actions/restore-pip-cache/action.yml",
         "cpp/src/internal/runtime/operation_task_arena.cc",
+        "meta/ci/release/abi_public_smoke.py",
         "meta/ci/release/check_distribution_contents.py",
         "meta/ci/release/check_github_release_state.py",
+        "meta/ci/sanitizers/run_with_watchdog.py",
         "src/schema_sanitizer/core_impl/allocator_control.py",
         "src/schema_sanitizer/core_impl/cross_process_memory.py",
         "src/schema_sanitizer/core_impl/cross_process_storage.py",
@@ -224,6 +226,8 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
         "src/schema_sanitizer/core_impl/path_identity.py",
         "src/schema_sanitizer/core_impl/safety_margins.py",
         "src/schema_sanitizer/core_impl/temporary_janitor.py",
+        "tests/_support/ci_integrity.py",
+        "tests/conftest.py",
         "tests/concurrency/test_concurrency_cross_process_telemetry_tuning.py",
         "tests/concurrency/test_concurrency_cancellation_and_resource_lifecycle.py",
         "tests/examples/test_example_entrypoints.py",
@@ -235,6 +239,7 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
         "tests/memory/test_memory_reserved_finalizer_processed_owner_cannot_stick_claimed_on_recycle_failure.py",
         "tests/memory/test_memory_resident_zero_is_authoritative_on_public_acquire.py",
         "tests/memory/test_memory_process_resource_governor_repairs_from_exact_leases_and_quarantines.py",
+        "tests/quality/test_ci_helper_layout.py",
         "tests/quality/test_ci_workflow_topology.py",
         "tests/quality/test_distribution_archive_cleanliness.py",
         "cpp/tests/ordered_executor_tsan.cc",

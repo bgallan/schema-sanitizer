@@ -2080,7 +2080,8 @@ def _cgroup_pid_headroom() -> int | None:
         return 0
     if headroom.state is CgroupValueState.UNBOUNDED:
         return None
-    assert maximum.value is not None and headroom.value is not None
+    if maximum.value is None or headroom.value is None:
+        raise AssertionError("bounded cgroup PID samples must carry values")
     reserve = max(8, min(32, maximum.value // 16))
     return max(0, headroom.value - reserve)
 
@@ -3561,7 +3562,8 @@ def _refresh_external_runtime_residency_stable(
         attempts += 1
         with _EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION:
             entry = _external_runtime_entry_locked(runtime, create=True, runtime_key=runtime_key)
-            assert entry is not None
+            if entry is None:
+                raise AssertionError("created external-runtime entry cannot be absent")
             while entry.config_inflight:
                 if entry.config_owner_thread_id == owner_thread:
                     raise SchemaSanitizerResourceError(
@@ -3578,7 +3580,8 @@ def _refresh_external_runtime_residency_stable(
                     entry = _external_runtime_entry_locked(
                         runtime, create=True, runtime_key=runtime_key
                     )
-                    assert entry is not None
+                    if entry is None:
+                        raise AssertionError("recreated external-runtime entry cannot be absent")
             generation = entry.config_generation
 
         reported_resident = _reported_external_runtime_resident_width(runtime)
@@ -3592,7 +3595,8 @@ def _refresh_external_runtime_residency_stable(
                 entry = _external_runtime_entry_locked(
                     runtime, create=True, runtime_key=runtime_key
                 )
-                assert entry is not None
+                if entry is None:
+                    raise AssertionError("recreated external-runtime entry cannot be absent")
             if entry.config_inflight or entry.config_generation != generation:
                 check_operation_cancelled(stage="external_runtime_threads")
                 continue
@@ -3726,7 +3730,8 @@ def _acquire_shared_external_native_thread_permits(
     with _EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION:
         runtime_id = runtime_key
         entry = _external_runtime_entry_locked(runtime, create=True, runtime_key=runtime_key)
-        assert entry is not None
+        if entry is None:
+            raise AssertionError("created external-runtime entry cannot be absent")
         while entry.config_inflight:
             if entry.config_owner_thread_id == threading.get_ident():
                 raise SchemaSanitizerResourceError(
@@ -3743,7 +3748,8 @@ def _acquire_shared_external_native_thread_permits(
                 entry = _external_runtime_entry_locked(
                     runtime, create=True, runtime_key=runtime_key
                 )
-                assert entry is not None
+                if entry is None:
+                    raise AssertionError("recreated external-runtime entry cannot be absent")
         # Residency was already committed against a stable config generation.
         # The entry may have been retired if the observation was zero and idle;
         # the claim path above recreates it as needed.
@@ -4136,7 +4142,8 @@ def _acquire_shared_external_logical_thread_lease(
 
     with _EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION:
         entry = _external_runtime_entry_locked(runtime, create=True, runtime_key=runtime_key)
-        assert entry is not None
+        if entry is None:
+            raise AssertionError("created external-runtime entry cannot be absent")
         while entry.logical_acquire_inflight or entry.config_inflight:
             if entry.config_inflight and entry.config_owner_thread_id == threading.get_ident():
                 raise SchemaSanitizerResourceError(
@@ -4153,7 +4160,8 @@ def _acquire_shared_external_logical_thread_lease(
                 entry = _external_runtime_entry_locked(
                     runtime, create=True, runtime_key=runtime_key
                 )
-                assert entry is not None
+                if entry is None:
+                    raise AssertionError("recreated external-runtime entry cannot be absent")
 
         try:
             total_claims = _external_runtime_total_claims_locked()
@@ -5040,7 +5048,8 @@ def constrain_external_runtime_worker_pool(runtime: Any, workers: int) -> int:
     can_reexpand = False
     with _EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION:
         entry = _external_runtime_entry_locked(runtime, create=True, runtime_key=runtime_key)
-        assert entry is not None
+        if entry is None:
+            raise AssertionError("created external-runtime entry cannot be absent")
         while entry.config_inflight:
             if entry.config_owner_thread_id == owner_thread:
                 raise SchemaSanitizerResourceError(
@@ -5059,7 +5068,8 @@ def constrain_external_runtime_worker_pool(runtime: Any, workers: int) -> int:
                 entry = _external_runtime_entry_locked(
                     runtime, create=True, runtime_key=runtime_key
                 )
-                assert entry is not None
+                if entry is None:
+                    raise AssertionError("recreated external-runtime entry cannot be absent")
         # Config generations are fixed-width authority. Never permit unbounded
         # Python-int growth or wrap/ABA semantics in the control plane.
         if entry.config_generation >= _MAX_EXTERNAL_RUNTIME_CONFIG_GENERATION:
@@ -5433,7 +5443,8 @@ class FileDescriptorCapability:
                 raise RuntimeError("file descriptor capability open committed without reservation")
             self._ensure_active_locked()
             lease = self._lease
-            assert lease is not None
+            if lease is None:
+                raise AssertionError("active file-descriptor capability must retain its lease")
             before = _opened_for_file_descriptor_lease(lease)
             attempt.native_before = before
             try:
@@ -5594,7 +5605,8 @@ class FileDescriptorCapability:
                         self._mark_closed()
             raise
         else:
-            assert iterator is not None
+            if iterator is None:
+                raise AssertionError("successful iterator construction cannot return None")
             try:
                 iterator.close()
             except BaseException:
@@ -5639,7 +5651,10 @@ class FileDescriptorCapability:
                         self._mark_closed()
             raise
         else:
-            assert iterator is not None
+            if iterator is None:
+                raise AssertionError(
+                    "successful directory iterator construction cannot return None"
+                )
             try:
                 iterator.close()
             except BaseException:

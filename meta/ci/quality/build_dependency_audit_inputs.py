@@ -61,6 +61,35 @@ def _lock_requirements(path: Path) -> tuple[str, ...]:
     )
 
 
+def _exact_pin(path: Path, line: str) -> tuple[str, Version]:
+    """Return one canonical package and version from an exact owner-lock entry."""
+    requirement = Requirement(line)
+    specifiers = tuple(requirement.specifier)
+    if (
+        requirement.url is not None
+        or requirement.extras
+        or len(specifiers) != 1
+        or specifiers[0].operator != "=="
+        or "*" in specifiers[0].version
+    ):
+        raise ValueError(f"owner lock entry must be one exact pin: {path}: {line}")
+    return canonicalize_name(requirement.name), Version(specifiers[0].version)
+
+
+def _audit_requirements(path: Path) -> tuple[str, ...]:
+    """Strip host markers while preserving every exact version for auditing."""
+    pins: dict[str, Version] = {}
+    for line in _lock_requirements(path):
+        name, version = _exact_pin(path, line)
+        previous = pins.setdefault(name, version)
+        if previous != version:
+            raise ValueError(
+                f"owner lock contains conflicting versions for {name}: "
+                f"{path}: {previous} and {version}"
+            )
+    return tuple(f"{name}=={version}" for name, version in sorted(pins.items()))
+
+
 def _declared_requirements(pyproject_path: Path, ci_tools: Sequence[str]) -> tuple[str, ...]:
     """Return every project, build, and executed-tool dependency declaration."""
     pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
@@ -88,19 +117,8 @@ def validate_owner_lock_coverage(
     locked_versions: dict[str, set[Version]] = {}
     for path in sorted(requirements_dir.glob("*.txt")):
         for line in _lock_requirements(path):
-            requirement = Requirement(line)
-            specifiers = tuple(requirement.specifier)
-            if (
-                requirement.url is not None
-                or requirement.extras
-                or len(specifiers) != 1
-                or specifiers[0].operator != "=="
-                or "*" in specifiers[0].version
-            ):
-                raise ValueError(f"owner lock entry must be one exact pin: {path}: {line}")
-            locked_versions.setdefault(canonicalize_name(requirement.name), set()).add(
-                Version(specifiers[0].version)
-            )
+            name, version = _exact_pin(path, line)
+            locked_versions.setdefault(name, set()).add(version)
 
     uncovered: list[str] = []
     for declaration in _declared_requirements(pyproject_path, ci_tools):
@@ -130,7 +148,7 @@ def build_audit_inputs(
 
     validate_owner_lock_coverage(pyproject_path, requirements_dir, ci_tools)
     documents = {
-        f"locked-{path.stem}.txt": _lock_requirements(path)
+        f"locked-{path.stem}.txt": _audit_requirements(path)
         for path in sorted(requirements_dir.glob("*.txt"))
     }
 

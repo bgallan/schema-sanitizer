@@ -54,8 +54,9 @@ def _close_keepalive_attr(owner: Any) -> None:
     if _close_suppressing_errors(keepalive):
         try:
             delattr(owner, "_keepalive")
-        except Exception:
-            pass
+        # Missing optional keepalive metadata is harmless.
+        except Exception as ignored_error:
+            del ignored_error
 
 
 def _close_and_clear_attrs(owner: Any, *attrs: str) -> None:
@@ -66,8 +67,9 @@ def _close_and_clear_attrs(owner: Any, *attrs: str) -> None:
         if obj is None:
             try:
                 object.__setattr__(owner, attr, None)
-            except Exception:
-                pass
+            # Cleanup tolerates immutable foreign wrappers.
+            except Exception as ignored_error:
+                del ignored_error
             continue
         ident = id(obj)
         succeeded = results.get(ident)
@@ -77,8 +79,9 @@ def _close_and_clear_attrs(owner: Any, *attrs: str) -> None:
         if succeeded:
             try:
                 object.__setattr__(owner, attr, None)
-            except Exception:
-                pass
+            # Cleanup tolerates immutable foreign wrappers.
+            except Exception as ignored_error:
+                del ignored_error
 
 
 def _close_resource_owner_attr(owner: Any) -> None:
@@ -89,8 +92,9 @@ def _close_resource_owner_attr(owner: Any) -> None:
     if _close_suppressing_errors(resource_owner):
         try:
             delattr(owner, "_resource_owner")
-        except Exception:
-            pass
+        # Missing optional owner metadata is harmless.
+        except Exception as ignored_error:
+            del ignored_error
 
 
 def _close_sequence_retryably(items: list[Any]) -> None:

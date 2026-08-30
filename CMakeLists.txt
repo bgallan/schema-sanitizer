@@ -192,8 +192,15 @@ if(SCHEMA_SANITIZER_ZLIB_PROVIDER_RESOLVED MATCHES "^bundled-" AND TARGET
 endif()
 
 # ---- Python discovery -------------------------------------------------------
-# Python is required to build the ABI3 extension module.
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development.SABIModule)
+# Python is required to build the ABI3 extension module. ASan builds also own a
+# sanitizer-first launcher, so their interpreter and embed library must be
+# resolved together rather than accidentally mixing Python installations.
+if(SCHEMA_SANITIZER_SANITIZER MATCHES "^asan")
+  find_package(Python3 REQUIRED COMPONENTS Interpreter Development.SABIModule
+                                           Development.Embed)
+else()
+  find_package(Python3 REQUIRED COMPONENTS Interpreter Development.SABIModule)
+endif()
 
 add_custom_target(
   schema_sanitizer_check_cpp_documentation
@@ -219,6 +226,24 @@ python3_add_library(${_schema_sanitizer_pymod_target} MODULE USE_SABI 3.11
 set_target_properties(
   ${_schema_sanitizer_pymod_target} PROPERTIES CXX_VISIBILITY_PRESET hidden
                                                VISIBILITY_INLINES_HIDDEN YES)
+
+# Sanitizer smokes load the just-built module directly from the certified build
+# root. Multi-config generators otherwise hide it below a configuration
+# subdirectory on Windows, making the loader depend on generator-specific paths.
+if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
+  set_target_properties(
+    ${_schema_sanitizer_pymod_target}
+    PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+               RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  foreach(_schema_sanitizer_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(
+      ${_schema_sanitizer_pymod_target}
+      PROPERTIES "LIBRARY_OUTPUT_DIRECTORY_${_schema_sanitizer_config}"
+                 "${CMAKE_BINARY_DIR}"
+                 "RUNTIME_OUTPUT_DIRECTORY_${_schema_sanitizer_config}"
+                 "${CMAKE_BINARY_DIR}")
+  endforeach()
+endif()
 
 add_library(sanitize_core STATIC)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/SchemaSanitizerSources.cmake")
@@ -275,7 +300,14 @@ if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
     schema_sanitizer_sanitized_ordered_executor
     PROPERTIES CXX_EXTENSIONS OFF
                CXX_SCAN_FOR_MODULES OFF
-               INTERPROCEDURAL_OPTIMIZATION OFF)
+               INTERPROCEDURAL_OPTIMIZATION OFF
+               RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  foreach(_schema_sanitizer_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(
+      schema_sanitizer_sanitized_ordered_executor
+      PROPERTIES "RUNTIME_OUTPUT_DIRECTORY_${_schema_sanitizer_config}"
+                 "${CMAKE_BINARY_DIR}")
+  endforeach()
   target_include_directories(schema_sanitizer_sanitized_ordered_executor
                              PRIVATE cpp/src)
   target_link_libraries(schema_sanitizer_sanitized_ordered_executor
@@ -286,11 +318,10 @@ if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
   schema_sanitizer_enable_repro(schema_sanitizer_sanitized_ordered_executor)
   schema_sanitizer_add_sanitizer(schema_sanitizer_sanitized_ordered_executor)
   set(_schema_sanitizer_sanitized_executor_rounds 100)
-  # Keep compiling the probe with MSVC ASan, but do not register it for
-  # execution there. The Windows ASan runtime can stall indefinitely while
-  # starting or tearing down this deeply threaded process, outside the probe's
-  # own watchdog. Windows still executes every ASan fuzzer; this repeated
-  # concurrency gate runs under macOS ASan/UBSan and Linux TSan.
+  # Keep compiling the probe with MSVC ASan, but do not register its deeply
+  # threaded repeated case with CTest. CI invokes one bounded Windows case
+  # through the external process-tree watchdog; the repeated concurrency gate
+  # remains a macOS ASan/UBSan and Linux TSan contract.
   if(NOT (MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan"))
     add_test(NAME schema_sanitizer_sanitized_ordered_executor
              COMMAND schema_sanitizer_sanitized_ordered_executor --rounds
@@ -301,6 +332,35 @@ if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
              COMMAND schema_sanitizer_sanitized_ordered_executor --rounds
                      ${_schema_sanitizer_sanitized_executor_rounds})
   endif()
+endif()
+
+# ASan must initialize before CPython loads an instrumented extension. Build a
+# sanitizer-first interpreter launcher on every ASan platform so CI exercises
+# the complete ABI module instead of limiting non-Linux coverage to standalone
+# parser executables.
+if(SCHEMA_SANITIZER_SANITIZER MATCHES "^asan")
+  add_executable(schema_sanitizer_sanitizer_python_launcher
+                 meta/ci/sanitizers/asan_python_launcher.cc)
+  target_compile_features(schema_sanitizer_sanitizer_python_launcher
+                          PRIVATE cxx_std_17)
+  set_target_properties(
+    schema_sanitizer_sanitizer_python_launcher
+    PROPERTIES CXX_EXTENSIONS OFF
+               CXX_SCAN_FOR_MODULES OFF
+               INTERPROCEDURAL_OPTIMIZATION OFF
+               RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  foreach(_schema_sanitizer_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(
+      schema_sanitizer_sanitizer_python_launcher
+      PROPERTIES "RUNTIME_OUTPUT_DIRECTORY_${_schema_sanitizer_config}"
+                 "${CMAKE_BINARY_DIR}")
+  endforeach()
+  target_link_libraries(schema_sanitizer_sanitizer_python_launcher
+                        PRIVATE Python3::Python)
+  schema_sanitizer_enable_warnings(schema_sanitizer_sanitizer_python_launcher)
+  schema_sanitizer_enable_repro(schema_sanitizer_sanitizer_python_launcher)
+  schema_sanitizer_add_sanitizer(schema_sanitizer_sanitizer_python_launcher)
+  schema_sanitizer_stage_msvc_asan_runtime("${CMAKE_BINARY_DIR}")
 endif()
 
 if(SCHEMA_SANITIZER_ZLIB_TARGET)

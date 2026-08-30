@@ -68,7 +68,9 @@ runs:
         cmp -- "${first[0]}" "${second[0]}"
         cp -- "${first[0]}" dist/
         python -m twine check dist/*.tar.gz
-        python meta/ci/release/check_distribution_contents.py dist/*.tar.gz
+        git ls-files -z > .work/sdist-source-manifest
+        python meta/ci/release/check_distribution_contents.py \
+          --source-manifest .work/sdist-source-manifest dist/*.tar.gz
     - name: Rebuild and test as an isolated downstream consumer
       shell: bash
       run: |
@@ -77,7 +79,8 @@ runs:
         env \
           PIP_BUILD_CONSTRAINT="${GITHUB_WORKSPACE}/meta/ci/requirements/build-tools.txt" \
           PIP_CONSTRAINT="${GITHUB_WORKSPACE}/meta/ci/requirements/build-tools.txt" \
-          python -m pip wheel --no-deps --wheel-dir downstream-wheel dist/*.tar.gz
+          python -m pip wheel --no-cache-dir --no-deps \
+            --wheel-dir downstream-wheel dist/*.tar.gz
         shopt -s nullglob
         wheels=(downstream-wheel/*.whl)
         if (( ${#wheels[@]} != 1 )); then

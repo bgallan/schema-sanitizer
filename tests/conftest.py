@@ -6,6 +6,8 @@ while the compact readers exercise supported inputs through the current analytic
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
 from functools import lru_cache, partial
 
 import pytest
@@ -13,6 +15,14 @@ import pytest
 pytest_plugins = ("_support.native_stub",)
 
 _FIXED_OPERATION_TIME_NS = 1_700_000_000_123_456_000
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register strict installed-wheel checks only for declared CI shards."""
+    from _support.ci_integrity import StrictPlatformIntegrity, strict_platform_tests_enabled
+
+    if strict_platform_tests_enabled():
+        config.pluginmanager.register(StrictPlatformIntegrity(), "strict-platform-integrity")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -55,8 +65,51 @@ def native_available() -> bool:
 
         ExecutionContext().memory_stats()
         return True
-    except Exception:
+    except Exception as exc:
+        if os.environ.get("SCHEMA_SANITIZER_STRICT_TEST_RUNTIME") == "1":
+            raise RuntimeError("strict CI requires a working native schema-sanitizer core") from exc
         return False
+
+
+@pytest.fixture
+def isolated_external_runtime_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Give fault-injection tests a private external-runtime ownership registry."""
+    from schema_sanitizer.core_impl import process_resources as resources
+
+    resources.drain_finalizer_cleanup()
+    with resources._EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
+        original_entries = tuple(resources._EXTERNAL_RUNTIME_POOL_COORDINATOR.values())
+        if any(
+            entry.physical_claims
+            or entry.logical_claims
+            or entry.physical_amount
+            or entry.logical_width
+            or entry.config_inflight
+            for entry in original_entries
+        ):
+            raise RuntimeError("cannot isolate an external-runtime coordinator with live claims")
+    isolated = resources._ExternalRuntimeCoordinator()
+    monkeypatch.setattr(resources, "_EXTERNAL_RUNTIME_POOL_COORDINATOR", isolated)
+    monkeypatch.setattr(resources, "_EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS", 0)
+    monkeypatch.setattr(resources, "_EXTERNAL_RUNTIME_TOTAL_LOGICAL_CLAIMS", 0)
+    try:
+        yield
+    finally:
+        resources.drain_finalizer_cleanup()
+        with resources._EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
+            live = tuple(isolated.values())
+            if any(
+                entry.physical_claims
+                or entry.logical_claims
+                or entry.physical_amount
+                or entry.logical_width
+                or entry.config_inflight
+                for entry in live
+            ):
+                raise RuntimeError("isolated external-runtime coordinator leaked live claims")
+            isolated.clear()
 
 
 @pytest.fixture

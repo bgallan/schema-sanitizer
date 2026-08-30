@@ -1039,7 +1039,8 @@ class TemporaryStoragePermitPool:
 
         if not entry.process_released:
             try:
-                assert process_capability is not None
+                if process_capability is None:
+                    raise AssertionError("unreleased process storage capability cannot be absent")
                 released = _PROCESS_TEMPORARY_STORAGE.release_capability(process_capability)
                 if not released and process_capability.active:
                     raise RuntimeError(

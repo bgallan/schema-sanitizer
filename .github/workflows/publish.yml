@@ -160,6 +160,7 @@ jobs:
     if: ${{ needs.reconcile.outputs.publish_required == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    environment: pypi
     permissions:
       id-token: write
     steps:

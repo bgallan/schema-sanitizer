@@ -12,6 +12,14 @@ domain_launch_timeout_seconds=5
 domain_shutdown_grace_seconds=5
 domain_kill_timeout_seconds=5
 
+# Override every sanitizer option at the execution boundary. Empty values are
+# deliberate: unrelated runner-level sanitizer settings must never leak in.
+readonly ASAN_OPTIONS=''
+readonly LSAN_OPTIONS=''
+readonly TSAN_OPTIONS='halt_on_error=1:history_size=7:second_deadlock_stack=1'
+readonly UBSAN_OPTIONS=''
+export ASAN_OPTIONS LSAN_OPTIONS TSAN_OPTIONS UBSAN_OPTIONS
+
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "The full-extension ThreadSanitizer gate is supported only on Linux." >&2
   exit 2
@@ -28,7 +36,10 @@ if ! [[ "${rounds}" =~ ^[1-9][0-9]*$ ]]; then
   echo "TSan rounds must be a positive integer." >&2
   exit 2
 fi
-if [[ -z "${site_packages}" || ! -d "${site_packages}" ]]; then
+if [[ -z "${site_packages}" ]]; then
+  site_packages="$(python -c 'import site; print(site.getsitepackages()[0])')"
+fi
+if [[ ! -d "${site_packages}" ]]; then
   echo "Python site-packages directory is required: ${site_packages:-<empty>}" >&2
   exit 2
 fi
@@ -56,7 +67,8 @@ print(f"TSan extension: {loaded}")
 
 if [[ -z "${test_target}" || "${test_target}" == "--verify-only" ]]; then
   ctest --test-dir "${build_dir}" \
-    -R schema_sanitizer_tsan_ordered_executor --output-on-failure
+    -R schema_sanitizer_tsan_ordered_executor --output-on-failure \
+    --timeout "${domain_timeout_seconds}"
 fi
 if [[ "${test_target}" == "--verify-only" ]]; then
   exit 0

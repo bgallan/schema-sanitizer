@@ -9,7 +9,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-_UNKNOWN_START_TOKEN = "unknown"
+# This is a public process-identity sentinel, never authentication material.
+_UNKNOWN_START_TOKEN = "unknown"  # nosec B105
 _BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 
 

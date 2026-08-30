@@ -6,7 +6,6 @@ single mode must not create any host worker thread.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -124,9 +123,10 @@ def test_native_parquet_multi_matches_single_for_nested_columns(tmp_path: Path) 
     _assert_logically_equal(single, multi)
 
 
-@pytest.mark.skipif(not Path("/proc/self/task").is_dir(), reason="Linux /proc required")
-def test_native_parquet_single_does_not_create_host_threads(tmp_path: Path) -> None:
-    """The Parquet single path must not construct a native worker pool."""
+def test_native_parquet_single_leaves_native_thread_ledger_empty(tmp_path: Path) -> None:
+    """The Parquet single path leaves no native arena or worker ownership."""
+    from schema_sanitizer.core_impl.runtime_diagnostics import _native_arena_snapshot
+
     pa = pytest.importorskip("pyarrow")
     rows = 16_000
     table = pa.table(
@@ -138,8 +138,6 @@ def test_native_parquet_single_does_not_create_host_threads(tmp_path: Path) -> N
             for column in range(12)
         }
     )
-    baseline = len(os.listdir("/proc/self/task"))
-
     _write_native(
         table,
         tmp_path / "single-thread-reference.parquet",
@@ -147,4 +145,7 @@ def test_native_parquet_single_does_not_create_host_threads(tmp_path: Path) -> N
         compression="snappy",
     )
 
-    assert len(os.listdir("/proc/self/task")) == baseline
+    snapshot = _native_arena_snapshot()
+    assert snapshot["live_arenas"] == 0
+    assert snapshot["detached_workers"] == 0
+    assert snapshot["native_physical_threads"] == 0

@@ -956,7 +956,8 @@ def shutdown_concurrency_runtime(*, deadline_seconds: float = 5.0) -> Concurrenc
             _SHUTDOWN_CONDITION.notify_all()
     if error is not None:
         _raise_shared_shutdown_error(error)
-    assert result is not None
+    if result is None:
+        raise AssertionError("successful runtime shutdown must return a result")
     return result
 
 

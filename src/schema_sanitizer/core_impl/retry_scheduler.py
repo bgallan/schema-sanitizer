@@ -1725,7 +1725,8 @@ class _RetryScheduler:
         jitter_value = normalize_duration(
             jitter_fraction, name="retry jitter_fraction", allow_zero=True
         )
-        assert delay_value is not None and jitter_value is not None
+        if delay_value is None or jitter_value is None:
+            raise AssertionError("validated retry delay and jitter cannot be absent")
         delay = delay_value
         jitter = jitter_value
         if jitter > 1:

@@ -19,10 +19,6 @@ from _support.synchronization import (
     join_thread_or_fail,
 )
 
-pytestmark = pytest.mark.skipif(
-    os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
-)
-
 
 def test_external_admission_closes_before_internal_teardown_reserve() -> None:
     """Verify external admission closes before internal teardown reserve."""
@@ -245,6 +241,7 @@ def test_registry_retains_strong_control_block_until_quiescence() -> None:
     assert reference() is None
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX quarantine root descriptor required")
 def test_quarantine_rejects_replaced_root_without_targeting_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

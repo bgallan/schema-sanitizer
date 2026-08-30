@@ -305,10 +305,22 @@ def _no_isolation_constraint_violations(definitions: dict[str, str]) -> tuple[st
 
 
 def _with_value(step: str, key: str) -> str:
-    """Read a scalar from an action step's ``with`` mapping."""
-    match = re.search(rf"^\s+{re.escape(key)}:\s*([^#\n]+)", step, re.MULTILINE)
+    """Read a possibly line-folded scalar from an action step's ``with`` mapping."""
+    match = re.search(
+        rf"^(?P<indent>[ ]+){re.escape(key)}:[ ]*(?P<value>[^#\n]*)",
+        step,
+        re.MULTILINE,
+    )
     assert match is not None, f"missing {key!r} in action step:\n{step}"
-    return match.group(1).strip().strip("'\"")
+    indent = len(match.group("indent"))
+    fragments = [match.group("value").strip()]
+    for line in step[match.end() :].splitlines():
+        stripped = line.lstrip(" ")
+        if stripped and len(line) - len(stripped) <= indent:
+            break
+        if stripped:
+            fragments.append(stripped)
+    return " ".join(" ".join(fragments).split()).strip("'\"")
 
 
 def _exact_lock_names(path: Path) -> set[str]:
@@ -470,7 +482,7 @@ def test_oidc_publisher_is_a_code_free_least_privilege_boundary() -> None:
     """Only exact artifact handling crosses the isolated PyPI trust boundary."""
     publisher = _job_body(_workflow("publish.yml"), "publish")
 
-    assert "environment:" not in publisher
+    assert re.search(r"^    environment: pypi$", publisher, re.MULTILINE)
     assert "id-token: write" in publisher
     for unnecessary_permission in ("contents: read", "contents: write", "actions: write"):
         assert unnecessary_permission not in publisher
@@ -803,7 +815,7 @@ def test_secret_scan_uses_the_tested_report_checker() -> None:
 
 def test_static_security_scan_covers_release_automation() -> None:
     """Code with release authority receives the same Bandit gate as runtime code."""
-    _assert_text_contract(_action("quality-validation"), required=("bandit -r src meta/ci -ll",))
+    _assert_text_contract(_action("quality-validation"), required=("bandit -r src meta/ci -l",))
 
 
 def test_dependency_audit_includes_pinned_ci_executables() -> None:
@@ -989,7 +1001,9 @@ def test_platform_suite_exercises_the_installed_wheel() -> None:
         required=(
             "pytest -q -o pythonpath=.",
             "wheelhouse/*.whl",
-            "extension.is_relative_to(checkout)",
+            "path.is_relative_to(checkout)",
+            '"schema_sanitizer._core_abi3"',
+            '"schema_sanitizer.core_impl.native_runtime"',
         ),
     )
 
@@ -1084,7 +1098,7 @@ def test_ci_bootstraps_pip_conditionally_from_the_exact_wheel() -> None:
     helper_path = "meta/ci/quality/ensure_pinned_pip.py"
     helper = (ROOT / helper_path).read_text(encoding="utf-8")
     callers = {
-        "build-platform-wheel": (_action("build-platform-wheel"), 4),
+        "build-platform-wheel": (_action("build-platform-wheel"), 5),
         "test-platform-wheel": (_action("test-platform-wheel"), 1),
         "quality-validation": (_action("quality-validation"), 1),
         "source-distribution": (_action("source-distribution"), 1),
@@ -1162,9 +1176,12 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
     python_sha256 = "9283876d58c017e0e846f95b490da3bca0fc0a6ee1134b2870677cfb7eec3c67"  # pragma: allowlist secret
     assert python_sha256 in build
     assert 'python meta/ci/native/install_windows_cpython.py "${PYTHON_NUPKG_SHA256}"' in build
-    assert "platform.machine().upper() == 'AMD64'" in build
-    assert "assert struct.calcsize('P') == 8" in build
-    assert "assert sys.version_info[:3] == (3, 11, 9)" in build
+    assert 'platform.machine().upper() != "AMD64"' in build
+    assert "unexpected Windows Python architecture" in build
+    assert 'struct.calcsize("P") != 8' in build
+    assert "the Windows wheel build requires a 64-bit interpreter" in build
+    assert "sys.version_info[:3] != (3, 11, 9)" in build
+    assert "unexpected Windows Python version" in build
     installer = (ROOT / "meta/ci/native/install_windows_cpython.py").read_text(encoding="utf-8")
     assert 'PYTHON_PACKAGE_HOST = "api.nuget.org"' in installer
     assert (
@@ -1293,7 +1310,9 @@ def test_native_coverage_resolves_sources_and_rejects_incomplete_html() -> None:
         if "name: Render LLVM reports" in step
     )
 
-    assert render.count('-compilation-dir="${GITHUB_WORKSPACE}"') == 3
+    assert render.count('-compilation-dir="${GITHUB_WORKSPACE}"') == 4
+    assert "llvm-cov-18 export" in render
+    assert "meta/ci/native/check_llvm_coverage.py create" in render
     assert "render_diagnostics=coverage-native/llvm-cov-render.stderr" in render
     assert '2>"${render_diagnostics}"' in render
     assert 'if [[ -s "${render_diagnostics}" ]]' in render
@@ -1675,6 +1694,11 @@ def test_native_stress_and_functional_suites_form_an_explicit_partition() -> Non
     functional = next(
         step for step in _step_bodies(test_action) if "name: Run functional test shard" in step
     )
+    release_matrix = next(
+        step
+        for step in _step_bodies(test_action)
+        if "name: Run the clean public 8-by-7 release matrix" in step
+    )
 
     assert pytest_config["markers"] == [
         "native_stress: high-volume native concurrency coverage run explicitly in CI"
@@ -1690,12 +1714,17 @@ def test_native_stress_and_functional_suites_form_an_explicit_partition() -> Non
     assert "tests/concurrency/test_ordered_executor_completion_probe.py" in stress
     assert "-m 'not native_stress'" in functional
     assert "--ignore" not in stress
-    assert functional.count("--ignore=") == 1
+    assert functional.count("--ignore=") == 2
     assert "pytest-native-stress-${PLATFORM_ARTIFACT}.xml" in stress
     assert "pytest-native-stress-durations-${PLATFORM_ARTIFACT}.log" in stress
+    assert "tests/concurrency/test_concurrency_route_release_gate.py" in release_matrix
+    assert "pytest-release-matrix-${PLATFORM_ARTIFACT}.xml" in release_matrix
+    assert "SCHEMA_SANITIZER_TEST_SHARD: release-matrix" in release_matrix
     assert "pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml" in functional
-    assert test_action.index("name: Cross-platform native completion stress") < (
-        test_action.index("name: Run functional test shard")
+    assert (
+        test_action.index("name: Cross-platform native completion stress")
+        < test_action.index("name: Run the clean public 8-by-7 release matrix")
+        < test_action.index("name: Run functional test shard")
     )
 
 
@@ -1805,7 +1834,13 @@ def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive()
     assert functional.count(cross_toolchain_quality_test) == 1
     assert "elif [[ \"${TEST_SHARD}\" == 'memory-parquet' ]]" in functional
     assert "test_paths+=(" in functional
-    assert release_gate not in functional
+    assert functional.count(release_gate) == 1
+    release_matrix = next(
+        step
+        for step in _step_bodies(test_action)
+        if "name: Run the clean public 8-by-7 release matrix" in step
+    )
+    assert release_matrix.count(release_gate) == 1
     concurrency_rebalance, memory_rebalance = functional.split(
         "elif [[ \"${TEST_SHARD}\" == 'memory-parquet' ]]", 1
     )
@@ -2016,17 +2051,29 @@ def test_validation_gate_retries_artifact_downloads_from_clean_exact_destination
     gate = _job_body(_workflow("ci.yml"), "validation-gate")
     downloads = gate[: gate.index("name: Validate the complete release artifact set")]
 
-    assert downloads.count("actions/download-artifact@") == 4
+    assert downloads.count("actions/download-artifact@") == 10
     assert downloads.count("name: source-distribution") == 2
     assert downloads.count("path: download/source") == 2
     assert downloads.count("path: download/wheels") == 2
     assert downloads.count("pattern: dist-wheels-*") == 2
-    assert downloads.count("merge-multiple: true") == 2
-    assert downloads.count("continue-on-error: true") == 2
+    assert downloads.count("merge-multiple: true") == 4
+    assert downloads.count("path: download/platform-tests") == 2
+    assert downloads.count("pattern: platform-test-evidence-*") == 2
+    assert downloads.count("path: download/native-coverage") == 2
+    assert downloads.count("name: native-coverage-certificate") == 2
+    assert downloads.count("path: download/sanitizers") == 2
+    assert downloads.count("pattern: sanitizer-certificate-*") == 2
+    assert downloads.count("continue-on-error: true") == 5
     assert downloads.count("steps.download-source-distribution.outcome == 'failure'") == 2
     assert downloads.count("steps.download-platform-wheels.outcome == 'failure'") == 2
+    assert downloads.count("steps.download-platform-test-evidence.outcome == 'failure'") == 2
+    assert downloads.count("steps.download-native-coverage-certificate.outcome == 'failure'") == 2
+    assert downloads.count("steps.download-sanitizer-certificates.outcome == 'failure'") == 2
     assert downloads.count("rm -rf -- download/source") == 1
     assert downloads.count("rm -rf -- download/wheels") == 1
+    assert downloads.count("rm -rf -- download/platform-tests") == 1
+    assert downloads.count("rm -rf -- download/native-coverage") == 1
+    assert downloads.count("rm -rf -- download/sanitizers") == 1
     assert "cp download/source/*.tar.gz download/wheels/*.whl dist/" in gate
 
 
@@ -2063,7 +2110,16 @@ def test_platform_evidence_records_comparable_cpu_limits_without_job_summary() -
     )
     assert "name: Summarize platform-shard evidence" not in test_action
     assert "GITHUB_STEP_SUMMARY" not in test_action
-    assert "actions/upload-artifact@" not in test_action
+    assert test_action.count("actions/upload-artifact@") == 2
+    upload_names = {
+        _with_value(step, "name")
+        for step in _step_bodies(test_action)
+        if "actions/upload-artifact@" in step
+    }
+    assert upload_names == {
+        "platform-test-evidence-${{ inputs.platform-name }}-${{ inputs.shard }}"
+    }
+    assert "meta/ci/quality/platform_test_evidence.py create" in test_action
 
 
 def test_runner_environment_helper_writes_only_the_owned_schema(
@@ -2243,17 +2299,39 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
     assert "meta/ci/sanitizers/tsan_python_launcher.cc" in tsan
     assert tsan.count("meta/ci/sanitizers/run_tsan_extension_suite.sh") == 1
     assert ".work/build/tsan .work/bin/python-tsan 2" in tsan
-    assert "site.getsitepackages()[0]" in tsan
+    assert "site.getsitepackages()[0]" not in tsan
+    assert tsan.count("meta/ci/sanitizers/run_with_watchdog.py") == 1
+    assert "watchdog-tsan-thread-Linux-X64-fuzz.json" in tsan
+    assert "watchdog-tsan-thread-Linux-X64-extension.json" not in tsan
+    assert tsan.count("--timeout 900") == 1
 
     capacity_step = tsan.split(
         "- name: Require capacity for complete TSan concurrency coverage", 1
     )[1].split("- name:", 1)[0]
-    suite_step = tsan.split("- name: Run the executor and all full-extension TSan domains", 1)[1]
+    fuzz_step = tsan.split("- name: Run TSan fuzz regressions and mutation campaigns", 1)[1].split(
+        "- name:", 1
+    )[0]
+    suite_step = tsan.split("- name: Run the executor and all full-extension TSan domains", 1)[
+        1
+    ].split("- name:", 1)[0]
     assert "--require-cpu-capacity 3" in capacity_step
     assert "continue-on-error" not in capacity_step
     assert "GITHUB_OUTPUT" not in capacity_step
     assert "::warning" not in capacity_step
     assert "if:" not in suite_step
+    assert "run_with_watchdog.py" not in suite_step
+    for environment_name in (
+        "ASAN_OPTIONS",
+        "LSAN_OPTIONS",
+        "TSAN_OPTIONS",
+        "UBSAN_OPTIONS",
+    ):
+        assert f"{environment_name}:" in capacity_step
+        assert f"{environment_name}:" in fuzz_step
+        assert f"{environment_name}:" in suite_step
+        assert f'--environment "{environment_name}=${{{environment_name}}}"' in fuzz_step
+    assert "TSAN_OPTIONS: halt_on_error=1:history_size=7:second_deadlock_stack=1" in fuzz_step
+    assert "TSAN_OPTIONS: halt_on_error=1:history_size=7:second_deadlock_stack=1" in suite_step
 
     runner = (ROOT / "meta/ci/sanitizers/run_tsan_extension_suite.sh").read_text(encoding="utf-8")
     for domain in (
@@ -2271,6 +2349,20 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
     assert "pytest_sessionfinish" in runner
     assert "domain_shutdown_grace_seconds" in runner
     assert "setsid" in runner
+    assert '--timeout "${domain_timeout_seconds}"' in runner
+    assert "readonly ASAN_OPTIONS=''" in runner
+    assert "readonly LSAN_OPTIONS=''" in runner
+    assert (
+        "readonly TSAN_OPTIONS='halt_on_error=1:history_size=7:second_deadlock_stack=1'" in runner
+    )
+    assert "readonly UBSAN_OPTIONS=''" in runner
+    assert "export ASAN_OPTIONS LSAN_OPTIONS TSAN_OPTIONS UBSAN_OPTIONS" in runner
+    tsan_launcher = (ROOT / "meta/ci/sanitizers/tsan_python_launcher.cc").read_text(
+        encoding="utf-8"
+    )
+    assert "halt_on_error=1" in tsan_launcher
+    assert "ignore_noninstrumented_modules" not in tsan_launcher
+    assert "suppressions=" not in tsan_launcher
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="process-group semantics are Linux-specific")
@@ -2283,6 +2375,7 @@ def test_tsan_runner_terminates_a_live_descendant_after_its_leader_exits(
     test_target = tmp_path / "test_domain.py"
     launcher = tmp_path / "fake-python"
     child_pid_file = tmp_path / "child.pid"
+    sanitizer_environment_file = tmp_path / "sanitizer-environment.txt"
     build_dir.mkdir()
     site_packages.mkdir()
     test_target.write_text("# synthetic TSan domain\n", encoding="utf-8")
@@ -2293,6 +2386,9 @@ if (( $# != 6 )); then
   exit 0
 fi
 marker="$6"
+printf 'ASAN_OPTIONS=%s\nLSAN_OPTIONS=%s\nTSAN_OPTIONS=%s\nUBSAN_OPTIONS=%s\n' \
+  "${ASAN_OPTIONS}" "${LSAN_OPTIONS}" "${TSAN_OPTIONS}" "${UBSAN_OPTIONS}" \
+  > "${TSAN_TEST_ENVIRONMENT_FILE:?}"
 (
   trap '' TERM
   child_pgid="$(ps -o pgid= -p "${BASHPID}" | tr -d '[:space:]')"
@@ -2334,11 +2430,16 @@ printf '0' > "${marker}"
         {str(Path(command).parent) for command in required_commands.values() if command is not None}
     )
     environment = {
+        "ASAN_OPTIONS": "ambient-asan-value",
         "LC_ALL": "C",
+        "LSAN_OPTIONS": "ambient-lsan-value",
         "PATH": os.pathsep.join(tool_directories),
         "TMPDIR": str(tmp_path),
+        "TSAN_OPTIONS": "ambient-tsan-value",
         "TSAN_TEST_CHILD_PID_FILE": str(child_pid_file),
+        "TSAN_TEST_ENVIRONMENT_FILE": str(sanitizer_environment_file),
         "TZ": "UTC",
+        "UBSAN_OPTIONS": "ambient-ubsan-value",
     }
     child_identity: tuple[int, int] | None = None
 
@@ -2368,6 +2469,12 @@ printf '0' > "${marker}"
         assert child_pgid > 1 and child_pgid != os.getpgrp()
         assert completed.returncode == 0, completed.stdout + completed.stderr
         assert "TSan domain ignored TERM; escalating to KILL" in completed.stderr
+        assert sanitizer_environment_file.read_text(encoding="utf-8") == (
+            "ASAN_OPTIONS=\n"
+            "LSAN_OPTIONS=\n"
+            "TSAN_OPTIONS=halt_on_error=1:history_size=7:second_deadlock_stack=1\n"
+            "UBSAN_OPTIONS=\n"
+        )
         assert not _linux_process_group_is_live(child_pgid)
     finally:
         if child_identity is None and child_pid_file.is_file():
@@ -2393,6 +2500,7 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     """Native fuzzing must run under TSan and supported platform sanitizers."""
     ci = _workflow("ci.yml")
     sanitizer = _action("platform-sanitizer")
+    gate = _job_body(ci, "validation-gate")
 
     assert ci.count("task: platform-sanitizer") == 4
     assert "windows-amd64-asan" in ci
@@ -2406,10 +2514,16 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     assert "--campaign-runs 500" in sanitizer
     assert "schema_sanitizer_sanitized_ordered_executor" in sanitizer
     assert "--repeat until-fail" not in sanitizer
-    assert "-R '^schema_sanitizer_sanitized_ordered_executor$'" in sanitizer
-    concurrency_step = sanitizer.split("- name: Run fixed-round sanitized concurrency probe", 1)[
-        1
-    ].split("- name:", 1)[0]
+    assert "ctest --test-dir .work/build/platform-sanitizer" not in sanitizer
+    concurrency_step = sanitizer.split(
+        "- name: Run externally bounded sanitized concurrency probe", 1
+    )[1].split("- name:", 1)[0]
+    extension_step = sanitizer.split(
+        "- name: Exercise the instrumented extension through public conversions", 1
+    )[1].split("- name:", 1)[0]
+    linux_extension_step = sanitizer.split(
+        "- name: Exercise malformed input, lifecycle, and nested Parquet", 1
+    )[1].split("- name:", 1)[0]
     capacity_step = sanitizer.split(
         "- name: Require capacity for complete native concurrency coverage", 1
     )[1].split("- name:", 1)[0]
@@ -2418,20 +2532,65 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     ].split("- name:", 1)[0]
     linux_fuzz_step = sanitizer.split(
         "- name: Run Linux ASan/UBSan fuzz regressions and mutation campaigns", 1
-    )[1]
+    )[1].split("- name:", 1)[0]
     assert "--require-cpu-capacity 3" in capacity_step
     assert "inputs.mode == 'native'" in capacity_step
     assert "runner.os != 'Windows'" in capacity_step
     assert "continue-on-error" not in capacity_step
     assert "GITHUB_OUTPUT" not in capacity_step
     assert "::warning" not in capacity_step
+    for environment_name in (
+        "ASAN_OPTIONS",
+        "LSAN_OPTIONS",
+        "TSAN_OPTIONS",
+        "UBSAN_OPTIONS",
+    ):
+        assert f"{environment_name}:" in capacity_step
+        for guarded_step in (
+            concurrency_step,
+            extension_step,
+            fuzz_step,
+            linux_extension_step,
+            linux_fuzz_step,
+        ):
+            assert f"{environment_name}:" in guarded_step
+            assert f'--environment "{environment_name}=${{{environment_name}}}"' in guarded_step
+    assert "ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:strict_string_checks=1" in extension_step
+    assert "LSAN_OPTIONS: exitcode=23" in linux_fuzz_step
+    assert "UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1" in linux_extension_step
     normalized_concurrency_step = " ".join(concurrency_step.split())
     assert "inputs.mode == 'native'" in concurrency_step
-    assert "runner.os != 'Windows'" in concurrency_step
+    assert "runner.os != 'Windows'" not in concurrency_step
+    assert "meta/ci/sanitizers/run_with_watchdog.py" in concurrency_step
+    assert "RUNNER_ARCHITECTURE: ${{ runner.arch }}" in concurrency_step
+    assert "SANITIZER_MODE: ${{ inputs.mode }}" in concurrency_step
+    assert "SANITIZER_NAME: ${{ inputs.sanitizer }}" in concurrency_step
+    assert "--case arena_backpressure_deadline" in concurrency_step
+    assert "--rounds 100" in concurrency_step
+    assert "--timeout" in concurrency_step
     assert "sanitizer_cpu_capacity" not in normalized_concurrency_step
     assert "if: inputs.mode == 'native'" in fuzz_step
     assert "sanitizer_cpu_capacity" not in fuzz_step
     assert "sanitizer_cpu_capacity" not in linux_fuzz_step
+    assert sanitizer.count("meta/ci/sanitizers/run_with_watchdog.py") == 5
+    assert "watchdog-asan-ubsan-linux-full-Linux-X64-extension.json" in sanitizer
+    assert "watchdog-asan-ubsan-linux-full-Linux-X64-fuzz.json" in sanitizer
+    assert "--timeout 900" in fuzz_step
+    assert "--timeout 900" in linux_fuzz_step
+    assert gate.count("pattern: sanitizer-certificate-*") == 2
+    assert gate.count("merge-multiple: true") >= 4
+    assert "rm -rf -- download/sanitizers" in gate
+    assert "certify_sanitizer_run.py verify-directory" in gate
+    sanitizer_certificate = (ROOT / "meta/ci/sanitizers/certify_sanitizer_run.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"sanitizer_environment": _runtime_environment(' in sanitizer_certificate
+    abi_smoke = (ROOT / "meta/ci/release/abi_public_smoke.py").read_text(encoding="utf-8")
+    assert "from schema_sanitizer.core_impl.native_runtime import native_core" in abi_smoke
+    assert "import schema_sanitizer._core_abi3" not in abi_smoke
+    assert "parse_integers=True" in abi_smoke
+    expected_runs = sanitizer_certificate.split("EXPECTED_RUNS = {", 1)[1].split("}", 1)[0]
+    assert len(re.findall(r'^    \("', expected_runs, re.MULTILINE)) == 5
 
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     assert "SCHEMA_SANITIZER_FUZZ_ENGINE" in cmake
@@ -2656,6 +2815,8 @@ def test_ci_artifact_policies_are_explicit_and_bounded() -> None:
         _action("quality-validation"),
         _action("source-distribution"),
         _action("native-llvm-coverage"),
+        _action("platform-sanitizer"),
+        _action("thread-sanitizer"),
     )
     upload_steps = [
         step
@@ -2668,6 +2829,10 @@ def test_ci_artifact_policies_are_explicit_and_bounded() -> None:
         uploads.setdefault(_with_value(step, "name"), []).append(step)
     retention = {
         "dist-wheels-${{ inputs.platform-name }}": "7",
+        "native-coverage-certificate": "7",
+        "sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-${{ inputs.sanitizer }}": "7",
+        "sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-tsan": "7",
+        "platform-test-evidence-${{ inputs.platform-name }}-${{ inputs.shard }}": "7",
         "source-distribution": "7",
         "release-distributions": "7",
         "pypi-publish-distributions": "7",
@@ -2683,12 +2848,14 @@ def test_ci_artifact_policies_are_explicit_and_bounded() -> None:
         _with_value(step, "path") == "pypi-publish/"
         for step in uploads["pypi-publish-distributions"]
     )
-    assert "actions/upload-artifact@" not in _action("test-platform-wheel")
     assert "actions/upload-artifact@" not in _action("quality-validation")
-    assert "actions/upload-artifact@" not in _action("native-llvm-coverage")
 
     retried = {
         "dist-wheels-${{ inputs.platform-name }}",
+        "native-coverage-certificate",
+        "sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-${{ inputs.sanitizer }}",
+        "sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-tsan",
+        "platform-test-evidence-${{ inputs.platform-name }}-${{ inputs.shard }}",
         "source-distribution",
         "release-distributions",
         "pypi-publish-distributions",
@@ -2783,7 +2950,8 @@ def test_release_artifact_is_complete_exact_and_self_describing() -> None:
         '_command([python, "-m", "pip", "install", "-c", constraints, "pip==26.2.1"])'
         not in downstream
     )
-    assert "pip.__version__ ==" in downstream
+    assert 'f"if pip.__version__ != {_PIP_VERSION!r}:\\n"' in downstream
+    assert "unexpected pip version" in downstream
     assert 'struct.calcsize("P") * 8' in downstream
     for extra in (
         "core",

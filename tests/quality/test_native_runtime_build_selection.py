@@ -9,6 +9,8 @@ from __future__ import annotations
 import importlib.machinery
 import os
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -157,3 +159,67 @@ def test_asan_build_requires_runtime_to_be_linked_first(
 
     assert native_runtime._build_runtime_is_compatible(build_dir)
     assert seen == ["__asan_init"]
+
+
+@pytest.mark.parametrize("sanitizer", ["asan", "asan-ubsan"])
+def test_windows_asan_build_requires_its_loaded_build_adjacent_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sanitizer: str,
+) -> None:
+    """MSVC compatibility uses the loaded dynamic runtime instead of EXE exports."""
+    build_dir = tmp_path / "instrumented"
+    _write_cache(build_dir, sanitizer)
+    seen: list[Path] = []
+    monkeypatch.setattr(native_runtime, "_IS_WINDOWS", True)
+    monkeypatch.setattr(
+        native_runtime,
+        "_windows_asan_runtime_is_loaded",
+        lambda path: seen.append(path) or True,
+    )
+    monkeypatch.setattr(
+        native_runtime,
+        "_process_exports",
+        lambda _symbol: pytest.fail("Windows ASan must not inspect only the main executable"),
+    )
+
+    assert native_runtime._build_runtime_is_compatible(build_dir)
+    assert seen == [build_dir]
+
+
+def test_windows_asan_runtime_matches_loaded_module_path_and_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Win32 check binds the loaded sanitizer module to the staged DLL bytes."""
+    build_dir = tmp_path / "instrumented"
+    build_dir.mkdir()
+    runtime = build_dir / "clang_rt.asan_dynamic-x86_64.dll"
+    runtime.write_bytes(b"runtime")
+    get_module_handle = Mock(return_value=123)
+
+    def get_module_filename(_handle: object, buffer: object, _size: int) -> int:
+        """Publish the synthetic loaded-module path through the Win32 buffer."""
+        buffer.value = str(runtime.resolve())
+        return len(buffer.value)
+
+    get_module_filename_mock = Mock(side_effect=get_module_filename)
+    get_proc_address = Mock(return_value=456)
+    kernel32 = SimpleNamespace(
+        GetModuleHandleW=get_module_handle,
+        GetModuleFileNameW=get_module_filename_mock,
+        GetProcAddress=get_proc_address,
+    )
+    monkeypatch.setattr(
+        native_runtime.ctypes,
+        "WinDLL",
+        Mock(return_value=kernel32),
+        raising=False,
+    )
+
+    assert native_runtime._windows_asan_runtime_is_loaded(build_dir)
+    get_module_handle.assert_called_once_with(runtime.name)
+    get_proc_address.assert_called_once_with(123, b"__asan_init")
+
+    get_proc_address.return_value = None
+    assert not native_runtime._windows_asan_runtime_is_loaded(build_dir)

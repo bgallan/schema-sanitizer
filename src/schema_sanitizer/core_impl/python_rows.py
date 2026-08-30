@@ -96,7 +96,8 @@ class PythonRowsJsonlByteReader(BufferedGeneratedBytesReader):
         """Consume and encode one bounded iterator batch in one native call."""
         if self._source_complete:
             return b""
-        assert self._iterable is not None
+        if self._iterable is None:
+            raise AssertionError("iterator-backed row source cannot be absent")
         try:
             payload, next_index, exhausted = self._native_iter_batch(
                 self._iterable,
@@ -118,7 +119,8 @@ class PythonRowsJsonlByteReader(BufferedGeneratedBytesReader):
 
     def _next_sequence_payload(self, target_bytes: int) -> bytes:
         """Encode the next sequence segment exactly once in source order."""
-        assert self._rows is not None
+        if self._rows is None:
+            raise AssertionError("sequence-backed row source cannot be absent")
         if self._source_complete:
             return b""
         row_count = len(self._rows)
@@ -177,7 +179,8 @@ class PythonRowsJsonlByteReader(BufferedGeneratedBytesReader):
                 f"{next_size} bytes > {self._max_spool_bytes} bytes"
             )
         self._ensure_spool_disk_capacity(len(payload), next_size)
-        assert self._spool is not None
+        if self._spool is None:
+            raise AssertionError("active row spool cannot be absent")
         self._spool.seek(0, 2)
         written = self._spool.write(payload)
         if written != len(payload):
@@ -192,7 +195,8 @@ class PythonRowsJsonlByteReader(BufferedGeneratedBytesReader):
 
     def _append_next(self, target_bytes: int) -> bool:
         """Replay recorded bytes, then progressively extend the same stream."""
-        assert self._spool is not None
+        if self._spool is None:
+            raise AssertionError("active row spool cannot be absent")
         if self._replay_spool:
             payload = self._spool.read(max(1, target_bytes))
             if payload:
@@ -206,7 +210,8 @@ class PythonRowsJsonlByteReader(BufferedGeneratedBytesReader):
 
     def _reset_reader(self) -> None:
         """Replay encoded bytes without draining or re-encoding the source."""
-        assert self._spool is not None
+        if self._spool is None:
+            raise AssertionError("active row spool cannot be absent")
         self._spool.seek(0)
         self._replay_spool = True
 

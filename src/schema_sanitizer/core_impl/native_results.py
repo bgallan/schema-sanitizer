@@ -60,8 +60,9 @@ class IngestDiagnostics:
                 try:
                     self._diag_json = str(_native.diagnostics_json(self._diagnostics_capsule))
                     self._obj = None
-                except Exception:
-                    pass
+                # Retain the last valid diagnostic snapshot.
+                except Exception as ignored_error:
+                    del ignored_error
             return self._diag_json
 
     def close(self) -> None:
@@ -75,8 +76,9 @@ class IngestDiagnostics:
             try:
                 self._diag_json = str(_native.diagnostics_json(capsule))
                 self._obj = None
-            except Exception:
-                pass
+            # Retain the last valid diagnostic snapshot.
+            except Exception as ignored_error:
+                del ignored_error
             self._diagnostics_capsule = None
             ticket = getattr(self, "_finalizer_ticket", None)
             capsule_owner = getattr(self, "_finalizer_capsule", None)

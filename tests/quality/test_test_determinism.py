@@ -449,3 +449,76 @@ def test_checker_cli_reports_repository_findings(
 
     assert checker.main(["--root", str(tmp_path)]) == 1
     assert "test_fragile.py" in capsys.readouterr().out
+
+
+def test_production_checks_survive_python_optimized_mode() -> None:
+    """Production and CI helpers use explicit checks instead of removable asserts."""
+    findings = [
+        f"{path.relative_to(ROOT)}:{node.lineno}"
+        for source_root in (ROOT / "src", ROOT / "meta/ci")
+        for path in sorted(source_root.rglob("*.py"))
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+        if isinstance(node, ast.Assert)
+    ]
+    findings.extend(
+        f"{path.relative_to(ROOT)}:{line_number}:embedded"
+        for source_root in (ROOT / "src", ROOT / "meta/ci")
+        for path in sorted(source_root.rglob("*.py"))
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+        if "assert " in line
+    )
+    findings.extend(
+        f"{path.relative_to(ROOT)}:{line_number}:action"
+        for path in sorted((ROOT / ".github/actions").rglob("*.yml"))
+        for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+        if "assert " in line
+    )
+    assert not findings
+
+
+def test_bandit_gate_fails_on_new_low_severity_findings() -> None:
+    """The quality workflow scans low findings while reviewed exceptions stay local."""
+    action = (ROOT / ".github/actions/quality-validation/action.yml").read_text(encoding="utf-8")
+    assert "bandit -r src meta/ci -l\n" in action
+    assert "bandit -r src meta/ci -ll" not in action
+
+
+def test_bandit_suppressions_are_an_exact_reviewed_allowlist() -> None:
+    """New static-analysis suppressions cannot enter production unnoticed."""
+    suppressions = {
+        (path.relative_to(ROOT).as_posix(), line.strip())
+        for source_root in (ROOT / "src", ROOT / "meta/ci")
+        for path in sorted(source_root.rglob("*.py"))
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if "# nosec" in line
+    }
+    assert suppressions == {
+        (
+            "meta/ci/sanitizers/run_with_watchdog.py",
+            "import subprocess  # nosec B404",
+        ),
+        (
+            "meta/ci/sanitizers/run_with_watchdog.py",
+            "process = subprocess.Popen(  # nosec B603",
+        ),
+        (
+            "meta/ci/sanitizers/run_with_watchdog.py",
+            "result = subprocess.run(  # nosec B603",
+        ),
+        (
+            "meta/ci/sanitizers/run_with_watchdog.py",
+            "process_table = subprocess.run(  # nosec B603",
+        ),
+        (
+            "meta/ci/quality/ensure_pinned_pip.py",
+            "status = os.spawnv(os.P_WAIT, sys.executable, command)  # nosec B606",
+        ),
+        (
+            "meta/ci/quality/run_coverage_suite.py",
+            "os.execv(command[0], command)  # nosec B606",
+        ),
+        (
+            "src/schema_sanitizer/core_impl/process_identity.py",
+            '_UNKNOWN_START_TOKEN = "unknown"  # nosec B105',
+        ),
+    }

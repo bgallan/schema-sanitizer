@@ -910,7 +910,8 @@ class ReservedFinalizerEscrow(Generic[T]):
                         self._pending_hint = -1
                         self._retired_counter.increment()
                     else:
-                        assert prepared_push is not None
+                        if prepared_push is None:
+                            raise AssertionError("finalizer free-slot push was not prepared")
                         tail, next_tail, next_count = prepared_push
                         self._ring_commit_push_locked(slot, tail, next_tail, next_count)
                         self._states[slot] = _FREE

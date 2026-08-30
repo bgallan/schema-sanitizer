@@ -37,7 +37,7 @@ flowchart LR
     VALIDATION --> OWNERS[validation-matrix<br/>eight thematic workloads]
     BUILDS --> BARRIER[All four wheel cells finish<br/>slowest-build barrier]
     BARRIER --> TESTS[four platform-test matrices<br/>three shards each]
-    BUILDS --> GATE[validation-gate<br/>release assembly]
+    BUILDS --> GATE[validation-gate<br/>certificate verification<br/>+ release assembly]
     TESTS --> GATE
     OWNERS --> GATE
 
@@ -64,10 +64,10 @@ The canonical graph has six matrices and one terminal job:
 
 | Job | Matrix entries | Dependency | Shared contract |
 |---|---:|---|---|
-| `platform-wheel-builds` | 4 platforms | None | Build, audit, smoke, and upload one wheel for each release target. |
-| `platform-tests-PLATFORM` | 4 matrices × 3 shards | Complete wheel matrix | Run the three exhaustive functional shards against each fixed platform wheel. |
-| `validation-matrix` | 8 thematic workloads | None | Run quality, source packaging, native coverage, TSan, and four platform-sanitizer entries in parallel. |
-| `validation-gate` | 1 terminal job | All six matrices | Require exact success, assemble and validate the release set, create its manifest, and upload the canonical reconciliation artifact. |
+| `platform-wheel-builds` | 4 platforms | None | Build, audit, smoke, certify, and upload one wheel for each release target. |
+| `platform-tests-PLATFORM` | 4 matrices × 3 shards | Complete wheel matrix | Run the three exhaustive functional shards against each fixed platform wheel and retain one certified evidence set per entry. |
+| `validation-matrix` | 8 thematic workloads | None | Run quality, source packaging, certified native coverage, TSan, and four certified platform-sanitizer entries in parallel. |
+| `validation-gate` | 1 terminal job | All six matrices | Require exact success, verify the 12 platform-test sets, four wheel certificates, five sanitizer runs, and native-coverage certificate, then assemble and validate the release set. |
 
 The source-distribution workload is an independent entry in
 `validation-matrix`. It builds and validates the sdist while wheel and test work
@@ -112,10 +112,10 @@ result other than `success`, and only then assembles the release artifact:
 
 | Owner | Contract |
 |---|---|
-| `platform-wheel-builds` | Builds the four release wheels once, with one exact artifact name per platform. |
-| `platform-tests-PLATFORM` | Four fixed-platform jobs each expand the same three functional shards, producing 12 independent entries. |
-| `validation-matrix` | Dispatches eight explicitly declared workloads: quality, source distribution and downstream packaging, native LLVM coverage, GCC ThreadSanitizer, and four platform sanitizers. |
-| `validation-gate` | Checks all six aggregate results, downloads the four wheels and validated sdist, validates the exact five-file release set, creates its manifest, and uploads `release-distributions`. |
+| `platform-wheel-builds` | Builds the four release wheels once, certifies each wheel and its native payload, and uses one exact artifact name per platform. |
+| `platform-tests-PLATFORM` | Four fixed-platform jobs each expand the same three functional shards, producing 12 independent content-addressed evidence sets. |
+| `validation-matrix` | Dispatches eight explicitly declared workloads: quality, source distribution and downstream packaging, native LLVM coverage, GCC ThreadSanitizer, and four platform sanitizers. Coverage and sanitizer entries publish compact provenance-bound certificates. |
+| `validation-gate` | Checks all six aggregate results, downloads and verifies every validation certificate against the current commit/run/attempt, validates the exact five-file release set, creates its manifest, and uploads `release-distributions`. |
 
 Repository rules for `main` must require the `CI / validation gate` status. Its
 stable identity keeps branch protection independent of matrix expansion and job
@@ -159,10 +159,10 @@ rather than an import from `src/`, on:
 
 | Runner | Release platform | Native safety coverage |
 |---|---|---|
-| Ubuntu 24.04 / Linux x86-64 | `manylinux_2_27_x86_64.manylinux_2_28_x86_64` | Installed-wheel functional suite, focused extension ASan/UBSan, libFuzzer, LLVM coverage, and GCC TSan. |
-| Windows Server 2022 / AMD64 | `win_amd64` | Installed-wheel functional suite and MSVC ASan parser fuzzing. |
-| macOS 15 / x86-64 | `macosx_11_0_x86_64` | Installed-wheel functional suite, ASan/UBSan parser fuzzing, and fixed-round concurrency probes. |
-| macOS 15 / ARM64 | `macosx_11_0_arm64` | Installed-wheel functional suite, ASan/UBSan parser fuzzing, and fixed-round concurrency probes. |
+| Ubuntu 24.04 / Linux x86-64 | `manylinux_2_27_x86_64.manylinux_2_28_x86_64` | Installed-wheel functional suite; ASan/UBSan extension and libFuzzer campaigns; enforceable LLVM coverage; and GCC TSan executor, extension-domain, and fuzz coverage. |
+| Windows Server 2022 / AMD64 | `win_amd64` | Installed-wheel functional suite; MSVC ASan extension smoke, bounded concurrency case, and deterministic standalone fuzz campaigns. |
+| macOS 15 / x86-64 | `macosx_11_0_x86_64` | Installed-wheel functional suite; ASan/UBSan extension smoke, 100-round concurrency probe, and deterministic standalone fuzz campaigns. |
+| macOS 15 / ARM64 | `macosx_11_0_arm64` | Installed-wheel functional suite; ASan/UBSan extension smoke, 100-round concurrency probe, and deterministic standalone fuzz campaigns. |
 
 Each wheel is built for CPython 3.11 with the stable ABI (`cp311-abi3`). The
 complete functional suite runs on the same CPython 3.11 patch and the same fully locked
@@ -180,7 +180,9 @@ compatible owner pin. Validation cells use exact interpreter patches as well.
 Pip and apt receive bounded transport retries and timeouts. Linux additionally
 executes the installed public conversion smoke on
 exact 3.12, 3.13, and 3.14 patches, and every platform loads it on the exact
-3.14 patch. `platform-wheel-builds` defines the runner,
+3.14 patch. Outside pull requests, Linux also probes the wheel and native module
+on the exact CPython 3.15 release candidate; this forward-compatibility signal
+does not extend pull-request latency. `platform-wheel-builds` defines the runner,
 release platform, cibuildwheel architecture, and wheel artifact identifier once
 for each of the four targets. Four `platform-tests-PLATFORM` jobs list the exact
 12-entry product of those platforms and the `concurrency`, `memory-parquet`,
@@ -216,9 +218,9 @@ four platforms:
 
 | Shard | Test directories | Co-located gates |
 |---|---|---|
-| `concurrency` | `tests/concurrency` | Threading smoke, the single `native_stress` invocation, and the cross-toolchain standalone-fuzzer golden test. |
-| `memory-parquet` | `tests/memory`, `tests/parquet`, and `tests/sinks` | Compiled-wheel Parquet certification. |
-| `io-pipeline` | `tests/examples`, `tests/io`, `tests/pipeline`, `tests/remote`, and `tests/schema` | Non-gating reader scaling measurement. |
+| `concurrency` | `tests/concurrency` | Threading smoke, the single `native_stress` invocation, and the clean public 8-by-7 release matrix in separate pytest processes. |
+| `memory-parquet` | `tests/memory`, `tests/parquet`, and `tests/sinks`, plus the wide fixed-JSONL oracle and standalone-fuzzer golden | Non-gating reader scaling measurement and compiled-wheel Parquet certification. |
+| `io-pipeline` | `tests/examples`, `tests/io`, `tests/pipeline`, `tests/remote`, and `tests/schema` | No separate native or timing workload. |
 
 The topology contract derives the repository's test directories and fails if a
 new one is not assigned exactly once. The assignment is a static source
@@ -226,9 +228,9 @@ contract: CI never redistributes tests from observed runner timings, and every
 platform executes the same functional paths. The source-only `tests/quality`
 contracts run once in the existing quality job instead of repeating source
 scans on four operating systems. Their standalone C++ fuzzer golden remains in
-every concurrency shard because it is the one quality contract that exercises
-each platform's real compiler and process model. This preserves meaningful
-platform coverage without adding a job or dropping a test. Three shards incur
+every `memory-parquet` shard because it is the one quality contract that
+exercises each platform's real compiler and process model. This preserves
+meaningful platform coverage without adding a job or dropping a test. Three shards incur
 one more checkout, Python setup, dependency installation, and hosted runner per
 platform than the previous two-way split, but reduce the slowest functional
 path and run the normal suite concurrently with the benchmark and certificate
@@ -239,19 +241,24 @@ introduces the slowest-build barrier described above; it does not serialize the
 
 Ordered-executor completion has one canonical functional profile and one
 high-volume native stress case. Every platform runs both profiles against its
-installed wheel. The normal suite excludes only the explicitly marked stress
-case, while the `concurrency` shard runs that case once and writes its own JUnit
-and duration reports. This keeps the workload identical across the four
-release targets without multiplying the same 16-worker probe through unrelated
-source contract tests. Local pytest runs still include both profiles unless a
-marker expression is supplied.
+installed wheel. The ordinary marker selection excludes the explicitly marked
+stress case, while the `concurrency` shard runs that case once and writes its
+own JUnit and duration reports. The wide fixed-JSONL oracle is assigned to
+`memory-parquet`, and the clean public 8-by-7 release matrix runs in its own
+process so its integrity evidence cannot be inherited from the larger
+functional invocation. This keeps the aggregate workload identical across the
+four release targets without multiplying the same 16-worker probe through
+unrelated source contracts. Local pytest runs still include both completion
+profiles unless a marker expression is supplied.
 
 Every functional-shard invocation emits a JUnit XML report with the duration of
 each test and a terminal log ranking the 50 slowest phases above 50 ms. Both
 files identify their platform and shard. The log is piped through `tee` with
 `pipefail`, so pytest's exit status remains authoritative. Successful and
-partial failure diagnostics remain in the run logs without creating twelve
-separate retained artifacts or repository-owned Job Summaries.
+partial failure diagnostics remain in the run logs and in 12 seven-day
+`platform-test-evidence-*` artifacts. Each artifact has an exact shard-specific
+inventory and a content-addressed certificate; the repository still does not
+create Job Summaries for these tests.
 
 Functional correctness tests do not treat wall-clock speed as a pass/fail
 signal. Deadline behavior is exercised with controlled clocks, exact timeout
@@ -279,20 +286,38 @@ runners is not identical across architectures, so the manifest distinguishes
 an environment difference from a product regression while the software and
 test workload stay fixed.
 
-The concurrency shard fails before its workload when detected native CPU
-capacity is below the matrix contract: four credits on Linux, Windows, and
-macOS Intel, and three on the standard macOS ARM64 runner. Thus four-core
-contracts execute on three platforms and ARM64's lower capacity is an explicit
-topology decision rather than a runner-dependent green skip. The macOS native
-sanitizer and Linux TSan cells similarly require three credits and fail closed.
-Only Windows ASan's deeply threaded native probe remains disabled because its
-runtime can hang outside the probe watchdog; all Windows fuzz targets execute.
-The native probe itself runs 100 semantic rounds with deterministic barriers;
-CI selects its exact CTest name and does not use `until-fail` schedule sampling.
+Installed-wheel pytest processes disable third-party plugin autoloading and
+fail at startup unless all required adapters import from the locked environment
+and every project module comes from the installed wheel rather than the
+checkout. The integrity plugin requires clean native and process ledgers at
+startup, checks native anomaly counters after each teardown, and rechecks all
+ledgers after session fixtures finish. It also requires exact selected-test
+counts: 511 for `concurrency`, 1,704 for `memory-parquet`, 1,025 for
+`io-pipeline`, one for `native-stress`, and three for the release matrix.
+Platform skips must match reviewed node/reason rules and remain below a
+platform-specific ceiling; a runner that can execute more reviewed cases may
+produce fewer skips without failing. The resulting process certificates,
+JUnit/timing logs, runner manifest, benchmark or Parquet evidence, and outer
+job certificate are authenticated together and revalidated by the terminal
+gate.
 
-In parallel with the other two shards, `io-pipeline` records one reader scaling
-measurement for each installed wheel before its functional tests. The versioned
-policy in `benchmarks/readers/linear_scaling_budget.json` is evaluated once,
+The `concurrency` and `memory-parquet` shards fail before their workloads when
+detected native CPU capacity is below the matrix contract: four credits on
+Linux, Windows, and macOS Intel, and three on the standard macOS ARM64 runner.
+Thus four-core contracts execute on three platforms and ARM64's lower capacity
+is an explicit topology decision rather than a runner-dependent green skip.
+The macOS native sanitizer and Linux TSan cells similarly require three credits
+and fail closed. macOS sanitizer cells execute 100 semantic concurrency rounds
+with deterministic barriers. Windows executes the bounded
+`arena_backpressure_deadline` case under MSVC ASan instead of the deeply
+threaded full probe. Every native sanitizer also loads the instrumented
+extension through its sanitizer-first launcher and runs all four fuzz targets.
+External process-tree watchdogs bound the platform probes and every standalone
+fuzz campaign; the TSan extension suite uses a bounded watchdog per test domain.
+
+In parallel with the other two shards, `memory-parquet` records one reader
+scaling measurement for each installed wheel before its functional tests. The
+versioned policy in `benchmarks/readers/linear_scaling_budget.json` is evaluated once,
 without pass-on-one-lucky-retry behavior; an exceeded slope or absolute latency
 budget emits a warning and remains visible in the JSON report rather than
 turning variable hosted-runner timing into a correctness result. Fixture
@@ -300,9 +325,9 @@ generation, public conversions, report structure, source provenance, and wheel
 identity remain blocking. The report records the commit, platform, package
 version, and SHA-256 of the native extension, and isolated Python verifies that
 the loaded extension matches the declared wheel. The reader measurement and
-threading smoke run before pytest in `io-pipeline` and `concurrency`, respectively, while
-`memory-parquet` performs the Parquet certificate. A regression therefore
-fails in its owning shard without serializing unrelated functional suites;
+threading smoke run before pytest in `memory-parquet` and `concurrency`,
+respectively, while `memory-parquet` also performs the Parquet certificate. A
+regression therefore fails in its owning shard without serializing unrelated functional suites;
 timing changes remain comparable evidence instead of a flaky release gate.
 
 The shared build action pins cibuildwheel and abi3audit. The PEP 517 build
@@ -311,6 +336,17 @@ Ninja 1.13.0, and scikit-build-core 0.11.6, with Make fallback disabled. After
 cibuildwheel emits each repaired wheel, CI runs `abi3audit --strict` explicitly
 as a blocking gate. This preserves the upstream stable-ABI check while avoiding
 its hidden cold-runner download of `virtualenv.pyz` from release hosting.
+
+Each wheel artifact also carries a provenance-bound native certificate over the
+wheel and extension digests. The verifier parses the binary rather than trusting
+the tag: Linux must be an x86-64 ELF shared object, each macOS wheel a thin
+Mach-O bundle for its declared architecture with exactly the macOS 11.0
+deployment floor, and Windows an AMD64 PE32+ DLL with ASLR/DEP flags. The
+Windows certificate additionally requires the reviewed runtime-DLL inventory
+and digests, closes imports to Python, approved system libraries, and those
+bundled runtimes, and binds the reviewed compiler/SDK policy. The terminal gate
+requires exactly one matching certificate for each of the four platform wheels
+and re-derives it from the downloaded bytes.
 
 ### Packaging, dependencies, and security
 
@@ -324,6 +360,20 @@ verifies that all six matrices succeeded, and only then validates the
 five-file release set and creates the publication manifest. A failed source or
 unrelated validation entry therefore prevents assembly.
 
+The source task byte-compares two clean builds and compares the sdist member
+set with the NUL-delimited `git ls-files` inventory after applying the explicit
+repository-only exclusions. Missing release-eligible tracked files and extra
+members are rejected; the only accepted extras are the six named
+build-generated metadata files (`PKG-INFO` plus five
+`src/schema_sanitizer.egg-info/*` entries). Its downstream wheel is rebuilt
+with the pip cache disabled, preventing a previous local build from satisfying
+the check.
+Every wheel must contain exactly one `_core_abi3` extension, declare the same
+tags in its filename and `WHEEL` metadata, set `Root-Is-Purelib: false`, and
+carry one `RECORD` row for every member with the exact SHA-256 digest and size.
+The release-set check then requires the exact `cp311-abi3` and platform-tag
+inventory rather than accepting a merely installable archive.
+
 Downstream installation exercises `core` and every published runtime extra:
 `pyarrow`, `pandas`, `polars`, `duckdb`, `gcs`, `s3`, `azure`, `bigquery`,
 `cloud`, and `all`. Its isolated environments resolve through
@@ -333,16 +383,32 @@ a new release. The dependency audit resolves runtime, build-system, CI-tool,
 and every optional requirement together, then audits each CI lock as its own
 environment. Mutually exclusive exact pins are never flattened into an
 installation that CI does not actually create. Bandit covers Python
-sources. `detect-secrets` scans tracked repository files without
-credential-verification network calls; only byte-exact fuzz payloads are
-excluded because their full tree is enforced separately by
-`check_fuzz_corpus.py` and its SHA-256 manifest.
+sources and release-authority helpers at low severity and above. A repository
+contract fixes the small reviewed `# nosec` allowlist, so a new suppression or
+a new low-severity finding is blocking. `detect-secrets` scans tracked files
+without credential-verification network calls. Textual CSV, JSON, and XML fuzz
+regressions remain in that scan; only binary Parquet, invalid-UTF-8, and
+content-addressed archive payloads are excluded because their full byte tree is
+enforced separately by `check_fuzz_corpus.py` and its SHA-256 manifest.
 
-The native coverage reports do not currently impose a numerical percentage
-floor. Their value is line/branch visibility across three contexts, alongside
-hard pass/fail results from the native tests, fuzz campaigns, ASan, UBSan, and
-TSan. This distinction prevents a report-only metric from being mistaken for a
-release gate.
+Native LLVM coverage is an enforceable release gate, not a report-only metric.
+The certificate requires every production translation unit, authenticates the
+current native source-tree digest and GitHub commit/run/attempt, and compares
+integer covered/count fractions without rounded-pass behavior. Aggregate and
+high-risk source floors are:
+
+| Native scope | Regions | Functions | Lines | Branches |
+|---|---:|---:|---:|---:|
+| All production sources | 40% | 60% | 39% | 28% |
+| JSON text frontend | 40% | 47% | 40% | 27% |
+| Secure read-only file | 77% | 99% | 66% | 49% |
+| Memory budget | 60% | 99% | 71% | 44% |
+| Memory pool | 69% | 71% | 64% | 49% |
+| Operation task arena | 39% | 53% | 42% | 24% |
+
+The native job still renders per-context and combined reports for diagnosis.
+Only its compact canonical certificate is retained and independently rebuilt
+against the checked-out source policy by `validation-gate`.
 
 Python coverage is combined only after the regular, adversarial, and integration
 data files all exist as the exact expected regular-file set. Strict combination
@@ -362,6 +428,15 @@ select Xcode 16.4, SDK 15.5, and its exact AppleClang release; Windows release
 builds select VS 2022/v143 and verify the generated CMake cache. Missing or
 changed toolchains therefore fail before their output can become release
 evidence.
+
+Every sanitizer workload finishes by serializing its exact runtime options,
+suppression policy, platform identity, and watchdog evidence into a canonical
+run certificate bound to the GitHub commit, run, and attempt. Across the four
+platform sanitizer entries and the TSan entry, the gate requires exactly five
+run certificates and 12 raw watchdog certificates: no missing tuple, duplicate,
+renamed file, or unreviewed extra is accepted. The TSan policy has no broad
+non-instrumented-module suppression, and sanitizer subprocesses are terminated
+as process trees when an anti-hang deadline expires.
 
 ### Deterministic acceleration
 
@@ -419,39 +494,43 @@ particular duration.
 
 ## [Release evidence](#index)
 
-Only files needed to transport or publish a release are uploaded. Every upload
-fails if its expected files are absent, has an explicit retention period, and
-replaces the same owned artifact name on rerun, then retries once after a
-transport failure; an exhausted retry is still blocking.
-Platform tests, the terminal validation gate, PyPI reconciliation, and the
+Release material and compact evidence needed to independently close the final
+gate are uploaded. Every upload fails if its expected files are absent, has an
+explicit retention period, and replaces the same owned artifact name on rerun,
+then retries once after a transport failure; an exhausted retry is still
+blocking. Platform tests, the terminal validation gate, PyPI reconciliation, and the
 manual publisher also retry exact downloads after removing only the
 corresponding possibly partial destination.
 
 | Artifact | Contents | Retention | Consumer |
 |---|---|---:|---|
-| `dist-wheels-PLATFORM` | One intermediate platform wheel. | 7 days | The three shard entries in the matching `platform-tests-PLATFORM` job, `validation-gate`, and delayed reruns. |
+| `dist-wheels-PLATFORM` (4) | One intermediate platform wheel and its native-payload certificate. | 7 days | The three shard entries in the matching `platform-tests-PLATFORM` job, `validation-gate`, and delayed reruns. |
+| `platform-test-evidence-PLATFORM-SHARD` (12) | Exact shard-specific runner, JUnit/timing, integrity, benchmark/certificate files, plus their outer content-addressed certificate. | 7 days | `validation-gate` and failure diagnosis. |
 | `source-distribution` | One validated intermediate sdist. | 7 days | `validation-gate` and delayed reruns. |
+| `native-coverage-certificate` | Aggregate and high-risk LLVM floors, translation-unit inventory, source digest, report digest, and run provenance. | 7 days | `validation-gate` and external audit. |
+| `sanitizer-certificate-OS-ARCH-SANITIZER` (5) | One run-policy certificate and its exact raw watchdog certificates. | 7 days | `validation-gate` and failure diagnosis. |
 | `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 7 days | PyPI reconciliation and external audit. |
 | `pypi-publish-distributions` | Only manifest-matched files absent from PyPI. | 7 days | The code-free OIDC publisher; omitted when PyPI already has the complete matching set. |
 
-Python and native coverage still execute their complete commands and gates.
-Their summaries are written to the logs rather than uploaded as archives.
-Platform JUnit, benchmark, certificate, and runner files likewise remain local
-to their owning job while their test output and inventory remain visible in the
-run. The four wheel-build jobs deliberately retain cibuildwheel's native GitHub
-Job Summary; repository actions do not write any other Job Summary.
+Python coverage and the full native HTML/raw reports remain in logs or the
+owning runner; the compact native certificate is retained. Platform JUnit,
+timing, benchmark, runner, Parquet, and integrity records are retained inside
+their exact per-shard artifacts. The four wheel-build jobs deliberately retain
+cibuildwheel's native GitHub Job Summary; repository actions do not write any
+other Job Summary.
 
-A canonical CI run retains exactly six artifacts: four platform wheels, one
-sdist, and the final auditable release set. A manual publication run adds one
-staged missing-package artifact only when publication is required. No workflow
-receives artifact-deletion permission, and no completed run is modified after
-it ends.
+A successful canonical CI run retains exactly 24 artifacts: four certified
+platform wheels, 12 platform-test evidence sets, one sdist, one native-coverage
+certificate, five sanitizer evidence sets, and the final auditable release set.
+A manual publication run adds one staged missing-package artifact only when
+publication is required. No workflow receives artifact-deletion permission,
+and no completed run is modified after it ends.
 
 The `source-distribution` validation entry builds and exercises the sdist while
 platform work is in flight. After every matrix succeeds, `validation-gate`
-downloads that immutable source artifact and the four intermediate wheels,
-then validates the five files as one set. Wheel and sdist builders derive
-`SOURCE_DATE_EPOCH` from the checked-out commit,
+downloads and verifies all validation evidence, then validates the immutable
+source artifact and four intermediate wheels as one release set. Wheel and
+sdist builders derive `SOURCE_DATE_EPOCH` from the checked-out commit,
 rather than the runner wall clock. The archive validator requires the canonical
 sdist gzip header and every tar member to encode that epoch. The source workload
 also builds twice from clean owned directories and byte-compares the sole output
@@ -492,7 +571,7 @@ authority:
 | `preflight` | Checks out the selected commit and validates the `main` ref and remote SHA, the requested version against `meta/VERSION`, the PyPI version state, and the explicit confirmation. An existing version is allowed to continue only to post-validation reconciliation. | Read-only Actions metadata and contents; no OIDC token. |
 | reusable `validation` | Executes the same `ci.yml` used by PRs and `main`. | Read-only contents and GitHub artifact writes; no OIDC token. |
 | `reconcile` | Checks out repository code, downloads `release-distributions`, revalidates the remote `main` SHA, verifies PyPI state against every manifest digest, and stages only missing files. If the matching release is already complete, it emits `publish_required=false` and no staging artifact. | Read-only contents and GitHub artifact writes; no OIDC token. |
-| `publish` | Has no checkout, Python setup, or repository-code execution. It runs only for `publish_required=true`, downloads `pypi-publish-distributions` by exact name, and its sole fixed shell step removes only `pypi-publish/` before a transport retry. Exact duplicates from an interrupted attempt are tolerated. | `id-token: write` only. No GitHub Environment is currently attached. |
+| `publish` | Has no checkout, Python setup, or repository-code execution. It runs only for `publish_required=true`, downloads `pypi-publish-distributions` by exact name, and its sole fixed shell step removes only `pypi-publish/` before a transport retry. Exact duplicates from an interrupted attempt are tolerated. | `id-token: write` only, behind the protected `pypi` GitHub Environment whose name is part of the Trusted Publisher identity. |
 | `verify` | Runs after publisher success, failure, or skip whenever reconciliation succeeded. It downloads the original `release-distributions`, requires all five unyanked filenames and SHA-256 digests, and cryptographically verifies at least one matching PyPI Publish attestation per file. | Read-only contents; no OIDC token. |
 | `release-gate` | Runs unconditionally and accepts only successful reconciliation and verification. It requires `publish=success` when `publish_required=true`, or `publish=skipped` when it is false. | No repository or package-index authority. |
 
@@ -553,11 +632,12 @@ security model:
 1. Protect `main` with a GitHub branch rule or ruleset that requires pull
    requests and the `CI / validation gate` status, restricts direct updates, and
    does not permit routine bypasses.
+1. Create a protected GitHub Environment named exactly `pypi`, restrict it to
+   `main`, and require the repository's release reviewers before deployment.
 1. Configure the `schema-sanitizer` project on PyPI with a Trusted Publisher
-   whose owner, repository, and workflow filename (`publish.yml`) exactly match
-   the current workflow identity. Leave its optional environment unset
-   (`environment: null`): the workflow does not currently use a GitHub
-   Environment. Do not add a PyPI token secret as a fallback.
+   whose owner, repository, workflow filename (`publish.yml`), and environment
+   name (`pypi`) exactly match the current workflow identity. Do not add a PyPI
+   token secret as a fallback.
 1. Restrict workflow-setting changes to repository administrators, and include
    changes to `.github/`, `meta/ci/`, packaging metadata, and this document in
    ownership review.
@@ -582,12 +662,12 @@ predicate, publisher, signature, commit, or ref conflict fails immediately.
 The verifier job has a 75-minute terminal timeout around those bounded reads
 and offline cryptographic verification against the pinned trust data.
 
-A protected GitHub Environment with required reviewers would add a useful
-human approval boundary. Introduce it only as one atomic administration and
-workflow change: create and protect the environment, add it to the final
-`publish` job, and update the PyPI Trusted Publisher to require the same exact
-environment name. Configuring only one side breaks OIDC publication; weakening
-permissions or adding a long-lived token is not an acceptable workaround.
+The protected `pypi` Environment is part of the publication identity rather
+than an optional pause. Its required reviewers, `main` deployment restriction,
+the final `publish` job, the offline provenance verifier, and the PyPI Trusted
+Publisher must retain the same exact environment name. Configuring only one
+side breaks OIDC publication; weakening permissions or adding a long-lived
+token is not an acceptable workaround.
 
 ## [Publication runbook](#index)
 
@@ -639,9 +719,9 @@ publisher job; otherwise the privileged job publishes only the staged missing
 files. In either case, the final verifier requires the complete remote digest
 set and one valid matching publish attestation per file. The unconditional
 `release-gate` then checks that publication succeeded exactly when
-reconciliation required it; this is the sole terminal release status. There is
-currently no GitHub Environment approval pause. Before dispatching, the
-operator should retain and audit after the run:
+reconciliation required it; this is the sole terminal release status. The
+protected `pypi` Environment supplies the final human approval pause. Before
+dispatching, the operator should retain and audit after the run:
 
 - the dispatch actor, commit, requested version, run ID, and attempt;
 - all six aggregate matrix results and the final `validation-gate` result;
@@ -730,11 +810,16 @@ with:
 ```bash
 python -m pip install -U build abi3audit==0.0.26 \
   cibuildwheel==4.2.0 packaging twine
+mkdir -p .work
+SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+export SOURCE_DATE_EPOCH
+git ls-files -z > .work/sdist-source-manifest
 python -m build --sdist --outdir dist
 python -m cibuildwheel --output-dir wheelhouse
 python -m abi3audit --strict --report wheelhouse/*.whl
 python -m twine check dist/* wheelhouse/*
-python meta/ci/release/check_distribution_contents.py dist/* wheelhouse/*
+python meta/ci/release/check_distribution_contents.py \
+  --source-manifest .work/sdist-source-manifest dist/*.tar.gz wheelhouse/*.whl
 ```
 
 A developer machine cannot certify the four-platform release set. In CI, the

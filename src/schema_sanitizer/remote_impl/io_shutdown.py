@@ -83,7 +83,8 @@ async def shutdown_remote_io(
     timeout = normalize_duration(
         timeout_seconds, name="remote I/O shutdown timeout", allow_zero=True
     )
-    assert timeout is not None
+    if timeout is None:
+        raise AssertionError("validated remote I/O shutdown timeout cannot be absent")
     deadline = loop.time() + timeout
     current = asyncio.current_task()
     pending = [task for task in asyncio.all_tasks() if task is not current]

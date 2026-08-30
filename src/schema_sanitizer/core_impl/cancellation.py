@@ -221,7 +221,8 @@ async def cancellable_async_sleep(seconds: float, *, stage: str) -> None:
     import asyncio
 
     normalized = normalize_duration(seconds, name=f"{stage} sleep duration", allow_zero=True)
-    assert normalized is not None
+    if normalized is None:
+        raise AssertionError("validated sleep duration cannot be absent")
     remaining = normalized
     while remaining > 0:
         check_operation_cancelled(stage=stage)
@@ -241,7 +242,8 @@ async def cancellable_async_sleep(seconds: float, *, stage: str) -> None:
 def cancellable_sleep(seconds: float, *, stage: str) -> None:
     """Block in short cancellable slices bounded by the active deadline."""
     normalized = normalize_duration(seconds, name=f"{stage} sleep duration", allow_zero=True)
-    assert normalized is not None
+    if normalized is None:
+        raise AssertionError("validated sleep duration cannot be absent")
     remaining = normalized
     while remaining > 0:
         check_operation_cancelled(stage=stage)
@@ -277,7 +279,8 @@ async def await_cancellable_future(future, *, stage: str, poll_seconds: float = 
             return await future
         remaining = None if token is None else token.remaining_seconds(poll_seconds)
         if remaining is not None and remaining <= 0:
-            assert token is not None
+            if token is None:
+                raise AssertionError("bounded cancellation wait requires a token")
             token.raise_if_cancelled(stage=stage)
         timeout = poll_seconds if remaining is None else max(0.001, remaining)
         done, _pending = await asyncio.wait(
