@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -643,6 +644,24 @@ def test_concurrency_probe_archive_repacking_is_safe_and_deterministic(
     assert "main(" in concurrency_assets.load_probe("layout/compact-queued-task-tsan.cc")
     with pytest.raises(ValueError, match="unsafe"):
         concurrency_assets.load_probe("../escape.cc")
+
+
+def test_concurrency_probe_archive_rejects_a_sanitized_raw_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Probe inventory validation uses the unsanitized central-directory name."""
+    name = "layout/probe.cc"
+    archive_path = tmp_path / "concurrency.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        member = zipfile.ZipInfo("placeholder")
+        member.filename = member.orig_filename = f"{name}\0hidden"
+        archive.writestr(member, b"int main() {}\n")
+    catalog = {"records": [{"probes": [name]}]}
+    monkeypatch.setattr(concurrency_assets, "PROBE_ARCHIVE", archive_path)
+    monkeypatch.setattr(concurrency_assets, "load_catalog", lambda: catalog)
+
+    with pytest.raises(ValueError, match="probe archive inventory differs"):
+        concurrency_assets._probe_bytes()
 
 
 def test_retained_benchmark_evidence_is_valid_json() -> None:

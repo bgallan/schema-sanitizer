@@ -80,12 +80,12 @@ def _archive_inputs(
             if len(members) > MAX_ARCHIVE_INPUTS:
                 _record_error(errors, f"fuzz archive has too many inputs: {path}")
                 return []
-            names = [member.filename for member in members]
+            names = [member.orig_filename for member in members]
             if names != sorted(names) or len(names) != len(set(names)):
                 _record_error(errors, f"fuzz archive members must be unique and sorted: {path}")
             total_bytes = 0
             for member in members:
-                name = member.filename
+                name = member.orig_filename
                 mode = member.external_attr >> 16
                 invalid_name = not is_content_addressed_name(name) or "/" in name or "\\" in name
                 if invalid_name or member.is_dir() or stat.S_ISLNK(mode) or member.flag_bits & 0x1:

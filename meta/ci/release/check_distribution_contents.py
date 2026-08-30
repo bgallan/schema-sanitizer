@@ -174,7 +174,9 @@ def _members(path: Path) -> list[str]:
     if path.suffix == ".whl":
         with zipfile.ZipFile(path) as archive:
             members = archive.infolist()
-            _validate_member_names(path, [member.filename for member in members])
+            # ZipInfo.filename normalizes backslashes on Windows; the original
+            # central-directory spelling is the security boundary being checked.
+            _validate_member_names(path, [member.orig_filename for member in members])
             unsafe = sorted(
                 member.filename
                 for member in members

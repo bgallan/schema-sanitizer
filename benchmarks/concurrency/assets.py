@@ -132,11 +132,11 @@ def _probe_bytes() -> dict[str, bytes]:
     with zipfile.ZipFile(PROBE_ARCHIVE) as archive:
         members = archive.infolist()
         _require(
-            [member.filename for member in members] == expected,
+            [member.orig_filename for member in members] == expected,
             "probe archive inventory differs from the catalog",
         )
         for member in members:
-            name = member.filename
+            name = member.orig_filename
             mode = member.external_attr >> 16
             _require(_safe_probe_name(name), f"unsafe archived probe name: {name!r}")
             _require(

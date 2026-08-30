@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CHECKER = ROOT / "meta" / "ci" / "fuzz" / "check_fuzz_corpus.py"
 RUNNER = ROOT / "meta" / "ci" / "fuzz" / "run_fuzz_regressions.py"
 PACKER = ROOT / "meta" / "ci" / "fuzz" / "pack_fuzz_regressions.py"
+CORPUS_IO = ROOT / "meta" / "ci" / "fuzz" / "corpus_io.py"
 
 
 def _module(path: Path, name: str) -> ModuleType:
@@ -176,6 +177,22 @@ def test_fuzz_packer_is_deterministic_and_removes_only_hashed_files(tmp_path: Pa
         assert {name: packed.read(name) for name in packed.namelist()} == expected
         assert all(info.create_system == 3 for info in packed.infolist())
         assert all(info.external_attr >> 16 == 0o100644 for info in packed.infolist())
+
+
+def test_fuzz_reader_rejects_a_raw_name_sanitized_by_zipfile(tmp_path: Path) -> None:
+    """Raw archive names cannot become valid only after ZIP sanitization."""
+    corpus_io = _module(CORPUS_IO, "fuzz_corpus_io_raw_names")
+    archive_path = tmp_path / "json.sha1.zip"
+    data = b"raw fuzz archive name"
+    canonical_name = hashlib.sha1(data, usedforsecurity=False).hexdigest()
+    raw_name = f"{canonical_name}\0hidden"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        member = zipfile.ZipInfo("placeholder", date_time=corpus_io.ARCHIVE_TIMESTAMP)
+        member.filename = member.orig_filename = raw_name
+        archive.writestr(member, data)
+
+    with pytest.raises(corpus_io.FuzzInputError, match="unsafe fuzz archive member"):
+        corpus_io._archive_inputs(archive_path, errors=None)
 
 
 def test_fuzz_packer_recovers_after_interrupted_loose_cleanup(

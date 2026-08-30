@@ -188,7 +188,13 @@ def test_archive_timestamp_check_rejects_runner_clock_drift(
 
 @pytest.mark.parametrize(
     "member_name",
-    ("../escape.py", "/absolute.py", "C:/windows.py", "package\\windows.py"),
+    (
+        "../escape.py",
+        "/absolute.py",
+        "C:/windows.py",
+        "package\\windows.py",
+        "package.py\0hidden.py",
+    ),
 )
 def test_distribution_validator_rejects_unsafe_member_names(
     member_name: str,
@@ -200,6 +206,9 @@ def test_distribution_validator_rejects_unsafe_member_names(
         member = zipfile.ZipInfo("placeholder")
         member.filename = member.orig_filename = member_name
         archive.writestr(member, b"unsafe")
+    with zipfile.ZipFile(wheel) as archive:
+        (member,) = archive.infolist()
+        assert member.orig_filename == member_name
 
     with pytest.raises(AssertionError, match="unsafe archive member names"):
         _load_validator().validate(wheel)
