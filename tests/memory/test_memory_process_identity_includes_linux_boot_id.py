@@ -16,6 +16,7 @@ from threading import Condition, Lock, RLock
 from typing import Any
 
 import pytest
+from _support.resource_fakes import module_os_with_pid
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -702,7 +703,7 @@ def test_staged_ownership_rejects_post_fork_use_before_lock(
 
     ownership = StagedResultOwnership()
     ownership._condition = ForbiddenLock()  # type: ignore[assignment]
-    monkeypatch.setattr(module.os, "getpid", lambda: ownership._pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(ownership._pid + 1))
     with pytest.raises(RuntimeError, match="after fork"):
         ownership.publish(object())
     with pytest.raises(RuntimeError, match="after fork"):
@@ -726,7 +727,7 @@ def test_shared_session_closer_skips_parent_lock_after_fork(
 
     closer = module.SharedDownloadSessionCloser(object(), object(), ())
     closer._lock = ForbiddenLock()
-    monkeypatch.setattr(module.os, "getpid", lambda: closer._pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(closer._pid + 1))
     assert closer.close(timeout_seconds=0.001)
 
 
@@ -747,7 +748,7 @@ def test_remote_prefetch_rejects_post_fork_admission_before_lock(
 
     iterator = _bare_remote_iterator(module)
     iterator._close_lock = ForbiddenLock()
-    monkeypatch.setattr(module.os, "getpid", lambda: iterator._pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(iterator._pid + 1))
     with pytest.raises(RuntimeError, match="after fork"):
         iterator._fill_prefetch_window()
     with pytest.raises(RuntimeError, match="after fork"):
@@ -807,7 +808,7 @@ def test_lookahead_worker_rejects_post_fork_use_before_lock(
     )
     executor.shutdown(wait=True)
     executor._lock = ForbiddenLock()
-    monkeypatch.setattr(module.os, "getpid", lambda: executor._pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(executor._pid + 1))
     with pytest.raises(RuntimeError, match="after fork"):
         executor.submit(lambda: None)
     executor.shutdown(wait=True)

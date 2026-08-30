@@ -137,6 +137,26 @@ def test_parquet_contract_runtime_suite_rejects_inconsistent_junit_summary(
     )
 
 
+def test_parquet_contract_runtime_suite_rejects_junit_entities(tmp_path: Path) -> None:
+    """JUnit evidence cannot define or expand attacker-controlled XML entities."""
+    from meta.ci.parquet.check_parquet_contract_runtime_suite import _load_junit_evidence
+
+    report_path = tmp_path / "pytest.xml"
+    report_path.write_text(
+        """<!DOCTYPE testsuites [<!ENTITY forged "test_forged">]>
+<testsuites><testsuite tests="1" failures="0" errors="0" skipped="0">
+<testcase classname="tests.parquet.test_runtime" name="&forged;" />
+</testsuite></testsuites>""",
+        encoding="utf-8",
+    )
+
+    evidence, reports = _load_junit_evidence(report_path)
+
+    assert evidence["satisfied"] is False
+    assert reports == []
+    assert any("not valid XML" in issue for issue in evidence["issues"])
+
+
 @pytest.mark.parametrize("missing_attribute", ["tests", "failures", "errors", "skipped"])
 def test_parquet_contract_runtime_suite_requires_complete_junit_summary(
     tmp_path: Path,
@@ -414,6 +434,25 @@ def test_parquet_contract_runtime_suite_group_execution_summary_matches_parametr
 
     assert summary["satisfied"] is True
     assert summary["passed_by_group"] == groups
+
+
+def test_parquet_contract_runtime_suite_requires_exact_selected_parameter_ids() -> None:
+    """An extra parameter suffix cannot impersonate an exact selected case."""
+    from meta.ci.parquet.check_parquet_contract_runtime_suite import (
+        _report_matches_selected_nodeid,
+    )
+
+    selected = "tests/parquet/test_runtime.py::test_contract[required-id]"
+
+    assert _report_matches_selected_nodeid(selected, selected) is True
+    assert _report_matches_selected_nodeid(f"{selected}[extra]", selected) is False
+    assert (
+        _report_matches_selected_nodeid(
+            "tests/parquet/test_runtime.py::test_contract[generated-id]",
+            "tests/parquet/test_runtime.py::test_contract",
+        )
+        is True
+    )
 
 
 def test_parquet_contract_runtime_suite_group_execution_summary_records_skips_and_failures() -> (

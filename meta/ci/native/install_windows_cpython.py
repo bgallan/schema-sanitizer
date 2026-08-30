@@ -17,20 +17,22 @@ import struct
 import sys
 import tempfile
 import time
-import urllib.request
 import zipfile
 from collections.abc import Callable, Sequence
+from http.client import HTTPException, HTTPSConnection
 from pathlib import Path, PurePosixPath
 
 import certifi
 
 PYTHON_VERSION = "3.11.9"
-PYTHON_PACKAGE_URL = "https://api.nuget.org/v3-flatcontainer/python/3.11.9/python.3.11.9.nupkg"
+PYTHON_PACKAGE_HOST = "api.nuget.org"
+PYTHON_PACKAGE_PATH = "/v3-flatcontainer/python/3.11.9/python.3.11.9.nupkg"
 MAX_ARCHIVE_MEMBERS = 10_000
 MAX_EXPANDED_BYTES = 1_073_741_824
 MAX_DOWNLOAD_BYTES = 268_435_456
 DOWNLOAD_ATTEMPTS = 5
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
+RETRYABLE_HTTP_STATUSES = frozenset({408, 429, *range(500, 600)})
 INVALID_WINDOWS_CHARACTERS = frozenset('<>:"|?*')
 RESERVED_WINDOWS_STEMS = frozenset(
     {"con", "prn", "aux", "nul"}
@@ -66,8 +68,8 @@ def verified_payload(path: Path, expected: str) -> bool:
     return not path.is_symlink() and path.is_file() and _sha256(path) == expected
 
 
-def download_verified(url: str, target: Path, expected: str) -> None:
-    """Download and atomically publish one digest-verified regular file."""
+def download_verified(target: Path, expected: str) -> None:
+    """Download the pinned package and atomically publish its verified bytes."""
     _require_sha256(expected)
     if target.parent.is_symlink() or not target.parent.is_dir():
         raise WindowsCpythonInstallError(f"download parent is unsafe: {target.parent}")
@@ -86,7 +88,19 @@ def download_verified(url: str, target: Path, expected: str) -> None:
         try:
             digest = hashlib.sha256()
             downloaded_bytes = 0
-            with urllib.request.urlopen(url, context=context, timeout=60) as response:
+            connection = HTTPSConnection(PYTHON_PACKAGE_HOST, context=context, timeout=60)
+            try:
+                connection.request(
+                    "GET",
+                    PYTHON_PACKAGE_PATH,
+                    headers={"Accept-Encoding": "identity"},
+                )
+                response = connection.getresponse()
+                if response.status != 200:
+                    message = f"CPython package download returned HTTP status {response.status}"
+                    if response.status in RETRYABLE_HTTP_STATUSES:
+                        raise OSError(message)
+                    raise WindowsCpythonInstallError(message)
                 with temporary.open("wb") as stream:
                     while chunk := response.read(DOWNLOAD_CHUNK_BYTES):
                         downloaded_bytes += len(chunk)
@@ -96,6 +110,8 @@ def download_verified(url: str, target: Path, expected: str) -> None:
                             )
                         digest.update(chunk)
                         stream.write(chunk)
+            finally:
+                connection.close()
             actual = digest.hexdigest()
             if actual != expected:
                 raise WindowsCpythonInstallError(
@@ -105,7 +121,7 @@ def download_verified(url: str, target: Path, expected: str) -> None:
             return
         except WindowsCpythonInstallError:
             raise
-        except OSError:
+        except (HTTPException, OSError):
             if attempt + 1 == DOWNLOAD_ATTEMPTS:
                 raise
             time.sleep(2**attempt)
@@ -114,11 +130,11 @@ def download_verified(url: str, target: Path, expected: str) -> None:
     raise AssertionError("bounded download loop terminated without a result")
 
 
-def ensure_verified_archive(path: Path, url: str, expected: str) -> None:
+def ensure_verified_archive(path: Path, expected: str) -> None:
     """Reuse an exact cached package or replace it with a verified download."""
     if verified_payload(path, expected):
         return
-    download_verified(url, path, expected)
+    download_verified(path, expected)
     if not verified_payload(path, expected):
         raise WindowsCpythonInstallError(f"CPython package was not installed safely: {path}")
 
@@ -192,8 +208,8 @@ def _validated_archive_members(archive: zipfile.ZipFile) -> list[tuple[zipfile.Z
         kinds[key] = is_directory
         inventory.append((member, Path(*path.parts)))
 
-    for _member, path in inventory:
-        for parent in path.parents:
+    for _member, relative in inventory:
+        for parent in relative.parents:
             if parent == Path("."):
                 continue
             parent_kind = kinds.get(parent.as_posix().casefold())
@@ -341,7 +357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     workspace = Path.cwd().resolve()
     archive_path = _workspace_archive(workspace)
-    ensure_verified_archive(archive_path, PYTHON_PACKAGE_URL, arguments.sha256)
+    ensure_verified_archive(archive_path, arguments.sha256)
 
     from cibuildwheel.util.file import CIBW_CACHE_PATH
 

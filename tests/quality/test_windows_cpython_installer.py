@@ -7,10 +7,12 @@ identity, failure rollback, and atomic publication without launching a Windows b
 from __future__ import annotations
 
 import hashlib
+import ssl
 import stat
 import struct
 import zipfile
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from cibuildwheel.util import file as cibuildwheel_file
@@ -51,6 +53,125 @@ def _accept_runtime(executable: Path) -> None:
     assert installer._sha256(executable) == hashlib.sha256(_amd64_pe()).hexdigest()
 
 
+def test_downloader_uses_only_the_pinned_https_origin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The downloader requests the exact package path over verified HTTPS."""
+    payload = b"digest-pinned-package"
+    response = MagicMock()
+    response.status = 200
+    response.read.side_effect = [payload, b""]
+    connection = MagicMock()
+    connection.getresponse.return_value = response
+    observed_contexts: list[ssl.SSLContext] = []
+
+    def connect(
+        host: str,
+        *,
+        context: ssl.SSLContext,
+        timeout: int,
+    ) -> MagicMock:
+        """Return the controlled HTTPS connection after checking its origin."""
+        assert host == installer.PYTHON_PACKAGE_HOST
+        assert timeout == 60
+        observed_contexts.append(context)
+        return connection
+
+    monkeypatch.setattr(installer, "HTTPSConnection", connect)
+    target = tmp_path / "python.nupkg"
+
+    installer.download_verified(
+        target,
+        hashlib.sha256(payload).hexdigest(),
+    )
+
+    assert target.read_bytes() == payload
+    assert len(observed_contexts) == 1
+    assert observed_contexts[0].check_hostname is True
+    assert observed_contexts[0].verify_mode == ssl.CERT_REQUIRED
+    connection.request.assert_called_once_with(
+        "GET",
+        installer.PYTHON_PACKAGE_PATH,
+        headers={"Accept-Encoding": "identity"},
+    )
+    connection.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("status", [302, 404])
+def test_downloader_rejects_redirects_and_permanent_http_errors_without_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    """The fixed endpoint cannot redirect or trigger futile client-error retries."""
+    response = MagicMock(status=status)
+    connection = MagicMock()
+    connection.getresponse.return_value = response
+    factory = MagicMock(return_value=connection)
+    sleep = MagicMock()
+    monkeypatch.setattr(installer, "HTTPSConnection", factory)
+    monkeypatch.setattr(installer.time, "sleep", sleep)
+    target = tmp_path / "python.nupkg"
+
+    with pytest.raises(installer.WindowsCpythonInstallError, match=f"HTTP status {status}"):
+        installer.download_verified(target, hashlib.sha256(b"payload").hexdigest())
+
+    factory.assert_called_once()
+    sleep.assert_not_called()
+    connection.close.assert_called_once_with()
+    assert not target.exists()
+
+
+def test_downloader_retries_transient_http_status_then_publishes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bounded retry recovers from a transient server error without partial output."""
+    payload = b"retry-success"
+    unavailable_response = MagicMock(status=503)
+    unavailable = MagicMock()
+    unavailable.getresponse.return_value = unavailable_response
+    successful_response = MagicMock(status=200)
+    successful_response.read.side_effect = [payload, b""]
+    successful = MagicMock()
+    successful.getresponse.return_value = successful_response
+    factory = MagicMock(side_effect=[unavailable, successful])
+    sleep = MagicMock()
+    monkeypatch.setattr(installer, "HTTPSConnection", factory)
+    monkeypatch.setattr(installer.time, "sleep", sleep)
+    target = tmp_path / "python.nupkg"
+
+    installer.download_verified(target, hashlib.sha256(payload).hexdigest())
+
+    assert target.read_bytes() == payload
+    assert factory.call_count == 2
+    sleep.assert_called_once_with(1)
+    unavailable.close.assert_called_once_with()
+    successful.close.assert_called_once_with()
+
+
+def test_downloader_rejects_an_oversized_stream_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The streamed byte ceiling removes every oversized temporary download."""
+    response = MagicMock(status=200)
+    response.read.return_value = b"oversized"
+    connection = MagicMock()
+    connection.getresponse.return_value = response
+    monkeypatch.setattr(installer, "HTTPSConnection", MagicMock(return_value=connection))
+    monkeypatch.setattr(installer, "MAX_DOWNLOAD_BYTES", 4)
+    target = tmp_path / "python.nupkg"
+
+    with pytest.raises(installer.WindowsCpythonInstallError, match="byte limit"):
+        installer.download_verified(target, hashlib.sha256(b"oversized").hexdigest())
+
+    connection.close.assert_called_once_with()
+    assert not target.exists()
+    assert not list(tmp_path.glob(".python.nupkg.*.download"))
+
+
 def test_verified_archive_is_published_only_after_candidate_certification(tmp_path: Path) -> None:
     """A complete certified tree atomically replaces an owned partial installation."""
     archive = tmp_path / "python.nupkg"
@@ -88,7 +209,7 @@ def test_cli_emits_only_the_certified_executable_path(
         """Route the CLI's owned cache lookup to the immutable fixture package."""
         return archive
 
-    def preserve_fixture(_path: Path, _url: str, _expected: str) -> None:
+    def preserve_fixture(_path: Path, _expected: str) -> None:
         """Keep the already verified fixture in place without producing output."""
 
     monkeypatch.setattr(installer, "_workspace_archive", fixture_archive)

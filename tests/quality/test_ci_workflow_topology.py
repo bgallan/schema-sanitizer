@@ -81,9 +81,9 @@ _TEST_PLATFORM_JOBS = tuple(
 )
 _PLATFORM_LOCK_NAMES = frozenset(
     """
-    aiohappyeyeballs aiohttp aiosignal attrs colorama duckdb frozenlist idna iniconfig multidict
-    numpy packaging pandas pip pluggy polars polars-runtime-32 propcache pyarrow pygments pytest
-    python-dateutil six typing-extensions tzdata yarl
+    aiohappyeyeballs aiohttp aiosignal attrs colorama defusedxml duckdb frozenlist idna iniconfig
+    multidict numpy packaging pandas pip pluggy polars polars-runtime-32 propcache pyarrow pygments
+    pytest python-dateutil six typing-extensions tzdata yarl
     """.split()
 )
 _BUILD_TOOL_LOCK_NAMES = frozenset(
@@ -1166,7 +1166,11 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
     assert "assert struct.calcsize('P') == 8" in build
     assert "assert sys.version_info[:3] == (3, 11, 9)" in build
     installer = (ROOT / "meta/ci/native/install_windows_cpython.py").read_text(encoding="utf-8")
-    assert "https://api.nuget.org/v3-flatcontainer/python/3.11.9/" in installer
+    assert 'PYTHON_PACKAGE_HOST = "api.nuget.org"' in installer
+    assert (
+        'PYTHON_PACKAGE_PATH = "/v3-flatcontainer/python/3.11.9/python.3.11.9.nupkg"' in installer
+    )
+    assert "HTTPSConnection(PYTHON_PACKAGE_HOST" in installer
     assert "from cibuildwheel.util.file import CIBW_CACHE_PATH" in installer
     assert "zipfile.ZipFile" in installer
     assert "duplicate or case-colliding archive member" in installer
@@ -1685,7 +1689,8 @@ def test_native_stress_and_functional_suites_form_an_explicit_partition() -> Non
     assert "-m native_stress" in stress
     assert "tests/concurrency/test_ordered_executor_completion_probe.py" in stress
     assert "-m 'not native_stress'" in functional
-    assert "--ignore" not in stress + functional
+    assert "--ignore" not in stress
+    assert functional.count("--ignore=") == 2
     assert "pytest-native-stress-${PLATFORM_ARTIFACT}.xml" in stress
     assert "pytest-native-stress-durations-${PLATFORM_ARTIFACT}.log" in stress
     assert "pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml" in functional
@@ -1791,11 +1796,24 @@ def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive()
         "tests/quality/test_fuzz_regression_runner.py::"
         "test_standalone_mutation_stream_matches_its_cross_library_golden"
     )
+    relocated_concurrency_tests = (
+        "tests/concurrency/test_concurrency_route_release_gate.py",
+        "tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py",
+    )
     assert quality_contracts.count("tests/quality") == 1
     assert cross_toolchain_quality_test in functional
     assert functional.count(cross_toolchain_quality_test) == 1
-    assert "if [[ \"${TEST_SHARD}\" == 'concurrency' ]]" in functional
+    assert "elif [[ \"${TEST_SHARD}\" == 'memory-parquet' ]]" in functional
     assert "test_paths+=(" in functional
+    concurrency_rebalance, memory_rebalance = functional.split(
+        "elif [[ \"${TEST_SHARD}\" == 'memory-parquet' ]]", 1
+    )
+    memory_rebalance = memory_rebalance.split("        fi", 1)[0]
+    assert cross_toolchain_quality_test in memory_rebalance
+    for test_path in relocated_concurrency_tests:
+        assert functional.count(test_path) == 2
+        assert f"--ignore={test_path}" in concurrency_rebalance
+        assert test_path in memory_rebalance
 
     for shard, domains in shard_domains.items():
         other_domains = set().union(
@@ -1805,7 +1823,14 @@ def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive()
     assert set().union(*shard_domains.values(), {"quality"}) == all_test_domains
     for domains in shard_domains.values():
         for domain in domains:
-            assert functional.count(f"tests/{domain}") == 1
+            assert (
+                len(
+                    re.findall(
+                        rf"^              tests/{re.escape(domain)}$", functional, re.MULTILINE
+                    )
+                )
+                == 1
+            )
     cells = {
         (platform["platform-name"], shard)
         for platform in _TEST_PLATFORM_JOBS
@@ -1920,8 +1945,8 @@ def test_linux_sanitizer_reuses_one_certified_cmake_graph(
         execute_certificate("STRING", wrong_compiler)
 
 
-def test_concurrency_shards_fail_closed_at_explicit_platform_cpu_minima() -> None:
-    """Three four-core platforms cover those contracts while ARM64 guarantees three cores."""
+def test_concurrency_workloads_fail_closed_at_explicit_platform_cpu_minima() -> None:
+    """Every shard owning concurrency tests enforces its platform CPU minimum."""
     minima = {
         platform["platform-name"]: platform["minimum-cpu-capacity"]
         for platform in _TEST_PLATFORM_JOBS
@@ -1929,7 +1954,7 @@ def test_concurrency_shards_fail_closed_at_explicit_platform_cpu_minima() -> Non
     preflight = next(
         step
         for step in _step_bodies(_action("test-platform-wheel"))
-        if "name: Require the declared concurrency CPU capacity" in step
+        if "name: Require the declared concurrency-workload CPU capacity" in step
     )
 
     assert minima == {
@@ -1943,7 +1968,7 @@ def test_concurrency_shards_fail_closed_at_explicit_platform_cpu_minima() -> Non
         "windows-amd64",
         "macos-x86_64",
     }
-    assert "if: inputs.shard == 'concurrency'" in preflight
+    assert "if: inputs.shard == 'concurrency' || inputs.shard == 'memory-parquet'" in preflight
     assert "native_core.execution_policy(ThreadingMode.MULTI.value, 512 << 20)[1]" in preflight
     assert "pressure_adjusted_target" not in preflight
     assert "if detected < minimum" in preflight

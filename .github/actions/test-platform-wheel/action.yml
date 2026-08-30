@@ -9,7 +9,7 @@ inputs:
     description: Short platform identifier used by evidence filenames.
     required: true
   minimum-cpu-capacity:
-    description: Minimum runnable CPU credits required by the concurrency shard.
+    description: Minimum runnable CPU credits required by concurrency workloads.
     required: true
   shard:
     description: Functional workload (concurrency, memory-parquet, or io-pipeline).
@@ -108,8 +108,8 @@ runs:
             raise SystemExit(f"native extension came from checkout, not wheel: {extension}")
         print(package.__version__, extension)
         PY
-    - name: Require the declared concurrency CPU capacity
-      if: inputs.shard == 'concurrency'
+    - name: Require the declared concurrency-workload CPU capacity
+      if: inputs.shard == 'concurrency' || inputs.shard == 'memory-parquet'
       env:
         MINIMUM_CPU_CAPACITY: ${{ inputs.minimum-cpu-capacity }}
       shell: bash
@@ -123,9 +123,9 @@ runs:
         detected = int(native_core.execution_policy(ThreadingMode.MULTI.value, 512 << 20)[1])
         if detected < minimum:
             raise SystemExit(
-                f"concurrency shard requires {minimum} CPU credits; detected {detected}"
+                f"concurrency workloads require {minimum} CPU credits; detected {detected}"
             )
-        print(f"concurrency shard CPU capacity: detected={detected}, required={minimum}")
+        print(f"concurrency-workload CPU capacity: detected={detected}, required={minimum}")
         PY
     - name: Record runner CPU environment
       env:
@@ -225,8 +225,16 @@ runs:
             exit 2
             ;;
         esac
+        pytest_args=()
         if [[ "${TEST_SHARD}" == 'concurrency' ]]; then
+          pytest_args+=(
+            --ignore=tests/concurrency/test_concurrency_route_release_gate.py
+            --ignore=tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py
+          )
+        elif [[ "${TEST_SHARD}" == 'memory-parquet' ]]; then
           test_paths+=(
+            tests/concurrency/test_concurrency_route_release_gate.py
+            tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py
             tests/quality/test_fuzz_regression_runner.py::test_standalone_mutation_stream_matches_its_cross_library_golden
           )
         fi
@@ -235,6 +243,7 @@ runs:
           --durations=50 \
           --durations-min=0.05 \
           --junitxml="artifacts/pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml" \
+          "${pytest_args[@]}" \
           "${test_paths[@]}" \
           2>&1 | tee "artifacts/pytest-durations-${PLATFORM_ARTIFACT}-${TEST_SHARD}.log"
     - name: Certify the Parquet runtime from functional evidence

@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
+from defusedxml import ElementTree as DefusedElementTree
+from defusedxml.common import DefusedXmlException
+
 from schema_sanitizer.adapters.parquet.status import (
     parquet_contract_runtime_readiness_status,
 )
@@ -165,7 +168,10 @@ def _validate_runtime_suite_selection(
 
 def _report_matches_selected_nodeid(report_nodeid: str, selected_nodeid: str) -> bool:
     """Return whether a pytest report belongs to a selected function nodeid."""
-    return report_nodeid == selected_nodeid or report_nodeid.startswith(f"{selected_nodeid}[")
+    if report_nodeid == selected_nodeid:
+        return True
+    function_nodeid = selected_nodeid.partition("::")[2]
+    return "[" not in function_nodeid and report_nodeid.startswith(f"{selected_nodeid}[")
 
 
 def _xml_local_name(tag: str) -> str:
@@ -232,8 +238,8 @@ def _load_junit_evidence(path: str | Path) -> tuple[dict[str, Any], list[dict[st
         issues.append(f"JUnit report does not exist: {source}")
     else:
         try:
-            root = ElementTree.parse(source).getroot()
-        except (ElementTree.ParseError, OSError) as exc:
+            root = DefusedElementTree.parse(source).getroot()
+        except (DefusedXmlException, ElementTree.ParseError, OSError) as exc:
             issues.append(f"JUnit report is not valid XML: {exc}")
         else:
             root_name = _xml_local_name(root.tag)

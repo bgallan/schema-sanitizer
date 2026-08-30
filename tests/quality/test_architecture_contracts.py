@@ -148,25 +148,88 @@ def test_test_modules_are_domain_partitioned_and_import_safe() -> None:
 
 
 def test_tests_do_not_mutate_process_global_platform_identity() -> None:
-    """Platform branch tests patch module-owned seams rather than stdlib ``os.name``."""
+    """Platform and fork tests patch module seams rather than process-global ``os`` state."""
+    protected_attributes = {"getpid", "name"}
     violations: dict[str, list[int]] = {}
+
     for path in sorted((ROOT / "tests").rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        os_aliases = {
+            alias.asname or alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+            if alias.name == "os"
+        }
+
+        def is_os_reference(node: ast.expr) -> bool:
+            """Return whether an expression resolves to shared stdlib ``os`` state."""
+            return (isinstance(node, ast.Name) and node.id in os_aliases) or (
+                isinstance(node, ast.Attribute) and node.attr == "os"
+            )
+
+        def record(node: ast.AST) -> None:
+            """Record one forbidden mutation in the current test module."""
+            violations.setdefault(path.relative_to(ROOT).as_posix(), []).append(node.lineno)
+
         for node in ast.walk(tree):
-            if not (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "setattr"
-                and len(node.args) >= 2
-                and isinstance(node.args[1], ast.Constant)
-                and node.args[1].value == "name"
-            ):
+            if isinstance(node, ast.Call):
+                is_setattr = (isinstance(node.func, ast.Name) and node.func.id == "setattr") or (
+                    isinstance(node.func, ast.Attribute) and node.func.attr == "setattr"
+                )
+                is_patch_object = (
+                    isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "object"
+                    and (
+                        (isinstance(node.func.value, ast.Name) and node.func.value.id == "patch")
+                        or (
+                            isinstance(node.func.value, ast.Attribute)
+                            and node.func.value.attr == "patch"
+                        )
+                    )
+                )
+                if (
+                    (is_setattr or is_patch_object)
+                    and len(node.args) >= 2
+                    and is_os_reference(node.args[0])
+                    and isinstance(node.args[1], ast.Constant)
+                    and node.args[1].value in protected_attributes
+                ):
+                    record(node)
+                    continue
+                is_string_patch = (isinstance(node.func, ast.Name) and node.func.id == "patch") or (
+                    isinstance(node.func, ast.Attribute) and node.func.attr == "patch"
+                )
+                if (
+                    is_string_patch
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)
+                    and any(
+                        node.args[0].value == f"os.{attribute}"
+                        or node.args[0].value.endswith(f".os.{attribute}")
+                        for attribute in protected_attributes
+                    )
+                ):
+                    record(node)
                 continue
-            target = node.args[0]
-            if (isinstance(target, ast.Name) and target.id == "os") or (
-                isinstance(target, ast.Attribute) and target.attr == "os"
-            ):
-                violations.setdefault(path.relative_to(ROOT).as_posix(), []).append(node.lineno)
+
+            targets: list[ast.expr] = []
+            if isinstance(node, ast.Assign):
+                targets.extend(node.targets)
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                targets.append(node.target)
+            elif isinstance(node, ast.Delete):
+                targets.extend(node.targets)
+            for target in targets:
+                if any(
+                    isinstance(candidate, ast.Attribute)
+                    and candidate.attr in protected_attributes
+                    and is_os_reference(candidate.value)
+                    for candidate in ast.walk(target)
+                ):
+                    record(node)
+                    break
 
     assert violations == {}
 

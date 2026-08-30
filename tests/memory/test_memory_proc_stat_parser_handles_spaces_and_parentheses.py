@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.resource_fakes import module_os_with_pid
 from _support.synchronization import join_thread_or_fail
 
 _NATIVE_STUB_MODULES = (
@@ -367,6 +368,6 @@ def test_remote_provider_rejects_child_before_touching_resources(
         remaining_manifest=None,
     )
     parent_pid = provider._pid
-    monkeypatch.setattr(remote_provider.os, "getpid", lambda: parent_pid + 1)
+    monkeypatch.setattr(remote_provider, "os", module_os_with_pid(parent_pid + 1))
     with pytest.raises(RuntimeError, match="cannot be reused after fork"):
         provider.next_sources()

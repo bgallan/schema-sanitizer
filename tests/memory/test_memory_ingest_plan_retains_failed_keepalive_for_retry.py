@@ -10,6 +10,7 @@ import os
 from types import SimpleNamespace
 
 import pytest
+from _support.resource_fakes import module_os_with_pid
 
 
 class _FailOnceClose:
@@ -229,7 +230,7 @@ def test_schema_cache_replaces_inherited_lock_without_touching_it(
     old_lock = cache._lock
     old_lock.acquire()
     try:
-        monkeypatch.setattr(module.os, "getpid", lambda: cache._pid + 1)
+        monkeypatch.setattr(module, "os", module_os_with_pid(cache._pid + 1))
         assert cache.get_by_object(schema) is None
         assert cache._lock is not old_lock
         assert cache._by_object_id == {}
@@ -308,7 +309,7 @@ def test_result_finalizer_does_not_close_parent_owners_after_fork(
     owner = _CloseCounter()
     result = module.Result(SimpleNamespace(diagnostics=None), clean_data=None)
     result._resource_owner = owner
-    monkeypatch.setattr(module.os, "getpid", lambda: result._pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(result._pid + 1))
 
     result.__del__()
 
@@ -323,7 +324,7 @@ def test_execution_context_rejects_direct_child_reuse(
     from schema_sanitizer.api_impl import execution_context as module
 
     context = module.ExecutionContext()
-    monkeypatch.setattr(module.os, "getpid", lambda: context._pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(context._pid + 1))
 
     with pytest.raises(RuntimeError, match="cannot be reused after fork"):
         context.memory_stats()
@@ -340,7 +341,7 @@ def test_execution_context_pool_replaces_inherited_context(
     replacement = object()
     pool._ctx = inherited
     parent_pid = pool._pid
-    monkeypatch.setattr(module.os, "getpid", lambda: parent_pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(parent_pid + 1))
     monkeypatch.setattr(module, "ExecutionContext", lambda: replacement)
 
     assert pool.get() is replacement
@@ -396,7 +397,7 @@ def test_execution_context_pool_replaces_held_parent_lock(
     inherited_lock.acquire()
     parent_pid = pool._pid
     replacement = object()
-    monkeypatch.setattr(module.os, "getpid", lambda: parent_pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(parent_pid + 1))
     monkeypatch.setattr(module, "ExecutionContext", lambda: replacement)
     try:
         assert pool.get() is replacement
@@ -681,7 +682,7 @@ def test_remote_manifest_rejects_child_before_inherited_lock(
     manifest._pid = parent_pid
     manifest._prefetch_lock = Lock()
     manifest._prefetch_lock.acquire()
-    monkeypatch.setattr(module.os, "getpid", lambda: parent_pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(parent_pid + 1))
     try:
         with pytest.raises(RuntimeError, match="cannot be reused after fork"):
             manifest.take_prefetched_chunks()

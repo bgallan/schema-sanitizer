@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _support.resource_fakes import module_os_with_pid
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
@@ -259,7 +260,7 @@ def test_parquet_stream_owner_has_real_fork_identity_guard(
     owner = module._ParquetStreamKeepaliveOwner()
     original_pid = owner._pid
     deferred: list[tuple[int, object]] = []
-    monkeypatch.setattr(module.os, "getpid", lambda: original_pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(original_pid + 1))
     monkeypatch.setattr(
         module,
         "defer_prepared_finalizer_cleanup",

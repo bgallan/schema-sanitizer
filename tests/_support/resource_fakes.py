@@ -1,12 +1,26 @@
-"""Provide small strict resource owners for lifecycle and finalization tests.
+"""Provide strict process and resource fakes for lifecycle and finalization tests.
 
-The fakes expose exact capsule, lease, and callback protocols while recording releases and
-injected failures.
+The helpers isolate simulated process identity to one imported module, expose exact capsule,
+lease, and callback protocols, and record releases or injected failures.
 """
 
 from __future__ import annotations
 
+import os
+from types import SimpleNamespace
 from typing import Any
+
+
+def module_os_with_pid(pid: int) -> SimpleNamespace:
+    """Return a module-local ``os`` facade with one controlled process ID."""
+    namespace = vars(os).copy()
+
+    def controlled_getpid() -> int:
+        """Return the process ID selected by the owning test."""
+        return pid
+
+    namespace["getpid"] = controlled_getpid
+    return SimpleNamespace(**namespace)
 
 
 class CapsuleStream:

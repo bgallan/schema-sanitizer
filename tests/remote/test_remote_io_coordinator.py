@@ -307,6 +307,7 @@ def test_terminal_publication_racing_host_retirement_keeps_its_registry_root(
     dispatches: list[tuple[Callable[[int], None], int]] = []
     callback_calls: list[int] = []
     publication_attempted = threading.Event()
+    publication_committed = threading.Event()
     publishers: list[threading.Thread] = []
 
     def withhold_dispatch(
@@ -332,6 +333,22 @@ def test_terminal_publication_racing_host_retirement_keeps_its_registry_root(
     future = coordinator.submit(operation)
     owner = getattr(future, "_schema_sanitizer_remote_submission")
     assert future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) == 1
+    real_drain = coordinator._drain_terminal_callback_work
+    drain_calls = 0
+
+    def synchronize_retirement_drain(deadline: float) -> None:
+        """Make the post-retirement drain observe the racing publication."""
+        nonlocal drain_calls
+        drain_calls += 1
+        if drain_calls == 2:
+            assert publication_committed.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+        real_drain(deadline)
+
+    monkeypatch.setattr(
+        coordinator,
+        "_drain_terminal_callback_work",
+        synchronize_retirement_drain,
+    )
 
     real_cancel_retry = module.cancel_retry
     publication_started = False
@@ -351,6 +368,7 @@ def test_terminal_publication_racing_host_retirement_keeps_its_registry_root(
                     callback_calls.append(threading.get_ident())
 
                 owner.add_terminal_callback(terminal_cleanup)
+                publication_committed.set()
 
             publisher = threading.Thread(
                 target=publish,
@@ -376,7 +394,6 @@ def test_terminal_publication_racing_host_retirement_keeps_its_registry_root(
 
     retry_drain_started = threading.Event()
     retry_errors: list[BaseException] = []
-    real_drain = coordinator._drain_terminal_callback_work
 
     def observed_retry_drain(deadline: float) -> None:
         """Expose when the retry close is waiting on the retained callback."""
