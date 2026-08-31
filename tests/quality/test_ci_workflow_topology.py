@@ -1218,25 +1218,36 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
         < build.index("name: Certify the Windows release toolchain")
         < build.index("python -m abi3audit")
     )
-    assert "shopt -s nullglob" in build
-    assert "caches=(.work/build/*/CMakeCache.txt)" in build
-    assert 'cache="${caches[0]}"' in build
-    assert '[[ ! -f "${cache}" || -L "${cache}" ]]' in build
-    assert "find .work/build -type f -name CMakeCache.txt" not in build
+    certifier = (ROOT / "meta/ci/native/certify_windows_toolchain.py").read_text(encoding="utf-8")
     for cache_entry in (
-        "CMAKE_PROJECT_NAME:STATIC=schema_sanitizer",
-        "CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022",
-        "CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files/Microsoft Visual Studio/2022/Enterprise",
-        "CMAKE_GENERATOR_PLATFORM:INTERNAL=x64",
-        "CMAKE_GENERATOR_TOOLSET:INTERNAL=v143,host=x64",
+        '"CMAKE_PROJECT_NAME": ("STATIC", "schema_sanitizer")',
+        '"CMAKE_GENERATOR": ("INTERNAL", policy["generator"])',
+        '"CMAKE_GENERATOR_INSTANCE": ("INTERNAL", policy["generator_instance"])',
+        '"CMAKE_GENERATOR_PLATFORM": ("INTERNAL", "x64")',
+        '"CMAKE_GENERATOR_TOOLSET": ("INTERNAL", policy["toolset"])',
     ):
-        assert cache_entry in build
+        assert cache_entry in certifier
+    certification = build.split("- name: Certify the Windows release toolchain", 1)[1].split(
+        "- name:", 1
+    )[0]
+    assert (
+        certification.count(
+            "python meta/ci/native/certify_windows_toolchain.py .work/build .work/cibuildwheel.log"
+        )
+        == 1
+    )
+    assert "grep -F -- '-- Selecting Windows SDK version" not in certification
+    assert "compiler identification" not in certification
+    assert "Check for working" not in certification
+    assert "CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION" not in certification
     assert '-G "Visual Studio 17 2022" -A x64 -T v143,host=x64' in sanitizer
 
 
 def test_windows_action_pins_match_canonical_toolchain_policy() -> None:
     """Every Windows action pin agrees with the canonical reviewed policy."""
     build = _action("build-platform-wheel")
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    environment = pyproject["tool"]["cibuildwheel"]["windows"]["environment"]
     policy_path = ROOT / "meta/ci/native/windows-release-toolchain.json"
     serialized = policy_path.read_text(encoding="utf-8")
     policy = json.loads(serialized)
@@ -1251,17 +1262,21 @@ def test_windows_action_pins_match_canonical_toolchain_policy() -> None:
         return matches[0]
 
     action_pins = {
-        "compiler_version": exactly_one(r"-- The CXX compiler identification is MSVC ([0-9.]+)"),
-        "generator": exactly_one(r"'CMAKE_GENERATOR:INTERNAL=([^']+)'"),
-        "generator_instance": exactly_one(r"'CMAKE_GENERATOR_INSTANCE:INTERNAL=([^']+)'"),
+        "generator_instance": exactly_one(r"vs_root='([^']+)'"),
         "redistributable_version": exactly_one(
             r"""\[\[ "\$\{redist_version\}" == '([^']+)' \]\]"""
         ),
-        "sdk_version": exactly_one(r"-- Selecting Windows SDK version ([0-9.]+) "),
-        "toolset": exactly_one(r"'CMAKE_GENERATOR_TOOLSET:INTERNAL=([^']+)'"),
+        "sdk_version": exactly_one(r"sdk_root='[^']+/Lib/([^']+)'"),
         "vc_tools_version": exactly_one(r"""\[\[ "\$\{tools_version\}" == '([^']+)' \]\]"""),
     }
     assert action_pins == {name: policy[name] for name in action_pins}
+    assert environment == {
+        "CMAKE_BUILD_PARALLEL_LEVEL": "1",
+        "CMAKE_GENERATOR": policy["generator"],
+        "CMAKE_GENERATOR_INSTANCE": policy["generator_instance"],
+        "CMAKE_GENERATOR_PLATFORM": "x64",
+        "CMAKE_GENERATOR_TOOLSET": policy["toolset"],
+    }
 
 
 def test_composite_actions_reject_unknown_platform_and_sanitizer_tuples() -> None:
@@ -2218,7 +2233,10 @@ def test_build_parallelism_is_positive_bounded_and_generator_aware(
     assert build.count("unset CMAKE_BUILD_PARALLEL_LEVEL") == 1
     assert "CIBW_ENVIRONMENT_WINDOWS" not in build
     assert "CIBW_CONFIG_SETTINGS_WINDOWS" not in build
-    assert "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES:STRING=auto" in build
+    windows_certifier = (ROOT / "meta/ci/native/certify_windows_toolchain.py").read_text(
+        encoding="utf-8"
+    )
+    assert '"SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES": ("STRING", "auto")' in windows_certifier
     for action in (platform_sanitizer, thread_sanitizer):
         assert "bounded_build_parallelism" in action
         assert "CMAKE_BUILD_PARALLEL_LEVEL" in action

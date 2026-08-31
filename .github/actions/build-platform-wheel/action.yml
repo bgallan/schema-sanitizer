@@ -216,68 +216,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        shopt -s nullglob
-        caches=(.work/build/*/CMakeCache.txt)
-        if [[ "${#caches[@]}" -ne 1 ]]; then
-          echo "Expected exactly one root Windows CMake cache, found ${#caches[@]}" >&2
-          for candidate in "${caches[@]}"; do
-            printf '  %s\n' "${candidate}" >&2
-          done
-          exit 2
-        fi
-        cache="${caches[0]}"
-        if [[ ! -f "${cache}" || -L "${cache}" ]]; then
-          echo "Authoritative Windows CMake cache is missing or unsafe: ${cache}" >&2
-          exit 2
-        fi
-        expected=(
-          'CMAKE_PROJECT_NAME:STATIC=schema_sanitizer'
-          'CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022'
-          'CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files/Microsoft Visual Studio/2022/Enterprise'
-          'CMAKE_GENERATOR_PLATFORM:INTERNAL=x64'
-          'CMAKE_GENERATOR_TOOLSET:INTERNAL=v143,host=x64'
-          'SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES:STRING=auto'
-        )
-        for entry in "${expected[@]}"; do
-          grep -Fx -- "${entry}" "${cache}" >/dev/null || {
-            echo "Windows release toolchain mismatch: missing '${entry}' in ${cache}" >&2
-            exit 2
-          }
-        done
-        grep -F -- '-- The CXX compiler identification is MSVC 19.44.35228.0' \
-          .work/cibuildwheel.log >/dev/null || {
-          echo 'Windows compiler version is not the reviewed MSVC 19.44.35228.0' >&2
-          exit 2
-        }
-        grep -F -- '-- Selecting Windows SDK version 10.0.26100.0 ' \
-          .work/cibuildwheel.log >/dev/null || {
-          echo 'Windows SDK version is not the reviewed 10.0.26100.0' >&2
-          exit 2
-        }
-        python - "${cache}" <<'PY'
-        import sys
-        from pathlib import Path
-        values = {}
-        for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
-            key_and_type, separator, value = line.partition("=")
-            key, type_separator, _cache_type = key_and_type.partition(":")
-            if separator and type_separator:
-                values[key] = value.replace("\\", "/")
-        expected_compiler = (
-            "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/"
-            "MSVC/14.44.35207/bin/Hostx64/x64/cl.exe"
-        )
-        for key in ("CMAKE_C_COMPILER", "CMAKE_CXX_COMPILER"):
-            if values.get(key) != expected_compiler:
-                raise SystemExit(
-                    f"Windows release {key} mismatch: {values.get(key)!r} != {expected_compiler!r}"
-                )
-        if values.get("CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION") != "10.0.26100.0":
-            raise SystemExit(
-                "Windows release SDK mismatch: "
-                f"{values.get('CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION')!r}"
-            )
-        PY
+        python meta/ci/native/certify_windows_toolchain.py .work/build .work/cibuildwheel.log
     - name: Audit the CPython stable ABI
       shell: bash
       run: |

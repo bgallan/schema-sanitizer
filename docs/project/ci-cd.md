@@ -427,9 +427,10 @@ tool can never print a successful no-Arrow result.
 Linux sanitizer setup installs exact Clang/LLVM 18.1.3 and GCC/G++ 14.2.0 apt
 revisions, then verifies both package and compiler identities. macOS builds
 select Xcode 16.4, SDK 15.5, and its exact AppleClang release; Windows release
-builds select VS 2022/v143 and verify the generated CMake cache. Missing or
-changed toolchains therefore fail before their output can become release
-evidence.
+builds select VS 2022/v143 and verify its persisted generator cache fields,
+generated C and C++ compiler metadata, pinned CMake producer, and sole reviewed
+SDK selection. Missing, ambiguous, or changed toolchains therefore fail before
+their output can become release evidence.
 
 Every sanitizer workload finishes by serializing its exact runtime options,
 suppression policy, platform identity, and watchdog evidence into a canonical

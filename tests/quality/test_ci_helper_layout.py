@@ -18,6 +18,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 CI_ROOT = ROOT / "meta" / "ci"
+WINDOWS_COMPILER = (
+    "C:/Program Files/Microsoft Visual Studio/2022/Enterprise/VC/Tools/"
+    "MSVC/14.44.35207/bin/Hostx64/x64/cl.exe"
+)
 
 OWNER_DIRECTORIES = {
     "fuzz",
@@ -38,6 +42,63 @@ def _load_ci_helper(relative_path: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _cmake_assignment(key: str, value: str) -> str:
+    """Render one representative CMake-generated assignment."""
+    encoded = value if value in {"1", "TRUE"} else f'"{value}"'
+    return f"set({key} {encoded})"
+
+
+def _windows_toolchain_tree(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
+    """Create one valid Visual Studio cache and generated compiler metadata pair."""
+    build_root = tmp_path / "build"
+    binary = build_root / "cp311-abi3-win_amd64"
+    metadata = binary / "CMakeFiles" / "4.3.4"
+    metadata.mkdir(parents=True)
+    cache = binary / "CMakeCache.txt"
+    cache.write_text(
+        "\r\n".join(
+            (
+                "# Representative Visual Studio cache without compiler cache entries.",
+                "CMAKE_PROJECT_NAME:STATIC=schema_sanitizer",
+                "CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022",
+                "CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files/Microsoft Visual Studio/2022/Enterprise",
+                "CMAKE_GENERATOR_PLATFORM:INTERNAL=x64",
+                "CMAKE_GENERATOR_TOOLSET:INTERNAL=v143,host=x64",
+                "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES:STRING=auto",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    log = tmp_path / "cibuildwheel.log"
+    log.write_text(
+        "*** scikit-build-core 0.11.6 using CMake 4.3.4 (wheel)\r\n"
+        "-- Selecting Windows SDK version 10.0.26100.0 to target Windows 10.0.20348.\r\n",
+        encoding="utf-8",
+    )
+    paths = {"cache": cache, "log": log}
+    for language in ("C", "CXX"):
+        prefix = f"CMAKE_{language}_"
+        values = {
+            f"{prefix}ABI_COMPILED": "TRUE",
+            f"{prefix}COMPILER": WINDOWS_COMPILER,
+            f"{prefix}COMPILER_ARCHITECTURE_ID": "x64",
+            f"{prefix}COMPILER_ID": "MSVC",
+            f"{prefix}COMPILER_LOADED": "1",
+            f"{prefix}COMPILER_VERSION": "19.44.35228.0",
+            f"{prefix}COMPILER_WORKS": "TRUE",
+            f"{prefix}PLATFORM_ID": "Windows",
+            f"{prefix}SIZEOF_DATA_PTR": "8",
+        }
+        path = metadata / f"CMake{language}Compiler.cmake"
+        path.write_text(
+            "\n".join(_cmake_assignment(key, value) for key, value in values.items()) + "\n",
+            encoding="utf-8",
+        )
+        paths[language] = path
+    return build_root, paths
 
 
 def test_ci_helpers_are_grouped_by_owner() -> None:
@@ -213,6 +274,213 @@ def test_retired_source_zip_pipeline_stays_absent() -> None:
     }
 
     assert not any(path.name in retired for path in CI_ROOT.rglob("*"))
+
+
+def test_windows_toolchain_certificate_accepts_visual_studio_generated_metadata(
+    tmp_path: Path,
+) -> None:
+    """A valid VS tree needs no C or CXX compiler entries in CMakeCache."""
+    helper = _load_ci_helper("native/certify_windows_toolchain.py")
+    build_root, paths = _windows_toolchain_tree(tmp_path)
+
+    assert "CMAKE_C_COMPILER:" not in paths["cache"].read_text(encoding="utf-8")
+    assert helper.certify_windows_toolchain(build_root, paths["log"]) == paths["cache"].parent
+
+
+@pytest.mark.parametrize(
+    ("entry", "replacement"),
+    (
+        ("CMAKE_PROJECT_NAME:STATIC=schema_sanitizer", "CMAKE_PROJECT_NAME:STATIC=other"),
+        (
+            "CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022",
+            "CMAKE_GENERATOR:INTERNAL=Ninja",
+        ),
+        (
+            "CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files/Microsoft Visual Studio/2022/Enterprise",
+            "CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/unreviewed",
+        ),
+        ("CMAKE_GENERATOR_PLATFORM:INTERNAL=x64", "CMAKE_GENERATOR_PLATFORM:INTERNAL=ARM64"),
+        (
+            "CMAKE_GENERATOR_TOOLSET:INTERNAL=v143,host=x64",
+            "CMAKE_GENERATOR_TOOLSET:INTERNAL=ClangCL",
+        ),
+        (
+            "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES:STRING=auto",
+            "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES:STRING=1",
+        ),
+    ),
+)
+def test_windows_toolchain_certificate_rejects_cache_mismatches(
+    tmp_path: Path, entry: str, replacement: str
+) -> None:
+    """Every persisted Visual Studio cache constraint remains exact."""
+    helper = _load_ci_helper("native/certify_windows_toolchain.py")
+    build_root, paths = _windows_toolchain_tree(tmp_path)
+    cache = paths["cache"]
+    cache.write_text(
+        cache.read_text(encoding="utf-8").replace(entry, replacement), encoding="utf-8"
+    )
+
+    with pytest.raises(AssertionError, match=entry.partition(":")[0]):
+        helper.certify_windows_toolchain(build_root, paths["log"])
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected", "replacement"),
+    (
+        ("COMPILER", WINDOWS_COMPILER, "C:/unreviewed/cl.exe"),
+        ("COMPILER_ID", "MSVC", "Clang"),
+        ("COMPILER_VERSION", "19.44.35228.0", "19.45.0"),
+        ("PLATFORM_ID", "Windows", "Linux"),
+        ("COMPILER_ARCHITECTURE_ID", "x64", "ARM64"),
+        ("COMPILER_LOADED", "1", "0"),
+        ("COMPILER_WORKS", "TRUE", "FALSE"),
+        ("ABI_COMPILED", "TRUE", "FALSE"),
+        ("SIZEOF_DATA_PTR", "8", "4"),
+    ),
+)
+@pytest.mark.parametrize("language", ("C", "CXX"))
+def test_windows_toolchain_certificate_rejects_compiler_metadata_mismatches(
+    tmp_path: Path, language: str, suffix: str, expected: str, replacement: str
+) -> None:
+    """Both languages fail closed on identity, target, or probe corruption."""
+    helper = _load_ci_helper("native/certify_windows_toolchain.py")
+    build_root, paths = _windows_toolchain_tree(tmp_path)
+    key = f"CMAKE_{language}_{suffix}"
+    metadata = paths[language]
+    content = metadata.read_text(encoding="utf-8")
+    content = content.replace(_cmake_assignment(key, expected), _cmake_assignment(key, replacement))
+    metadata.write_text(content, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match=key):
+        helper.certify_windows_toolchain(build_root, paths["log"])
+
+
+def test_windows_toolchain_certificate_rejects_ambiguous_or_split_metadata(
+    tmp_path: Path,
+) -> None:
+    """Missing, duplicate, and cross-version language metadata cannot certify."""
+    helper = _load_ci_helper("native/certify_windows_toolchain.py")
+    build_root, paths = _windows_toolchain_tree(tmp_path)
+    cxx = paths["CXX"]
+    cxx.unlink()
+    with pytest.raises(AssertionError, match="exactly one generated CXX"):
+        helper.certify_windows_toolchain(build_root, paths["log"])
+
+    build_root, paths = _windows_toolchain_tree(tmp_path / "duplicate")
+    duplicate = paths["C"].parents[1] / "4.3.5" / paths["C"].name
+    duplicate.parent.mkdir()
+    duplicate.write_text(paths["C"].read_text(encoding="utf-8"), encoding="utf-8")
+    with pytest.raises(AssertionError, match="exactly one generated C compiler"):
+        helper.certify_windows_toolchain(build_root, paths["log"])
+
+    build_root, paths = _windows_toolchain_tree(tmp_path / "split")
+    split = paths["CXX"].parents[1] / "4.3.5" / paths["CXX"].name
+    split.parent.mkdir()
+    paths["CXX"].replace(split)
+    with pytest.raises(AssertionError, match="different CMake versions"):
+        helper.certify_windows_toolchain(build_root, paths["log"])
+
+
+def test_windows_toolchain_certificate_rejects_duplicates_and_symlinks(tmp_path: Path) -> None:
+    """Generated inputs must be unique regular files below the fresh build root."""
+    helper = _load_ci_helper("native/certify_windows_toolchain.py")
+    build_root, paths = _windows_toolchain_tree(tmp_path)
+    cache = paths["cache"]
+    cache.write_text(
+        cache.read_text(encoding="utf-8") + "CMAKE_GENERATOR:INTERNAL=duplicate\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="duplicate CMake cache entry"):
+        helper.certify_windows_toolchain(build_root, paths["log"])
+
+    build_root, paths = _windows_toolchain_tree(tmp_path / "assignment")
+    metadata = paths["C"]
+    metadata.write_text(
+        metadata.read_text(encoding="utf-8")
+        + _cmake_assignment("CMAKE_C_COMPILER", WINDOWS_COMPILER)
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="duplicate generated CMake assignment"):
+        helper.certify_windows_toolchain(build_root, paths["log"])
+
+    build_root, paths = _windows_toolchain_tree(tmp_path / "symlink")
+    metadata = paths["CXX"]
+    outside = tmp_path / "outside-CMakeCXXCompiler.cmake"
+    metadata.replace(outside)
+    metadata.symlink_to(outside)
+    with pytest.raises(AssertionError, match="crosses a symlink"):
+        helper.certify_windows_toolchain(build_root, paths["log"])
+
+
+def test_windows_toolchain_certificate_rejects_ambiguous_or_symlinked_root_cache(
+    tmp_path: Path,
+) -> None:
+    """Only one real root cache may serve as authoritative build evidence."""
+    helper = _load_ci_helper("native/certify_windows_toolchain.py")
+    build_root, paths = _windows_toolchain_tree(tmp_path)
+    duplicate = build_root / "unexpected" / "CMakeCache.txt"
+    duplicate.parent.mkdir()
+    duplicate.write_text(paths["cache"].read_text(encoding="utf-8"), encoding="utf-8")
+    with pytest.raises(AssertionError, match="exactly one root CMake cache"):
+        helper.certify_windows_toolchain(build_root, paths["log"])
+
+    build_root, paths = _windows_toolchain_tree(tmp_path / "symlink-cache")
+    cache = paths["cache"]
+    outside = tmp_path / "outside-CMakeCache.txt"
+    cache.replace(outside)
+    cache.symlink_to(outside)
+    with pytest.raises(AssertionError, match="crosses a symlink"):
+        helper.certify_windows_toolchain(build_root, paths["log"])
+
+
+def test_windows_toolchain_certificate_requires_the_pinned_cmake_producer(tmp_path: Path) -> None:
+    """Compiler metadata must come from the exact CMake release pinned for wheels."""
+    helper = _load_ci_helper("native/certify_windows_toolchain.py")
+    build_root, paths = _windows_toolchain_tree(tmp_path)
+    metadata = paths["C"].parent
+    metadata.rename(metadata.with_name("4.3.5"))
+
+    with pytest.raises(AssertionError, match="CMake"):
+        helper.certify_windows_toolchain(build_root, paths["log"])
+
+
+@pytest.mark.parametrize(
+    "sdk_lines",
+    (
+        "",
+        "-- Selecting Windows SDK version 10.0.22621.0 to target Windows 10.0.20348.\n",
+        (
+            "-- Selecting Windows SDK version 10.0.26100.0 to target Windows 10.0.20348.\n"
+            "-- Selecting Windows SDK version 10.0.22621.0 to target Windows 10.0.20348.\n"
+        ),
+        "-- Selecting Windows SDK version unknown to target Windows 10.0.20348.\n",
+    ),
+)
+def test_windows_toolchain_certificate_rejects_unreviewed_sdk_inventory(
+    tmp_path: Path, sdk_lines: str
+) -> None:
+    """SDK evidence must contain one well-formed selection of the reviewed version."""
+    helper = _load_ci_helper("native/certify_windows_toolchain.py")
+    build_root, paths = _windows_toolchain_tree(tmp_path)
+    paths["log"].write_text(sdk_lines, encoding="utf-8")
+
+    with pytest.raises(AssertionError, match="SDK"):
+        helper.certify_windows_toolchain(build_root, paths["log"])
+
+
+def test_windows_toolchain_certificate_rejects_a_symlinked_build_log(tmp_path: Path) -> None:
+    """SDK evidence must be read from the owned regular log, never a symlink."""
+    helper = _load_ci_helper("native/certify_windows_toolchain.py")
+    build_root, paths = _windows_toolchain_tree(tmp_path)
+    log = paths["log"]
+    outside = tmp_path / "outside-cibuildwheel.log"
+    log.replace(outside)
+    log.symlink_to(outside)
+
+    with pytest.raises(AssertionError, match="cibuildwheel log"):
+        helper.certify_windows_toolchain(build_root, log)
 
 
 def test_native_coverage_certificate_closes_inventory_floors_and_provenance(
