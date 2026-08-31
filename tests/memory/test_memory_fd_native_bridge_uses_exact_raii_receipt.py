@@ -237,9 +237,10 @@ def test_nonshared_external_runtime_path_prefers_exact_owner(
             self.receipt.amount = desired
             return self.receipt, desired
 
-        def resize_exact_permit_lease(self, lease: _Receipt, target: int) -> None:
+        def resize_exact_permit_lease(self, lease: _Receipt, target: int) -> int:
             """Resize the fake exact-permit lease to the requested amount."""
             lease.amount = target
+            return lease.amount
 
         def exact_permit_lease_amount(self, lease: _Receipt) -> int:
             """Return the exact permit amount tracked by the fake lease."""
@@ -285,12 +286,13 @@ def test_nonshared_external_runtime_shrink_retry_is_target_idempotent() -> None:
             """Return the exact permit amount tracked by the fake lease."""
             return lease.amount
 
-        def resize_exact_permit_lease(self, lease: _Receipt, target: int) -> None:
+        def resize_exact_permit_lease(self, lease: _Receipt, target: int) -> int:
             """Resize the fake exact-permit lease to the requested amount."""
             lease.amount = target
             if self.fail_after_resize:
                 self.fail_after_resize = False
                 raise KeyboardInterrupt("fault after external exact shrink commit")
+            return lease.amount
 
     native = Native()
     owner = module._ExactExternalRuntimeNativePermit(native, native.receipt)

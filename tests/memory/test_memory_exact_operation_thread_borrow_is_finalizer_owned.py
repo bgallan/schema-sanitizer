@@ -425,23 +425,30 @@ def test_shared_physical_claim_dropped_before_handoff_releases_exact_envelope() 
     class Native:
         supports_exact_permit_lease = True
 
+        def __init__(self) -> None:
+            """Track exact resize transitions made by the cleanup callback."""
+            self.resize_targets: list[int] = []
+
         def exact_permit_lease_amount(self, lease: Receipt) -> int:
             """Return the exact permit amount tracked by the fake lease."""
             return lease.amount
 
-        def resize_exact_permit_lease(self, lease: Receipt, target: int) -> None:
+        def resize_exact_permit_lease(self, lease: Receipt, target: int) -> int:
             """Resize the fake exact-permit lease to the requested amount."""
             if target > lease.amount:
                 raise ValueError("grow")
             lease.amount = target
+            self.resize_targets.append(target)
+            return lease.amount
 
     _reset_external(module)
     key = ("declared", ("exact-operation-thread-borrow-is-finalizer", "physical-handoff"))
     receipt = Receipt()
+    native = Native()
     entry = module._ExternalRuntimePoolCoordinatorEntry(
         runtime=None,
         runtime_key=key,
-        native=Native(),
+        native=native,
         native_lease=receipt,
         physical_amount=2,
         physical_claims={1: 2},
@@ -454,6 +461,7 @@ def test_shared_physical_claim_dropped_before_handoff_releases_exact_envelope() 
     gc.collect()
     module.drain_finalizer_cleanup()
     assert receipt.amount == 0
+    assert native.resize_targets == [0]
     assert module._EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS == 0
     assert key not in module._EXTERNAL_RUNTIME_POOL_COORDINATOR
 
