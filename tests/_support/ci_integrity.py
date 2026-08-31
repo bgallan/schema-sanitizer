@@ -256,6 +256,8 @@ _WINDOWS_MEMORY_NODEID_REASONS = {
     **{
         nodeid: frozenset({"requires POSIX fork"})
         for nodeid in (
+            "tests/memory/test_memory_cancel_linearizes_before_claimed_callback_starts.py::"
+            "test_after_fork_path_reset_never_acquires_inherited_owner_lock",
             "tests/memory/test_memory_external_runtime_construction_native_exception_rolls_back_standalone_claim.py::"
             "test_parquet_dataset_lifetime_lease_fails_before_inherited_lock_after_fork",
             "tests/memory/test_memory_external_runtime_shrink_partial_failure_keeps_finalizer_exact.py::"

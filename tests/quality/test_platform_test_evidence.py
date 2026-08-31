@@ -224,6 +224,13 @@ def test_platform_job_verifier_rejects_symlinked_evidence(tmp_path: Path) -> Non
         (
             "windows",
             "memory-parquet",
+            "tests/memory/test_memory_cancel_linearizes_before_claimed_callback_starts.py::"
+            "test_after_fork_path_reset_never_acquires_inherited_owner_lock",
+            "requires POSIX fork",
+        ),
+        (
+            "windows",
+            "memory-parquet",
             "tests/memory/test_memory_limit_enforcement.py::"
             "test_large_file_does_not_cause_file_sized_resident_memory_growth",
             "ru_maxrss byte conversion and allocator baseline are Linux-specific",

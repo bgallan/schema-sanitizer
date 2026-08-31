@@ -47,6 +47,18 @@ def test_governed_file_publication_failure_closes_owner_before_credit_release(
     before = module._python_governed_fds_opened()
     monkeypatch.setattr(module, "acquire_file_descriptors", lambda _amount: Lease())
     monkeypatch.setattr("builtins.open", lambda *_args, **_kwargs: stream)
+    # Keep accounting in the same synthetic domain as the fake stream and lease;
+    # a real native close without a real reservation is a protocol underflow.
+    monkeypatch.setattr(
+        module,
+        "record_physical_file_descriptors_opened",
+        lambda amount: events.append(f"descriptor.opened:{amount}"),
+    )
+    monkeypatch.setattr(
+        module,
+        "record_physical_file_descriptors_closed",
+        lambda amount: events.append(f"descriptor.closed:{amount}"),
+    )
 
     class PublicationFailure:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -58,7 +70,12 @@ def test_governed_file_publication_failure_closes_owner_before_credit_release(
         module.open_governed_file("ignored", "rb")
 
     assert stream.closed
-    assert events == ["stream.close", "lease.release"]
+    assert events == [
+        "descriptor.opened:1",
+        "stream.close",
+        "descriptor.closed:1",
+        "lease.release",
+    ]
     assert module._python_governed_fds_opened() == before
 
 

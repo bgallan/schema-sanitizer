@@ -172,7 +172,7 @@ def test_claim_publication_fsyncs_alias_removal(
     module.release_path_identity(identity)
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork required")
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
 def test_after_fork_path_reset_never_acquires_inherited_owner_lock(tmp_path: Path) -> None:
     """Verify after fork path reset never acquires inherited owner lock."""
     import schema_sanitizer.core_impl.path_identity as module

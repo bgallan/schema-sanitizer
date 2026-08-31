@@ -238,11 +238,14 @@ def test_claim_sweep_budget_counts_unrelated_entries(
     """Verify claim sweep budget counts unrelated entries."""
     import schema_sanitizer.core_impl.path_identity as module
 
+    events: list[str] = []
+
     class Lease:
         released = False
 
         def release(self) -> None:
             """Release the resource held by the lease test double."""
+            events.append("lease.release")
             self.released = True
 
     class Iterator:
@@ -268,6 +271,7 @@ def test_claim_sweep_budget_counts_unrelated_entries(
 
         def close(self) -> None:
             """Close the resources owned by the iterator test double."""
+            events.append("iterator.close")
             self.closed = True
 
     lease = Lease()
@@ -278,14 +282,33 @@ def test_claim_sweep_budget_counts_unrelated_entries(
     monkeypatch.setattr(module, "_CLAIM_SWEEP_ROOT", None)
     monkeypatch.setattr(module, "acquire_file_descriptors", lambda _n: lease)
     monkeypatch.setattr(module.os, "scandir", lambda _root: iterator)
+    # The iterator and lease are both synthetic, so keep their descriptor
+    # accounting synthetic and independent of ambient process-wide permits.
+    monkeypatch.setattr(
+        module,
+        "record_physical_file_descriptors_opened",
+        lambda amount: events.append(f"descriptor.opened:{amount}"),
+    )
+    monkeypatch.setattr(
+        module,
+        "record_physical_file_descriptors_closed",
+        lambda amount: events.append(f"descriptor.closed:{amount}"),
+    )
     root = Path("/virtual")
     module._sweep_external_claims(root, limit=3)
     assert iterator.index == 3
     assert not lease.released
+    assert events == ["descriptor.opened:1"]
     module._sweep_external_claims(root, limit=10)
     assert iterator.index == 10
     assert iterator.closed
     assert lease.released
+    assert events == [
+        "descriptor.opened:1",
+        "iterator.close",
+        "descriptor.closed:1",
+        "lease.release",
+    ]
 
 
 def test_published_claim_is_rolled_back_if_parent_fsync_fails(

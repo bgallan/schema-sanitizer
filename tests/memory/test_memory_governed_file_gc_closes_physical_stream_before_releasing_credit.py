@@ -48,12 +48,30 @@ def test_governed_file_gc_closes_physical_stream_before_releasing_credit(
     stream = Stream()
     monkeypatch.setattr(module, "acquire_file_descriptors", lambda _amount: Lease())
     monkeypatch.setattr("builtins.open", lambda *_args, **_kwargs: stream)
+    # The stream and lease are both synthetic, so their physical accounting must
+    # stay synthetic too; touching the native ledger without a real reservation
+    # would make this sequencing test depend on unrelated live permits.
+    monkeypatch.setattr(
+        module,
+        "record_physical_file_descriptors_opened",
+        lambda amount: events.append(f"descriptor.opened:{amount}"),
+    )
+    monkeypatch.setattr(
+        module,
+        "record_physical_file_descriptors_closed",
+        lambda amount: events.append(f"descriptor.closed:{amount}"),
+    )
 
     governed = module.open_governed_file("ignored", "rb")
     del governed
     gc.collect()
     drain_finalizer_cleanup()
-    assert events == ["stream.close", "lease.release"]
+    assert events == [
+        "descriptor.opened:1",
+        "stream.close",
+        "descriptor.closed:1",
+        "lease.release",
+    ]
     assert stream.closed
 
 
