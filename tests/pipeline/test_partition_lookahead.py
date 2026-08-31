@@ -392,7 +392,10 @@ def test_fixed_partition_timestamps_are_identical_across_modes(
                 "multi_threading": mode == "multi",
             },
         )
-        rows = [pq.read_table(plan.output_uri).to_pylist() for plan in mode_plans]
+        rows = [
+            pq.ParquetFile(plan.output_uri).read(use_threads=False).to_pylist()
+            for plan in mode_plans
+        ]
         drifts = [run.schema_drifts_json for run in result.completed_runs]
         return rows, [json.dumps(json.loads(value or "[]"), sort_keys=True) for value in drifts]
 

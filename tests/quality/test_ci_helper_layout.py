@@ -133,6 +133,77 @@ def test_sanitizer_watchdog_overrides_and_records_all_runtime_options(
         )
 
 
+def test_sanitizer_watchdog_uses_only_fixed_git_bash_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Windows Bash resolution ignores PATH, SystemRoot, and explicit shim paths."""
+    helper = _load_ci_helper("sanitizers/run_with_watchdog.py")
+    assert helper.WINDOWS_GIT_BASH.as_posix() == "C:/Program Files/Git/bin/bash.exe"
+
+    trusted = tmp_path / "Program Files" / "Git" / "bin" / "bash.exe"
+    ambient = tmp_path / "ambient" / "bash.exe"
+    system = tmp_path / "Windows" / "System32" / "bash.exe"
+    for executable in (trusted, ambient, system):
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"MZcontrolled-test-executable")
+        executable.chmod(0o700)
+    monkeypatch.setattr(helper, "WINDOWS_GIT_BASH", trusted)
+    monkeypatch.setenv("PATH", os.fspath(ambient.parent))
+    monkeypatch.setenv("SystemRoot", os.fspath(system.parents[1]))
+
+    logical = ["bash", "meta/ci/fuzz/run_fuzz_regressions.sh"]
+    execution = helper._execution_command(logical, windows=True)
+
+    assert execution == [
+        os.fspath(trusted.resolve()),
+        "meta/ci/fuzz/run_fuzz_regressions.sh",
+    ]
+    assert logical == ["bash", "meta/ci/fuzz/run_fuzz_regressions.sh"]
+    assert os.fspath(ambient) not in execution
+    assert os.fspath(system) not in execution
+    for forbidden in ("bash.exe", os.fspath(ambient), os.fspath(system)):
+        with pytest.raises(ValueError, match="logical 'bash' command token"):
+            helper._execution_command([forbidden, "controlled.sh"], windows=True)
+
+    symlink = tmp_path / "Program Files" / "Git" / "symlink" / "bash.exe"
+    symlink.parent.mkdir(parents=True)
+    symlink.symlink_to(ambient)
+    monkeypatch.setattr(helper, "WINDOWS_GIT_BASH", symlink)
+    with pytest.raises(RuntimeError, match="symlinked"):
+        helper._execution_command(logical, windows=True)
+
+
+def test_sanitizer_watchdog_records_logical_argv_after_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Evidence keeps portable logical argv while execution uses a resolved binary."""
+    helper = _load_ci_helper("sanitizers/run_with_watchdog.py")
+    logical = ["bash", "controlled-script.sh"]
+    resolved = [sys.executable, "-c", "pass"]
+    observed: list[list[str]] = []
+
+    def resolve(command: list[str]) -> list[str]:
+        """Record logical argv and substitute a harmless real executable."""
+        observed.append(list(command))
+        return resolved
+
+    monkeypatch.setattr(helper, "_execution_command", resolve)
+    certificate = tmp_path / "watchdog.json"
+    environment = {name: "" for name in helper.SANITIZER_ENVIRONMENT_NAMES}
+
+    status = helper.run_guarded(
+        logical,
+        timeout_seconds=10,
+        label="logical-command-test",
+        certificate=certificate,
+        sanitizer_environment=environment,
+    )
+
+    assert status == 0
+    assert observed == [logical]
+    assert json.loads(certificate.read_text(encoding="utf-8"))["command"] == logical
+
+
 def test_retired_source_zip_pipeline_stays_absent() -> None:
     """The obsolete ZIP chain must not return beside the canonical sdist flow."""
     retired = {
@@ -155,12 +226,17 @@ def test_native_coverage_certificate_closes_inventory_floors_and_provenance(
         for path in (ROOT / "cpp/src").rglob("*")
         if path.is_file() and path.suffix.lower() in helper.TRANSLATION_UNIT_SUFFIXES
     )
+    mapped_sources = [
+        path
+        for path in sources
+        if path.relative_to(ROOT).as_posix() not in helper.ZERO_REGION_TRANSLATION_UNITS
+    ]
     document = {
         "type": "llvm.coverage.json.export",
         "version": "2.0.1",
         "data": [
             {
-                "files": [{"filename": str(path), "summary": summaries} for path in sources],
+                "files": [{"filename": str(path), "summary": summaries} for path in mapped_sources],
                 "totals": summaries,
             }
         ],
@@ -201,23 +277,68 @@ def test_native_coverage_certificate_closes_inventory_floors_and_provenance(
         helper.verify_certificate(certificate, **options)
     helper.create_certificate(report, certificate, **options)
 
+    payload = json.loads(certificate.read_text(encoding="utf-8"))
+    payload["zero_region_translation_units"] = []
+    certificate.write_text(helper._canonical_json(payload), encoding="utf-8")
+    with pytest.raises(AssertionError, match="zero-region policy mismatch"):
+        helper.verify_certificate(certificate, **options)
+    helper.create_certificate(report, certificate, **options)
+
+    payload = json.loads(certificate.read_text(encoding="utf-8"))
+    payload["observed_translation_units"] += 1
+    certificate.write_text(helper._canonical_json(payload), encoding="utf-8")
+    with pytest.raises(AssertionError, match="observed translation-unit count"):
+        helper.verify_certificate(certificate, **options)
+    helper.create_certificate(report, certificate, **options)
+
+    native_sources = helper._native_source_files(ROOT / "cpp/src", ROOT)
+    assert any(source.endswith(".cc.inc") for source in native_sources)
+
     boundary = {
         metric: {"count": 20_001, "covered": 8_000, "percent": 40.0} for metric in helper.METRICS
     }
     with pytest.raises(AssertionError, match="native coverage floor failed"):
         helper._require_floor("rounding-boundary", boundary, {"regions": 40.0})
 
-    document["data"][0]["files"].pop()
+    omitted_entry = document["data"][0]["files"].pop()
     report.write_text(json.dumps(document), encoding="utf-8")
-    with pytest.raises(AssertionError, match="omits production translation units"):
+    with pytest.raises(AssertionError, match="translation-unit inventory mismatch"):
         helper.build_certificate(report, **options)
-    document["data"][0]["files"].append({"filename": str(sources[-1]), "summary": summaries})
+    document["data"][0]["files"].append(omitted_entry)
     document["data"][0]["totals"] = {
         metric: {"count": 1, "covered": 0, "percent": 0.0} for metric in helper.METRICS
     }
     report.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(AssertionError, match="native coverage floor failed"):
         helper.build_certificate(report, **options)
+
+
+def test_native_coverage_rejects_foreign_paths_and_source_tree_symlinks(tmp_path: Path) -> None:
+    """Foreign LLVM paths and unauthenticated linked sources fail closed."""
+    helper = _load_ci_helper("native/check_llvm_coverage.py")
+    repository = tmp_path / "repository"
+    source_root = repository / "cpp" / "src"
+    source_root.mkdir(parents=True)
+    (source_root / "owned.cc").write_text("int owned;\n", encoding="utf-8")
+    foreign = tmp_path / "foreign" / "cpp" / "src" / "owned.cc"
+
+    assert helper._repository_filename(str(source_root / "owned.cc"), repository) == (
+        "cpp/src/owned.cc"
+    )
+    assert helper._repository_filename(str(foreign), repository) is None
+
+    linked_file = source_root / "linked.hh"
+    linked_file.symlink_to(source_root / "owned.cc")
+    with pytest.raises(AssertionError, match="source tree contains a symlink"):
+        helper._native_source_files(source_root, repository)
+    linked_file.unlink()
+
+    external_directory = tmp_path / "external-sources"
+    external_directory.mkdir()
+    linked_directory = source_root / "linked-directory"
+    linked_directory.symlink_to(external_directory, target_is_directory=True)
+    with pytest.raises(AssertionError, match="source tree contains a symlink"):
+        helper._expected_sources(source_root, repository)
 
 
 def test_platform_wheel_certificate_rejects_binary_and_run_tampering(tmp_path: Path) -> None:

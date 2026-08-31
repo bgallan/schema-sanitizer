@@ -16,17 +16,64 @@ import subprocess  # nosec B404
 import sys
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Mapping, Sequence
 
 CERTIFICATE_FORMAT = "schema-sanitizer-sanitizer-watchdog-v1"
 TERMINATION_GRACE_SECONDS = 10
+WINDOWS_GIT_BASH = Path("C:/Program Files/Git/bin/bash.exe")
 SANITIZER_ENVIRONMENT_NAMES = (
     "ASAN_OPTIONS",
     "LSAN_OPTIONS",
     "TSAN_OPTIONS",
     "UBSAN_OPTIONS",
 )
+
+
+def _validated_windows_git_bash() -> Path:
+    """Return the fixed regular Git-for-Windows Bash executable."""
+    candidate = WINDOWS_GIT_BASH
+    git_root = candidate.parent.parent
+    bin_directory = candidate.parent
+    if not candidate.is_absolute():
+        raise RuntimeError(f"Git-for-Windows Bash path is not absolute: {candidate}")
+    if any(path.is_symlink() for path in (git_root, bin_directory, candidate)):
+        raise RuntimeError(f"Git-for-Windows Bash path is symlinked: {candidate}")
+    if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        raise RuntimeError(f"Git-for-Windows Bash is missing or not executable: {candidate}")
+    try:
+        resolved_root = git_root.resolve(strict=True)
+        resolved_bin = bin_directory.resolve(strict=True)
+        resolved = candidate.resolve(strict=True)
+        with resolved.open("rb") as executable:
+            magic = executable.read(2)
+    except OSError as error:
+        raise RuntimeError(f"Git-for-Windows Bash path is invalid: {candidate}") from error
+    if (
+        resolved_bin.parent != resolved_root
+        or resolved.parent != resolved_bin
+        or resolved.name.casefold() != "bash.exe"
+        or magic != b"MZ"
+    ):
+        raise RuntimeError(f"Git-for-Windows Bash executable is unsafe: {candidate}")
+    return resolved
+
+
+def _execution_command(command: Sequence[str], *, windows: bool | None = None) -> list[str]:
+    """Resolve Windows Bash without consulting ambient executable search paths."""
+    execution = list(command)
+    if not execution:
+        return execution
+    is_windows = os.name == "nt" if windows is None else windows
+    if not is_windows:
+        return execution
+    executable = execution[0]
+    if PureWindowsPath(executable).name.casefold() not in {"bash", "bash.exe"}:
+        return execution
+    if executable != "bash":
+        raise ValueError("Windows Bash must use the logical 'bash' command token")
+    execution[0] = os.fspath(_validated_windows_git_bash())
+    return execution
 
 
 def _canonical_json(payload: Mapping[str, Any]) -> str:
@@ -186,12 +233,14 @@ def run_guarded(
     """Run a child with exact sanitizer options and record bounded success."""
     if not command or not command[0]:
         raise ValueError("watchdog command must not be empty")
+    logical_command = list(command)
+    execution_command = _execution_command(logical_command)
     environment = _sanitizer_environment(tuple(sanitizer_environment.items()))
     child_environment = os.environ.copy()
     child_environment.update(environment)
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     process = subprocess.Popen(  # nosec B603
-        list(command),
+        execution_command,
         creationflags=creationflags,
         env=child_environment,
         start_new_session=os.name != "nt",
@@ -209,7 +258,7 @@ def run_guarded(
     if return_code != 0:
         return return_code
     evidence = {
-        "command": _portable_command(command),
+        "command": _portable_command(logical_command),
         "format": CERTIFICATE_FORMAT,
         "label": label,
         "platform": sys.platform,

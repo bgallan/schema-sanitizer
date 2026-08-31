@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Turn LLVM's native coverage export into an enforceable CI certificate.
 
-The checker proves that every production translation unit is represented, applies
-aggregate and high-risk source floors, binds the result to the exact source tree
-and workflow provenance, and emits canonical JSON that a later gate can verify.
+The checker proves that every code-mapped production translation unit is represented,
+authenticates the exact zero-region wrapper policy and complete native source tree,
+applies aggregate and high-risk floors, and emits provenance-bound canonical JSON.
 """
 
 from __future__ import annotations
@@ -18,9 +18,18 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-CERTIFICATE_FORMAT = "schema-sanitizer-native-coverage-v1"
+CERTIFICATE_FORMAT = "schema-sanitizer-native-coverage-v2"
 METRICS = ("regions", "functions", "lines", "branches")
 TRANSLATION_UNIT_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cxx"})
+NATIVE_SOURCE_SUFFIXES = frozenset(
+    {".c", ".cc", ".cpp", ".cxx", ".def", ".h", ".hh", ".hpp", ".hxx", ".inc"}
+)
+ZERO_REGION_TRANSLATION_UNITS = frozenset(
+    {
+        "cpp/src/internal/parquet/footer_reader/footer_reader.cc",
+        "cpp/src/internal/parquet/stream_writer/stream_writer.cc",
+    }
+)
 TOTAL_FLOORS = {
     "regions": 40.0,
     "functions": 60.0,
@@ -96,36 +105,67 @@ def _metric_summary(summary: Mapping[str, Any]) -> dict[str, dict[str, int | flo
 
 def _repository_filename(raw_filename: str, repository: Path) -> str | None:
     """Return a canonical repository path for one LLVM filename when owned."""
-    raw = Path(raw_filename)
+    owned_root = repository.resolve()
+    raw = Path(raw_filename.replace("\\", "/"))
+    candidate = raw if raw.is_absolute() else owned_root / raw
     try:
-        if raw.is_absolute():
-            return raw.resolve().relative_to(repository).as_posix()
+        return candidate.resolve().relative_to(owned_root).as_posix()
     except (OSError, ValueError):
-        pass
-    normalized = raw_filename.replace("\\", "/")
-    marker = "cpp/src/"
-    position = normalized.find(marker)
-    return normalized[position:] if position >= 0 else None
+        return None
+
+
+def _owned_source_files(source_root: Path) -> list[Path]:
+    """List regular source-tree files while rejecting every symlink or special entry."""
+    if source_root.is_symlink() or not source_root.is_dir():
+        raise AssertionError(f"native source root must be a directory: {source_root}")
+    files: list[Path] = []
+    pending = [source_root]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+            for entry in entries:
+                path = Path(entry.path)
+                if entry.is_symlink():
+                    raise AssertionError(f"native source tree contains a symlink: {path}")
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                elif entry.is_file(follow_symlinks=False):
+                    files.append(path)
+                else:
+                    raise AssertionError(f"native source tree contains a special entry: {path}")
+        except OSError as error:
+            raise AssertionError(f"native source tree is unreadable: {directory}") from error
+    return sorted(files)
 
 
 def _expected_sources(source_root: Path, repository: Path) -> list[str]:
     """Discover every production translation unit owned by the native build."""
-    if source_root.is_symlink() or not source_root.is_dir():
-        raise AssertionError(f"native source root must be a directory: {source_root}")
     sources = sorted(
         path.relative_to(repository).as_posix()
-        for path in source_root.rglob("*")
-        if path.is_file()
-        and not path.is_symlink()
-        and path.suffix.lower() in TRANSLATION_UNIT_SUFFIXES
+        for path in _owned_source_files(source_root)
+        if path.suffix.lower() in TRANSLATION_UNIT_SUFFIXES
     )
     if not sources:
         raise AssertionError(f"no native translation units found below {source_root}")
     return sources
 
 
+def _native_source_files(source_root: Path, repository: Path) -> list[str]:
+    """Discover every maintained native source, header, and implementation fragment."""
+    sources = sorted(
+        path.relative_to(repository).as_posix()
+        for path in _owned_source_files(source_root)
+        if path.suffix.lower() in NATIVE_SOURCE_SUFFIXES
+    )
+    if not sources:
+        raise AssertionError(f"no native source files found below {source_root}")
+    return sources
+
+
 def _source_tree_digest(repository: Path, sources: Iterable[str]) -> str:
-    """Hash canonical paths and bytes for all expected native sources."""
+    """Hash canonical paths and bytes for all maintained native source files."""
     digest = hashlib.sha256()
     for name in sources:
         encoded_name = name.encode("utf-8")
@@ -217,9 +257,17 @@ def build_certificate(
         observed[filename] = _metric_summary(summary)
 
     expected = _expected_sources(source_root, repository)
-    missing = sorted(set(expected) - set(observed))
-    if missing:
-        raise AssertionError(f"LLVM coverage omits production translation units: {missing[:20]}")
+    expected_set = set(expected)
+    if not ZERO_REGION_TRANSLATION_UNITS <= expected_set:
+        raise AssertionError("zero-region translation-unit policy references missing sources")
+    missing = expected_set - set(observed)
+    if missing != ZERO_REGION_TRANSLATION_UNITS:
+        raise AssertionError(
+            "LLVM coverage translation-unit inventory mismatch: "
+            f"expected zero-region omissions={sorted(ZERO_REGION_TRANSLATION_UNITS)!r}; "
+            f"actual omissions={sorted(missing)[:20]!r}"
+        )
+    native_sources = _native_source_files(source_root, repository)
     totals_raw = document.get("totals")
     if not isinstance(totals_raw, Mapping):
         raise AssertionError("LLVM coverage export omits aggregate totals")
@@ -237,18 +285,21 @@ def build_certificate(
     return {
         "critical_floors": CRITICAL_FLOORS,
         "critical_sources": critical,
+        "expected_source_files": len(native_sources),
         "expected_translation_units": len(expected),
         "format": CERTIFICATE_FORMAT,
         "observed_production_files": len(observed),
+        "observed_translation_units": len(expected_set & set(observed)),
         "provenance": {
             "git_sha": github_sha,
             "github_run_attempt": github_run_attempt,
             "github_run_id": github_run_id,
         },
         "report_sha256": hashlib.sha256(report.read_bytes()).hexdigest(),
-        "source_tree_sha256": _source_tree_digest(repository, expected),
+        "source_tree_sha256": _source_tree_digest(repository, native_sources),
         "total_floors": TOTAL_FLOORS,
         "totals": totals,
+        "zero_region_translation_units": sorted(ZERO_REGION_TRANSLATION_UNITS),
     }
 
 
@@ -295,14 +346,17 @@ def verify_certificate(
     if set(payload) != {
         "critical_floors",
         "critical_sources",
+        "expected_source_files",
         "expected_translation_units",
         "format",
         "observed_production_files",
+        "observed_translation_units",
         "provenance",
         "report_sha256",
         "source_tree_sha256",
         "total_floors",
         "totals",
+        "zero_region_translation_units",
     }:
         raise AssertionError("native coverage certificate schema mismatch")
     if (
@@ -311,16 +365,27 @@ def verify_certificate(
     ):
         raise AssertionError("native coverage certificate floor policy mismatch")
     expected = _expected_sources(source_root, repository)
+    expected_set = set(expected)
+    if not ZERO_REGION_TRANSLATION_UNITS <= expected_set:
+        raise AssertionError("zero-region translation-unit policy references missing sources")
+    native_sources = _native_source_files(source_root, repository)
+    if payload.get("expected_source_files") != len(native_sources):
+        raise AssertionError("native coverage source-file count mismatch")
     if payload.get("expected_translation_units") != len(expected):
         raise AssertionError("native coverage translation-unit count mismatch")
+    if payload.get("zero_region_translation_units") != sorted(ZERO_REGION_TRANSLATION_UNITS):
+        raise AssertionError("native coverage zero-region policy mismatch")
+    expected_observed_translation_units = len(expected) - len(ZERO_REGION_TRANSLATION_UNITS)
+    if payload.get("observed_translation_units") != expected_observed_translation_units:
+        raise AssertionError("native coverage observed translation-unit count is invalid")
     observed_count = payload.get("observed_production_files")
     if (
         not isinstance(observed_count, int)
         or isinstance(observed_count, bool)
-        or observed_count < len(expected)
+        or observed_count < expected_observed_translation_units
     ):
         raise AssertionError("native coverage observed-file count is invalid")
-    if payload.get("source_tree_sha256") != _source_tree_digest(repository, expected):
+    if payload.get("source_tree_sha256") != _source_tree_digest(repository, native_sources):
         raise AssertionError("native coverage source-tree digest mismatch")
     if (
         not isinstance(payload.get("report_sha256"), str)

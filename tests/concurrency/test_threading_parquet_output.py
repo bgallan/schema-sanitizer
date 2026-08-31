@@ -40,8 +40,8 @@ def _assert_logically_equal(left: Path, right: Path) -> None:
     # Keep third-party Arrow worker pools out of the native-writer TSan gate.
     # This test validates Schema-Sanitizer concurrency; PyArrow's reader is only
     # the logical oracle and must stay single-threaded here.
-    left_table = pq.read_table(left, use_threads=False)
-    right_table = pq.read_table(right, use_threads=False)
+    left_table = pq.ParquetFile(left).read(use_threads=False)
+    right_table = pq.ParquetFile(right).read(use_threads=False)
     assert left_table.schema == right_table.schema
     assert left_table.equals(right_table)
     assert left_table.to_pylist() == right_table.to_pylist()

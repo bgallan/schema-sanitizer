@@ -21,6 +21,11 @@ _PUBLIC_READER_REFERENCE_COMMIT_LINE = re.compile(
     r'^\s*"commit_sha"\s*:\s*"[0-9a-fA-F]{40}"\s*,?\s*$'
 )
 _PINNED_PRE_COMMIT_REVISION = re.compile(r"^\s+rev:\s+[0-9a-f]{40}\s+#\s+[^\s]+\s*$")
+_WINDOWS_RUNTIME_POLICY = "meta/ci/native/windows-release-toolchain.json"
+_WINDOWS_RUNTIME_DIGEST_LINE = re.compile(
+    r'^\s*"(?P<member>schema_sanitizer\.libs/[a-z0-9][a-z0-9_.-]*-[0-9a-f]{32}\.dll)"'
+    r'\s*:\s*"(?P<digest>[0-9a-f]{64})"\s*,?\s*$'
+)
 
 
 def _source_line(root: Path, filename: str, line_number: int | None) -> str:
@@ -80,6 +85,32 @@ def _is_pinned_pre_commit_revision(root: Path, filename: str, item: dict[str, An
     return _PINNED_PRE_COMMIT_REVISION.fullmatch(line) is not None
 
 
+def _is_public_windows_runtime_digest(root: Path, filename: str, item: dict[str, Any]) -> bool:
+    """Recognize canonical SHA-256 evidence for bundled Windows runtime DLLs."""
+    if item.get("type") != "Hex High Entropy String" or filename != _WINDOWS_RUNTIME_POLICY:
+        return False
+    match = _WINDOWS_RUNTIME_DIGEST_LINE.fullmatch(
+        _source_line(root, filename, item.get("line_number"))
+    )
+    if match is None:
+        return False
+    try:
+        serialized = (root / filename).read_text(encoding="utf-8")
+        payload = json.loads(serialized)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if serialized != json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n":
+        return False
+    runtimes = payload.get("wheel_runtime_dlls")
+    return (
+        payload.get("format") == "schema-sanitizer-windows-toolchain-v1"
+        and isinstance(runtimes, dict)
+        and runtimes.get(match.group("member")) == match.group("digest")
+    )
+
+
 def filter_findings(report: dict[str, Any], root: Path) -> dict[str, list[dict[str, Any]]]:
     """Return actionable findings from one detect-secrets JSON report."""
     findings: dict[str, list[dict[str, Any]]] = {}
@@ -92,6 +123,7 @@ def filter_findings(report: dict[str, Any], root: Path) -> dict[str, list[dict[s
             and not _is_public_fuzz_integrity_digest(root, filename, item)
             and not _is_public_reader_reference_commit(root, filename, item)
             and not _is_pinned_pre_commit_revision(root, filename, item)
+            and not _is_public_windows_runtime_digest(root, filename, item)
         ]
         if kept:
             findings[filename] = kept

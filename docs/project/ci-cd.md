@@ -392,8 +392,10 @@ content-addressed archive payloads are excluded because their full byte tree is
 enforced separately by `check_fuzz_corpus.py` and its SHA-256 manifest.
 
 Native LLVM coverage is an enforceable release gate, not a report-only metric.
-The certificate requires every production translation unit, authenticates the
-current native source-tree digest and GitHub commit/run/attempt, and compares
+The certificate requires every code-mapped production translation unit and an
+exact policy for the two include-only Parquet wrapper units whose executable
+regions LLVM attributes to their included fragments. It authenticates every
+native source/header/fragment plus the GitHub commit/run/attempt, and compares
 integer covered/count fractions without rounded-pass behavior. Aggregate and
 high-risk source floors are:
 

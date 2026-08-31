@@ -1234,6 +1234,36 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
     assert '-G "Visual Studio 17 2022" -A x64 -T v143,host=x64' in sanitizer
 
 
+def test_windows_action_pins_match_canonical_toolchain_policy() -> None:
+    """Every Windows action pin agrees with the canonical reviewed policy."""
+    build = _action("build-platform-wheel")
+    policy_path = ROOT / "meta/ci/native/windows-release-toolchain.json"
+    serialized = policy_path.read_text(encoding="utf-8")
+    policy = json.loads(serialized)
+
+    assert serialized == json.dumps(policy, indent=2, sort_keys=True) + "\n"
+    assert policy["redistributable_version"] == "14.44.35112"
+
+    def exactly_one(pattern: str) -> str:
+        """Return one regex capture from the Windows action definition."""
+        matches = re.findall(pattern, build)
+        assert len(matches) == 1, (pattern, matches)
+        return matches[0]
+
+    action_pins = {
+        "compiler_version": exactly_one(r"-- The CXX compiler identification is MSVC ([0-9.]+)"),
+        "generator": exactly_one(r"'CMAKE_GENERATOR:INTERNAL=([^']+)'"),
+        "generator_instance": exactly_one(r"'CMAKE_GENERATOR_INSTANCE:INTERNAL=([^']+)'"),
+        "redistributable_version": exactly_one(
+            r"""\[\[ "\$\{redist_version\}" == '([^']+)' \]\]"""
+        ),
+        "sdk_version": exactly_one(r"-- Selecting Windows SDK version ([0-9.]+) "),
+        "toolset": exactly_one(r"'CMAKE_GENERATOR_TOOLSET:INTERNAL=([^']+)'"),
+        "vc_tools_version": exactly_one(r"""\[\[ "\$\{tools_version\}" == '([^']+)' \]\]"""),
+    }
+    assert action_pins == {name: policy[name] for name in action_pins}
+
+
 def test_composite_actions_reject_unknown_platform_and_sanitizer_tuples() -> None:
     """Misspelled matrix inputs cannot silently skip platform-specific validation."""
     build = _action("build-platform-wheel")
@@ -2334,6 +2364,7 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
     assert "TSAN_OPTIONS: halt_on_error=1:history_size=7:second_deadlock_stack=1" in suite_step
 
     runner = (ROOT / "meta/ci/sanitizers/run_tsan_extension_suite.sh").read_text(encoding="utf-8")
+    domain_inventory = runner.rsplit("tests=(", 1)[1].split(")", 1)[0]
     for domain in (
         "test_threading_native_executor.py",
         "test_threading_inference.py",
@@ -2344,9 +2375,12 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
         "test_partition_lookahead.py",
         "test_csv_union_projection.py",
     ):
-        assert runner.count(domain) == 1
+        assert domain_inventory.count(domain) == 1
 
     assert "pytest_sessionfinish" in runner
+    assert 'pytest_args = ["-q", "--capture=no", sys.argv[2]]' in runner
+    assert runner.count("test_fixed_clock_parquet_input_fallback_equivalence") == 1
+    assert 'pytest_args.extend(["--deselect", _PYARROW_DATASET_FALLBACK])' in runner
     assert "domain_shutdown_grace_seconds" in runner
     assert "setsid" in runner
     assert '--timeout "${domain_timeout_seconds}"' in runner
@@ -2363,6 +2397,15 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
     assert "halt_on_error=1" in tsan_launcher
     assert "ignore_noninstrumented_modules" not in tsan_launcher
     assert "suppressions=" not in tsan_launcher
+
+    for relative_path in (
+        "tests/_support/threading_goldens.py",
+        "tests/concurrency/test_threading_parquet_output.py",
+        "tests/pipeline/test_partition_lookahead.py",
+    ):
+        oracle = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "ParquetFile" in oracle
+        assert "pq.read_table" not in oracle
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="process-group semantics are Linux-specific")

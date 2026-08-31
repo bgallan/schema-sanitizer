@@ -3,7 +3,7 @@
   "format": "schema-sanitizer-windows-toolchain-v1",
   "generator": "Visual Studio 17 2022",
   "generator_instance": "C:/Program Files/Microsoft Visual Studio/2022/Enterprise",
-  "redistributable_version": "14.44.35211",
+  "redistributable_version": "14.44.35112",
   "sdk_version": "10.0.26100.0",
   "toolset": "v143,host=x64",
   "vc_tools_version": "14.44.35207",

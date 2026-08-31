@@ -144,7 +144,7 @@ runs:
           echo "Unreviewed VS 2022 compiler tools: ${tools_version}" >&2
           exit 2
         }
-        [[ "${redist_version}" == '14.44.35211' ]] || {
+        [[ "${redist_version}" == '14.44.35112' ]] || {
           echo "Unreviewed VS 2022 redistributable: ${redist_version}" >&2
           exit 2
         }
