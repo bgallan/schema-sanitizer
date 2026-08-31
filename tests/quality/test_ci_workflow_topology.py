@@ -75,7 +75,6 @@ _TEST_PLATFORM_JOBS = tuple(
         "runner": platform["runner"],
         "platform-name": platform["platform-name"],
         "artifact": platform["artifact"],
-        "minimum-cpu-capacity": ("3" if platform["platform-name"] == "macos-arm64" else "4"),
     }
     for platform in _BUILD_PLATFORMS
 )
@@ -104,7 +103,7 @@ _PRE_COMMIT_HOOK_LOCK_NAMES = frozenset(
     actionlint-py annotated-doc annotated-types certifi charset-normalizer clang-format click
     cmakelang colorama distro idna librt loguru maison markdown-it-py mdformat mdurl mypy
     mypy-extensions packaging pathspec pip platformdirs pre-commit-hooks pydantic pydantic-core
-    pygments requests rich ruamel-yaml ruff ruyaml semver setuptools shellcheck-py shellingham
+    pygments pyyaml requests rich ruamel-yaml ruff ruyaml semver setuptools shellcheck-py shellingham
     shfmt-py six toml-sort tomlkit typer typing-extensions typing-inspection urllib3 wheel yamlfix
     zizmor
     """.split()
@@ -353,8 +352,8 @@ def _assert_text_contract(
     } == {}
 
 
-def test_only_publish_is_a_manual_entry_point() -> None:
-    """PR/main validation is automatic; publishing is the sole manual action."""
+def test_only_publish_is_a_manual_release_and_only_advisories_are_scheduled() -> None:
+    """Maintenance may run manually, while only publish accepts release inputs."""
     workflows = tuple(
         path for path in WORKFLOWS.iterdir() if path.is_file() and path.suffix in {".yml", ".yaml"}
     )
@@ -364,10 +363,21 @@ def test_only_publish_is_a_manual_entry_point() -> None:
         for name, workflow in contents.items()
         if re.search(r"^  workflow_dispatch:", _workflow_preamble(workflow), re.MULTILINE)
     }
+    scheduled = {
+        name
+        for name, workflow in contents.items()
+        if re.search(r"^  schedule:", _workflow_preamble(workflow), re.MULTILINE)
+    }
 
-    assert set(contents) == {"ci.yml", "publish.yml"}
-    assert dispatched == {"publish.yml"}
-    assert all("  schedule:" not in _workflow_preamble(workflow) for workflow in contents.values())
+    assert set(contents) == {
+        "ci.yml",
+        "dependency-advisory-refresh.yml",
+        "publish.yml",
+    }
+    assert dispatched == {"dependency-advisory-refresh.yml", "publish.yml"}
+    assert scheduled == {"dependency-advisory-refresh.yml"}
+    assert "    inputs:" not in _workflow_preamble(contents["dependency-advisory-refresh.yml"])
+    assert "    inputs:" in _workflow_preamble(contents["publish.yml"])
 
 
 def test_ci_has_only_safe_pr_main_and_reusable_triggers() -> None:
@@ -608,7 +618,8 @@ def test_publish_postcondition_revalidates_every_original_manifest_digest() -> N
     assert "meta/ci/requirements/release-verification.txt" in verifier
     assert "python meta/ci/quality/ensure_pinned_pip.py" in verifier
     assert "python -m pip install --no-deps 'pip==26.2.1'" not in verifier
-    assert "python -m pip install --no-deps" in verifier
+    assert "python -m meta.ci.quality.install_locked_requirements" in verifier
+    assert "--lock meta/ci/requirements/release-verification.txt --all" in verifier
     assert "python -m pip check" in verifier
     assert "pypi_attestations.__version__" in verifier
     assert verifier.count("actions/download-artifact@") == 2
@@ -644,7 +655,7 @@ def test_release_preflight_has_only_the_read_permissions_it_uses() -> None:
     preflight = _job_body(_workflow("publish.yml"), "preflight")
     permissions = preflight.split("    permissions:\n", 1)[1].split("    steps:\n", 1)[0]
 
-    assert permissions == "      contents: read\n"
+    assert permissions == "      actions: read\n      contents: read\n"
     assert "id-token:" not in preflight
     assert "actions/setup-python@" in preflight
     assert "python-version: 3.11.9" in preflight
@@ -724,38 +735,43 @@ def test_action_pins_have_automated_review_and_semantic_security_gates() -> None
     """Immutable Actions remain maintainable and workflow-aware tooling blocks drift."""
     dependabot = (ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
     precommit = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    hook_lock = (ROOT / "meta/ci/requirements/pre-commit-hooks.txt").read_text(encoding="utf-8")
 
     assert "package-ecosystem: github-actions" in dependabot
     assert "interval: weekly" in dependabot
     assert re.search(r'^      time: "07:00"$', dependabot, re.MULTILINE)
     assert "id: actionlint" in precommit
-    assert "actionlint-py==1.7.12.24" in precommit
+    assert "actionlint-py==1.7.12.24" in hook_lock
     assert "id: zizmor" in precommit
-    assert "zizmor==1.29.0" in precommit
+    assert "zizmor==1.29.0" in hook_lock
     assert r"files: ^\.github/workflows/.*\.ya?ml$" in precommit
     assert r"files: ^\.github/(workflows/.*\.ya?ml|actions/.*/action\.ya?ml)$" in precommit
     assert r"exclude: ^\.github/dependabot\.yml$" in precommit
     assert "      - id: ruff-check\n" in precommit
     assert "      - id: ruff\n" not in precommit
 
-    remote_hooks = dict(
-        re.findall(
-            r"^  - repo: (https://[^\n]+)\n    rev: ([^\s#]+)",
-            precommit,
-            re.MULTILINE,
-        )
-    )
-    assert set(remote_hooks) == {
-        "https://github.com/pre-commit/pre-commit-hooks",
-        "https://github.com/pre-commit/mirrors-clang-format",
-        "https://github.com/astral-sh/ruff-pre-commit",
-        "https://github.com/executablebooks/mdformat",
+    assert precommit.count("  - repo: local") == 1
+    assert "repo: https://" not in precommit
+    assert "language: python" not in precommit
+    assert "additional_dependencies:" not in precommit
+    assert precommit.count("language: system") == precommit.count("      - id:")
+    dispatcher = "entry: python meta/ci/quality/run_pre_commit_tool.py "
+    assert precommit.count(dispatcher) == precommit.count("      - id:")
+    hook_types = {
+        "end-of-file-fixer": "types: [text]",
+        "trailing-whitespace": "types: [text]",
+        "check-yaml": "types: [yaml]",
+        "check-toml": "types: [toml]",
+        "check-json": "types: [json]",
+        "pretty-format-json": "types: [json]",
     }
-    assert all(re.fullmatch(r"[0-9a-f]{40}", revision) for revision in remote_hooks.values())
+    for hook, expected_types in hook_types.items():
+        body = precommit.split(f"      - id: {hook}\n", 1)[1].split("      - id:", 1)[0]
+        assert expected_types in body
 
 
-def test_shell_tools_use_isolated_prebuilt_wheels_without_remote_build_hooks() -> None:
-    """Cold shell checks must not require system tools or release-asset downloads."""
+def test_shell_tools_use_one_hash_locked_system_hook_environment() -> None:
+    """Cold shell checks use the authenticated tool lock without nested installs."""
     precommit = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
     pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     install_step = next(
@@ -768,27 +784,13 @@ def test_shell_tools_use_isolated_prebuilt_wheels_without_remote_build_hooks() -
         assert requirement not in pyproject["project"]["optional-dependencies"]["dev"]
         assert f"--only-binary={requirement.split('==', 1)[0]}" not in install_step
 
-    assert re.search(
-        r"^      - id: shellcheck\n"
-        r"        name: shellcheck\n"
-        r"        entry: shellcheck\n"
-        r"        language: python\n"
-        r"        additional_dependencies: \[shellcheck-py==0\.11\.0\.1\]\n"
-        r"        files: \\.sh\$$",
-        precommit,
-        re.MULTILINE,
-    )
-    assert re.search(
-        r"^      - id: shfmt\n"
-        r"        name: shfmt\n"
-        r"        entry: shfmt\n"
-        r"        language: python\n"
-        r"        additional_dependencies: \[shfmt-py==4\.0\.0\]\n"
-        r"        files: \\.sh\$\n"
-        r"        args: \[-w, -i, '2', -ci\]$",
-        precommit,
-        re.MULTILINE,
-    )
+    assert "--lock meta/ci/requirements/pre-commit-hooks.txt --all" in install_step
+    assert "--allow-sdist actionlint-py" in install_step
+    for hook in ("shellcheck", "shfmt"):
+        body = precommit.split(f"      - id: {hook}\n", 1)[1].split("      - id:", 1)[0]
+        assert f"entry: python meta/ci/quality/run_pre_commit_tool.py {hook}" in body
+        assert "language: system" in body
+        assert "additional_dependencies:" not in body
 
 
 def test_ci_shell_entry_points_are_executable() -> None:
@@ -891,10 +893,16 @@ def test_dependency_audit_keeps_conflicting_environment_locks_separate(tmp_path:
     conflicting = {"shared==1", "shared==2"}
     assert all(not (conflicting <= set(text.splitlines())) for text in contents.values())
     quality = _action("quality-validation")
-    assert 'for requirements in "${audit_inputs[@]}"' in quality
-    assert 'pip-audit -r "${requirements}"' in quality
-    for option in ("--no-deps", "--disable-pip", "--strict", "--progress-spinner off"):
-        assert option in quality
+    advisory = _workflow("dependency-advisory-refresh.yml")
+    assert "check_dependency_advisory_snapshot verify" in quality
+    assert "pip-audit" not in quality
+    assert "check_dependency_advisory_snapshot refresh" in advisory
+    assert "check_dependency_advisory_snapshot verify-candidate" in advisory
+    assert "name: dependency-advisory-candidate" in advisory
+    assert "::warning title=Dependency advisories require review" in advisory
+    assert "::warning title=Dependency advisory snapshot changed" in advisory
+    assert "cmp --silent" in advisory
+    assert "exit 1" not in advisory.split("if ! cmp --silent", 1)[1]
     assert "full-requirements.txt" not in quality
     assert "declared-and-ci-tools.txt" not in contents
 
@@ -912,7 +920,8 @@ def test_wheel_build_runs_the_stable_abi_audit_explicitly() -> None:
     )
 
     assert cibuildwheel["audit-command"] == ""
-    assert "abi3audit==0.0.26 cibuildwheel==4.2.0 pytest==9.1.1" in install
+    assert "--packages abi3audit cibuildwheel pytest" in install
+    assert "install_locked_requirements" in install
     assert "shell: bash" in audit
     assert "python -m abi3audit --strict --report wheelhouse/*.whl" in audit
     assert (
@@ -1038,16 +1047,22 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
     assert test_action.count("steps.download-platform-wheel.outcome == 'failure'") == 2
     assert "python -m cibuildwheel" not in test_action
     assert len(dependencies) == 1
-    assert "if:" not in dependencies[0]
-    assert "--retries 10" in dependencies[0]
-    assert "--timeout 60" in dependencies[0]
-    assert "--no-deps" in dependencies[0]
-    assert "--only-binary=:all:" in dependencies[0]
-    assert "-r meta/ci/requirements/platform-tests.txt" in dependencies[0]
+    assert "if: steps.platform-wheel-availability.outputs.available == 'true'" in dependencies[0]
+    assert "install_locked_requirements" in dependencies[0]
+    assert "--lock meta/ci/requirements/platform-tests.txt --all" in dependencies[0]
+    assert "python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl" in dependencies[0]
     assert "python -m pip check" in dependencies[0]
     assert "meta/ci/requirements/build-tools.txt" not in test_action
     assert "meta/ci/requirements/platform-tests.txt" in test_action
-    assert cibuildwheel["test-requires"] == ["pyarrow==25.0.1"]
+    assert cibuildwheel["test-requires"] == []
+    assert "ensure_pinned_pip.py" in cibuildwheel["before-build"]
+    assert "python -m pip --version" in cibuildwheel["before-build"]
+    assert (
+        "--packages build auditwheel scikit-build-core cmake ninja" in cibuildwheel["before-build"]
+    )
+    assert "ensure_pinned_pip.py" in cibuildwheel["before-test"]
+    assert "python -m pip --version" in cibuildwheel["before-test"]
+    assert "--packages pyarrow" in cibuildwheel["before-test"]
     assert cibuildwheel["dependency-versions"] == "meta/ci/requirements/build-tools.txt"
     assert cibuildwheel["build-verbosity"] == 0
     assert _exact_lock_names(test_requirements_path) == _PLATFORM_LOCK_NAMES
@@ -1087,7 +1102,7 @@ def test_platform_matrix_uses_one_pinned_python_and_dependency_set() -> None:
         assert tests.count("uses: ./.github/actions/test-platform-wheel") == 1
         assert f"platform-name: {platform['platform-name']}" in tests
         assert f"artifact: {platform['artifact']}" in tests
-        assert f"minimum-cpu-capacity: {platform['minimum-cpu-capacity']}" in tests
+        assert "minimum-cpu-capacity:" not in tests
         assert "shard: ${{ matrix.shard }}" in tests
         assert "matrix['display-name']" not in tests
     assert ci.count("uses: ./.github/actions/test-platform-wheel") == 4
@@ -1116,7 +1131,8 @@ def test_ci_bootstraps_pip_conditionally_from_the_exact_wheel() -> None:
     assert 'PIP_VERSION = "26.2.1"' in helper
     assert '"--no-deps"' in helper
     assert '"--only-binary=:all:"' in helper
-    assert "os.spawnv(os.P_WAIT" in helper
+    assert 'timeout_seconds=300, label="pinned-pip-bootstrap"' in helper
+    assert "run_bounded(command" in helper
     assert "pip bootstrap postcondition failed" in helper
 
 
@@ -1142,7 +1158,9 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
         "CMAKE_GENERATOR": "Visual Studio 17 2022",
         "CMAKE_GENERATOR_INSTANCE": ("C:/Program Files/Microsoft Visual Studio/2022/Enterprise"),
         "CMAKE_GENERATOR_PLATFORM": "x64",
-        "CMAKE_GENERATOR_TOOLSET": "v143,host=x64",
+        "CMAKE_GENERATOR_TOOLSET": "v143,host=x64,version=14.44.35207",
+        "PIP_FIND_LINKS": "$GITHUB_WORKSPACE/.work/python-artifacts",
+        "PIP_NO_INDEX": "1",
     }
     assert windows["repair-wheel-command"] == (
         "python -W error -m delvewheel repair --extract-dir "
@@ -1240,7 +1258,26 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
     assert "compiler identification" not in certification
     assert "Check for working" not in certification
     assert "CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION" not in certification
-    assert '-G "Visual Studio 17 2022" -A x64 -T v143,host=x64' in sanitizer
+    assert '-G "Visual Studio 17 2022"' in sanitizer
+    assert "-A x64" in sanitizer
+    assert "-T v143,host=x64,version=14.44.35207" in sanitizer
+    assert (
+        "-DCMAKE_GENERATOR_INSTANCE='C:/Program Files/Microsoft Visual "
+        "Studio/2022/Enterprise'" in sanitizer
+    )
+    assert "-DCMAKE_SYSTEM_VERSION=10.0.26100.0" in sanitizer
+    assert "2>&1 | tee .work/windows-asan-cmake.log" in sanitizer
+    assert "name: Certify the Windows ASan toolchain" in sanitizer
+    assert "--direct-build" in sanitizer
+    assert "--certificate .work/sanitizer-evidence/windows-toolchain-Windows-X64.json" in sanitizer
+    assert "expected exactly one Windows SDK selection record" in certifier
+    sanitizer_certificate = (ROOT / "meta/ci/sanitizers/certify_sanitizer_run.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'WINDOWS_TOOLCHAIN_FILENAME = "windows-toolchain-Windows-X64.json"' in (
+        sanitizer_certificate
+    )
+    assert "_windows_toolchain_evidence(" in sanitizer_certificate
 
 
 def test_windows_action_pins_match_canonical_toolchain_policy() -> None:
@@ -1276,6 +1313,8 @@ def test_windows_action_pins_match_canonical_toolchain_policy() -> None:
         "CMAKE_GENERATOR_INSTANCE": policy["generator_instance"],
         "CMAKE_GENERATOR_PLATFORM": "x64",
         "CMAKE_GENERATOR_TOOLSET": policy["toolset"],
+        "PIP_FIND_LINKS": "$GITHUB_WORKSPACE/.work/python-artifacts",
+        "PIP_NO_INDEX": "1",
     }
 
 
@@ -1300,10 +1339,10 @@ def test_composite_actions_reject_unknown_platform_and_sanitizer_tuples() -> Non
             test,
             "Require a supported platform-test tuple",
             (
-                "Linux:X64:linux-x86_64:linux:4",
-                "Windows:X64:windows-amd64:windows:4",
-                "macOS:X64:macos-x86_64:macos-x86_64:4",
-                "macOS:ARM64:macos-arm64:macos-arm64:3",
+                "Linux:X64:linux-x86_64:linux",
+                "Windows:X64:windows-amd64:windows",
+                "macOS:X64:macos-x86_64:macos-x86_64",
+                "macOS:ARM64:macos-arm64:macos-arm64",
             ),
         ),
         (
@@ -1336,7 +1375,9 @@ def test_generated_ci_destinations_are_reset_before_their_first_write() -> None:
 
     assert build.index("rm -rf -- wheelhouse .work/build") < build.index("python -m cibuildwheel")
     assert test.index("rm -rf -- wheelhouse artifacts") < test.index("actions/download-artifact@")
-    assert source.index("rm -rf -- dist downstream-wheel") < source.index("python -m build --sdist")
+    assert source.index("rm -rf -- dist downstream-wheel") < source.index(
+        "python -m build --no-isolation --sdist"
+    )
     assert native.index("rm -rf -- coverage-native") < native.index(
         "SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN"
     )
@@ -1370,9 +1411,9 @@ def test_quality_requirements_are_a_complete_exact_lock() -> None:
     quality = _action("quality-validation")
 
     assert _exact_lock_names(ROOT / "meta/ci/requirements/quality.txt") == _QUALITY_LOCK_NAMES
-    assert "python -m pip install --no-deps --only-binary=:all:" in quality
-    assert "-r meta/ci/requirements/quality.txt" in quality
-    assert "python -m pip install --no-deps '.[dev]'" in quality
+    assert "python -m meta.ci.quality.install_locked_requirements" in quality
+    assert "--lock meta/ci/requirements/quality.txt --all" in quality
+    assert "python -m pip install --no-build-isolation --no-deps '.[dev]'" in quality
     assert "python -m pip check" in quality
 
 
@@ -1394,6 +1435,28 @@ def test_build_and_hook_requirements_are_complete_exact_owner_locks() -> None:
         ]
         assert names == sorted(names)
         assert f"/meta/ci/requirements/{filename}" in includes
+
+    quality_versions = {
+        canonicalize_name(requirement.name): str(requirement.specifier)
+        for requirement in map(
+            Requirement,
+            (ROOT / "meta/ci/requirements/quality.txt").read_text(encoding="utf-8").splitlines(),
+        )
+    }
+    hook_versions = {
+        canonicalize_name(requirement.name): str(requirement.specifier)
+        for requirement in map(
+            Requirement,
+            (ROOT / "meta/ci/requirements/pre-commit-hooks.txt")
+            .read_text(encoding="utf-8")
+            .splitlines(),
+        )
+    }
+    assert {
+        name: (quality_versions[name], hook_versions[name])
+        for name in quality_versions.keys() & hook_versions.keys()
+        if quality_versions[name] != hook_versions[name]
+    } == {}
 
 
 def test_every_installer_uses_its_exact_runtime_and_build_owner_lock() -> None:
@@ -1433,25 +1496,11 @@ def test_every_installer_uses_its_exact_runtime_and_build_owner_lock() -> None:
     )[0]
     assert linux_environment.count("/project/meta/ci/requirements/build-tools.txt") == 2
     assert "github.workspace" not in linux_environment
-    assert "PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/quality.txt" in quality
-    assert (
-        quality.count(
-            "PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/pre-commit-hooks.txt"
-        )
-        == 1
-    )
-    assert (
-        quality.count(
-            "PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/pre-commit-hooks.txt"
-        )
-        == 1
-    )
-    for setting in (
-        "VIRTUALENV_NO_PERIODIC_UPDATE: '1'",
-        "VIRTUALENV_PIP: 26.2.1",
-        "VIRTUALENV_SETUPTOOLS: 84.0.0",
-    ):
-        assert setting in quality
+    assert "PIP_CONSTRAINT:" not in quality
+    assert "PIP_BUILD_CONSTRAINT:" not in quality
+    assert "--lock meta/ci/requirements/quality.txt --all" in quality
+    assert quality.count("--lock meta/ci/requirements/pre-commit-hooks.txt") == 2
+    assert "language: python" not in (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
     assert (
         "PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/platform-tests.txt" in tests
     )
@@ -1471,6 +1520,8 @@ def test_no_build_isolation_never_receives_a_build_constraint() -> None:
     assert owners == {
         ".github/actions/native-llvm-coverage/action.yml",
         ".github/actions/platform-sanitizer/action.yml",
+        ".github/actions/quality-validation/action.yml",
+        ".github/actions/source-distribution/action.yml",
     }
     assert _no_isolation_constraint_violations(definitions) == ()
 
@@ -1629,32 +1680,26 @@ def test_runner_network_and_toolchain_inputs_are_bounded_and_exact() -> None:
     assert sanitizer.count("SCHEMA_SANITIZER_ENABLE_PCH=OFF") == 3
     assert tsan.count("SCHEMA_SANITIZER_ENABLE_PCH=OFF") == 1
     for action in (native, sanitizer, tsan):
-        assert "Acquire::Retries=3" in action
-        assert "Acquire::http::Timeout=30" in action
-        assert "Acquire::https::Timeout=30" in action
-        assert "DPkg::Lock::Timeout=60" in action
-    for action in (native, sanitizer, tsan):
-        assert "ninja==1.13.0" in action
-        assert "cmake==4.3.4" in action
-    for action in (sanitizer, tsan):
-        assert "pytest==9.1.1" in action
-        assert "pyarrow==25.0.1" in action
-    assert "-r meta/ci/requirements/platform-tests.txt" in native
+        assert "apt-get" not in action
+        assert "dpkg-query" not in action
+        assert "python -m meta.ci.quality.install_locked_requirements" in action
+        assert "--lock meta/ci/requirements/build-tools.txt" in action
+        assert "--packages ninja cmake" in action
+    assert "--lock meta/ci/requirements/platform-tests.txt --all" in native
     assert "clang++-18" in sanitizer
     assert "CMAKE_C_COMPILER=clang-18" in sanitizer
+    assert '"/usr/bin/${executable}"' in native
+    for executable in ("clang-18", "clang++-18"):
+        assert f"/usr/bin/{executable}" in sanitizer
     for action in (native, sanitizer):
-        assert "clang-18=1:18.1.3-1ubuntu1" in action
-        assert "dpkg-query -W -f='${Version}' clang-18" in action
         assert "clang-18 -dumpfullversion -dumpversion" in action
         assert "== '18.1.3'" in action
-    assert "llvm-18=1:18.1.3-1ubuntu1" in native
-    assert "dpkg-query -W -f='${Version}' llvm-18" in native
+    assert "/usr/bin/${executable}" in native
     assert "llvm-profdata-18 --version | grep -F 'LLVM version 18.1.3'" in native
     assert "llvm-cov-18 --version | grep -F 'LLVM version 18.1.3'" in native
     assert "clang++-18 -dumpfullversion -dumpversion" in sanitizer
     for package in ("gcc-14", "g++-14"):
-        assert f"{package}=14.2.0-4ubuntu2~24.04.1" in tsan
-        assert f"dpkg-query -W -f='${{Version}}' {package}" in tsan
+        assert f"/usr/bin/{package}" in tsan
         assert f"{package} -dumpfullversion -dumpversion" in tsan
     macos = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
         "cibuildwheel"
@@ -1662,6 +1707,8 @@ def test_runner_network_and_toolchain_inputs_are_bounded_and_exact() -> None:
     assert macos["environment"] == {
         "DEVELOPER_DIR": "/Applications/Xcode_16.4.app/Contents/Developer",
         "MACOSX_DEPLOYMENT_TARGET": "11.0",
+        "PIP_FIND_LINKS": "$GITHUB_WORKSPACE/.work/python-artifacts",
+        "PIP_NO_INDEX": "1",
     }
     for action in (build, sanitizer):
         assert "/Applications/Xcode_16.4.app/Contents/Developer" in action
@@ -1669,20 +1716,16 @@ def test_runner_network_and_toolchain_inputs_are_bounded_and_exact() -> None:
         assert "xcrun --sdk macosx15.5 --show-sdk-version" in action
         assert "Apple clang version 17.0.0 (clang-1700.0.13.5)" in action
     assert "-DCMAKE_OSX_SYSROOT=macosx15.5" in sanitizer
-    assert "pre-commit install-hooks" in quality
+    assert "pre-commit install-hooks" not in quality
     assert "PRE_COMMIT_HOME: ${{ github.workspace }}/.work/pre-commit-cache" in quality
-    assert "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9" in quality
-    assert "continue-on-error: true" in quality
-    assert "restore-keys:" not in quality
-    assert "${{ runner.arch }}" in " ".join(quality.split())
-    assert "${{ inputs.python-version }}" in " ".join(quality.split())
-    assert "hashFiles('.pre-commit-config.yaml'," in quality
-    assert "'meta/ci/requirements/quality.txt'," in quality
-    assert "'meta/ci/requirements/pre-commit-hooks.txt')" in quality
+    assert "actions/cache@" not in quality
+    assert "repo: https://" not in (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    assert "python meta/ci/quality/run_pre_commit_tool.py --check-current" in quality
+    assert "SCHEMA_SANITIZER_PRE_COMMIT_CERTIFIED_CURRENT: '1'" in quality
     assert 'rm -rf -- "${PRE_COMMIT_HOME}"' in quality
     assert "for attempt in 1 2 3" in quality
-    assert "timeout --signal=TERM --kill-after=15s 120s pre-commit install-hooks" in quality
-    assert "sleep $((attempt * 2))" in quality
+    assert "--allow-sdist actionlint-py" in quality
+    assert 'sleep "${attempt}"' in quality
 
 
 def test_release_archives_use_and_check_the_commit_timestamp() -> None:
@@ -1698,12 +1741,11 @@ def test_release_archives_use_and_check_the_commit_timestamp() -> None:
         assert "git show -s --format=%ct HEAD" in owner
         assert "export SOURCE_DATE_EPOCH" in owner
         assert "GITHUB_ENV" not in owner
-    assert source.count("python -m build --sdist --outdir .work/sdist-reproducibility/") == 2
-    first_build = source.index("python -m build --sdist --outdir .work/sdist-reproducibility/first")
+    build_command = "python -m build --no-isolation --sdist --outdir .work/sdist-reproducibility/"
+    assert source.count(build_command) == 2
+    first_build = source.index(f"{build_command}first")
     clean_build = source.index("rm -rf -- .work/build", first_build)
-    second_build = source.index(
-        "python -m build --sdist --outdir .work/sdist-reproducibility/second"
-    )
+    second_build = source.index(f"{build_command}second")
     compare = source.index('cmp -- "${first[0]}" "${second[0]}"')
     assert first_build < clean_build < second_build < compare
     assert "CIBW_ENVIRONMENT_PASS_LINUX: >-" in build
@@ -1754,7 +1796,10 @@ def test_native_stress_and_functional_suites_form_an_explicit_partition() -> Non
         "error::pytest.PytestUnhandledThreadExceptionWarning",
         "error::pytest.PytestUnraisableExceptionWarning",
     ]
-    assert "if: inputs.shard == 'concurrency'" in stress
+    assert (
+        "if: steps.platform-wheel-availability.outputs.available == 'true' && "
+        "inputs.shard == 'concurrency'"
+    ) in " ".join(stress.split())
     assert "-m native_stress" in stress
     assert "tests/concurrency/test_ordered_executor_completion_probe.py" in stress
     assert "-m 'not native_stress'" in functional
@@ -1785,7 +1830,10 @@ def test_platform_smokes_have_stable_balanced_shard_ownership() -> None:
 
     for name, shard in ownership.items():
         step = next(step for step in _step_bodies(test_action) if f"name: {name}" in step)
-        assert f"if: inputs.shard == '{shard}'" in step
+        assert (
+            "if: steps.platform-wheel-availability.outputs.available == 'true' && "
+            f"inputs.shard == '{shard}'"
+        ) in " ".join(step.split())
 
 
 def test_parquet_certificate_reuses_functional_junit_and_compilation_runs_once() -> None:
@@ -2026,34 +2074,28 @@ def test_linux_sanitizer_reuses_one_certified_cmake_graph(
         execute_certificate("STRING", wrong_compiler)
 
 
-def test_concurrency_workloads_fail_closed_at_explicit_platform_cpu_minima() -> None:
-    """Every shard owning concurrency tests enforces its platform CPU minimum."""
-    minima = {
-        platform["platform-name"]: platform["minimum-cpu-capacity"]
-        for platform in _TEST_PLATFORM_JOBS
-    }
-    preflight = next(
-        step
-        for step in _step_bodies(_action("test-platform-wheel"))
-        if "name: Require the declared concurrency-workload CPU capacity" in step
-    )
+def test_concurrency_workloads_adapt_to_runner_capacity_without_losing_fixed_width_probes() -> None:
+    """General wheel shards adapt while native probes retain exact three/four-credit coverage."""
+    test_action = _action("test-platform-wheel")
+    ci = _workflow("ci.yml")
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    normalized_cmake = " ".join(cmake.split())
+    probe = (ROOT / "cpp/tests/ordered_executor_tsan.cc").read_text(encoding="utf-8")
+    capacity = (ROOT / "cpp/src/internal/runtime/cpu_capacity.hh").read_text(encoding="utf-8")
 
-    assert minima == {
-        "linux-x86_64": "4",
-        "windows-amd64": "4",
-        "macos-x86_64": "4",
-        "macos-arm64": "3",
-    }
-    assert {platform for platform, minimum in minima.items() if minimum == "4"} == {
-        "linux-x86_64",
-        "windows-amd64",
-        "macos-x86_64",
-    }
-    assert "if: inputs.shard == 'concurrency' || inputs.shard == 'memory-parquet'" in preflight
-    assert "native_core.execution_policy(ThreadingMode.MULTI.value, 512 << 20)[1]" in preflight
-    assert "pressure_adjusted_target" not in preflight
-    assert "if detected < minimum" in preflight
-    assert "continue-on-error" not in preflight
+    assert "minimum-cpu-capacity" not in test_action
+    assert "minimum-cpu-capacity" not in ci
+    assert "Require the declared concurrency-workload CPU capacity" not in test_action
+    assert "--require-cpu-capacity" not in test_action
+    assert "--fixed-cpu-capacity 3 --rounds" in normalized_cmake
+    assert "--fixed-cpu-capacity 4 --case lane_stealing" in normalized_cmake
+    assert 'option == "--fixed-cpu-capacity"' in probe
+    assert 'selected_case == "lane_stealing"' in probe
+    assert "SCHEMA_SANITIZER_TEST_CPU_CAPACITY_OVERRIDE=1" in cmake
+    assert "#if defined(SCHEMA_SANITIZER_TEST_CPU_CAPACITY_OVERRIDE)" in capacity
+    assert "SCHEMA_SANITIZER_TEST_CPU_CAPACITY_OVERRIDE" not in (
+        ROOT / "cpp/src/api/python_abi3/runtime/test_probes.cc"
+    ).read_text(encoding="utf-8")
 
 
 def test_validation_matrix_and_terminal_gate_have_exact_dependencies() -> None:
@@ -2130,7 +2172,7 @@ def test_platform_evidence_records_comparable_cpu_limits_without_job_summary() -
         step for step in _step_bodies(test_action) if "name: Record runner CPU environment" in step
     )
 
-    assert "if:" not in evidence
+    assert "if: steps.platform-wheel-availability.outputs.available == 'true'" in evidence
     assert "os.cpu_count()" in helper
     assert "os.sched_getaffinity(0)" in helper
     assert '"effective_count": _effective_cpu_capacity(' in helper
@@ -2147,6 +2189,9 @@ def test_platform_evidence_records_comparable_cpu_limits_without_job_summary() -
         assert f'"{distribution}"' in helper
     assert '_optional_text("/sys/fs/cgroup/cpu.max") if is_linux else None' in helper
     assert '_optional_key_values("/sys/fs/cgroup/cpu.stat") if is_linux else None' in helper
+    assert "_linux_cgroup_cpu_capacity() if is_linux else None" in helper
+    assert '"cpuset.cpus.effective" if cpuset_version == 2 else "cpuset.cpus"' in helper
+    assert 'read_cgroup_hierarchy_texts("cpu.max", controller="cpu")' in helper
     assert "runner-cpu-${PLATFORM_ARTIFACT}-${TEST_SHARD}.json" in evidence
     assert "os." + "environ" not in helper
     assert "arguments[0]" in helper
@@ -2214,8 +2259,8 @@ def test_build_parallelism_is_positive_bounded_and_generator_aware(
     )
     monkeypatch.setattr(
         record_runner_environment,
-        "_optional_text",
-        lambda _path: "150000 100000",
+        "_linux_cgroup_cpu_capacity",
+        lambda: 7,
     )
 
     assert record_runner_environment.effective_cpu_capacity() == 2
@@ -2251,7 +2296,7 @@ def test_build_parallelism_is_positive_bounded_and_generator_aware(
 @pytest.mark.parametrize(
     ("raw_quota", "expected"),
     (
-        ("150000 100000", 2),
+        ("150000 100000", 1),
         ("100000 100000", 1),
         ("max 100000", None),
         ("invalid", None),
@@ -2261,10 +2306,53 @@ def test_build_parallelism_is_positive_bounded_and_generator_aware(
 def test_build_parallelism_parses_linux_quota_without_fractional_workers(
     raw_quota: str, expected: int | None
 ) -> None:
-    """Cgroup quotas round up safely and malformed or unlimited values opt out."""
+    """Fractional cgroup credits round down conservatively; invalid limits opt out."""
     from meta.ci.quality import record_runner_environment
 
     assert record_runner_environment._linux_cpu_quota_capacity(raw_quota) == expected
+
+
+def test_build_parallelism_parses_nested_quota_and_cpuset_hierarchies() -> None:
+    """Nested v1/v2 constraints contribute their smallest complete whole-CPU bound."""
+    from meta.ci.quality import record_runner_environment
+
+    assert record_runner_environment._cpuset_capacity("0-1,4,6-7") == 5
+    assert record_runner_environment._cpuset_capacity("0-2,2-3") is None
+    assert record_runner_environment._cpuset_capacity("3-1") is None
+    assert record_runner_environment._cpuset_capacity("0,+2") is None
+    assert record_runner_environment._cpuset_capacity("0,1_0") is None
+    assert record_runner_environment._v2_quota_hierarchy_capacity(
+        ("max 100000", "350000 100000", "150000 100000")
+    ) == (True, 1)
+    assert record_runner_environment._v2_quota_hierarchy_capacity(("max 100000", "invalid")) == (
+        False,
+        None,
+    )
+    assert record_runner_environment._v1_quota_hierarchy_capacity(
+        ("-1", "350000", "150000"),
+        ("100000", "100000", "100000"),
+    ) == (True, 1)
+    assert record_runner_environment._v1_quota_hierarchy_capacity(("-2",), ("100000",)) == (
+        False,
+        None,
+    )
+    assert record_runner_environment._v1_quota_hierarchy_capacity(("-01",), ("100000",)) == (
+        False,
+        None,
+    )
+    assert record_runner_environment._v1_quota_hierarchy_capacity(("-0",), ("100000",)) == (
+        False,
+        None,
+    )
+    assert record_runner_environment._v1_quota_hierarchy_capacity(("1_000",), ("100000",)) == (
+        False,
+        None,
+    )
+    assert record_runner_environment._minimum_known_capacity(
+        ("0-7", "0-3", ""),
+        record_runner_environment._cpuset_capacity,
+        empty_is_inherited=True,
+    ) == (True, 4)
 
 
 def test_build_parallelism_has_a_one_worker_fallback(
@@ -2285,7 +2373,7 @@ def test_build_parallelism_has_a_one_worker_fallback(
         unavailable_affinity,
         raising=False,
     )
-    monkeypatch.setattr(record_runner_environment, "_optional_text", lambda _path: None)
+    monkeypatch.setattr(record_runner_environment, "_linux_cgroup_cpu_capacity", lambda: None)
 
     assert record_runner_environment.effective_cpu_capacity() == 1
     assert record_runner_environment.bounded_build_parallelism() == 1
@@ -2337,7 +2425,7 @@ def test_ci_reserves_job_summaries_for_cibuildwheel() -> None:
 
 
 def test_validation_owns_full_extension_tsan_gate() -> None:
-    """Linux CI fails closed unless complete TSan coverage has enough CPU capacity."""
+    """Linux CI runs complete TSan coverage with deterministic native CPU topology."""
     ci = _workflow("ci.yml")
     tsan = _action("thread-sanitizer")
 
@@ -2353,19 +2441,14 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
     assert "watchdog-tsan-thread-Linux-X64-extension.json" not in tsan
     assert tsan.count("--timeout 900") == 1
 
-    capacity_step = tsan.split(
-        "- name: Require capacity for complete TSan concurrency coverage", 1
-    )[1].split("- name:", 1)[0]
     fuzz_step = tsan.split("- name: Run TSan fuzz regressions and mutation campaigns", 1)[1].split(
         "- name:", 1
     )[0]
     suite_step = tsan.split("- name: Run the executor and all full-extension TSan domains", 1)[
         1
     ].split("- name:", 1)[0]
-    assert "--require-cpu-capacity 3" in capacity_step
-    assert "continue-on-error" not in capacity_step
-    assert "GITHUB_OUTPUT" not in capacity_step
-    assert "::warning" not in capacity_step
+    assert "Require capacity for complete TSan concurrency coverage" not in tsan
+    assert "--require-cpu-capacity" not in tsan
     assert "if:" not in suite_step
     assert "run_with_watchdog.py" not in suite_step
     for environment_name in (
@@ -2374,7 +2457,6 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
         "TSAN_OPTIONS",
         "UBSAN_OPTIONS",
     ):
-        assert f"{environment_name}:" in capacity_step
         assert f"{environment_name}:" in fuzz_step
         assert f"{environment_name}:" in suite_step
         assert f'--environment "{environment_name}=${{{environment_name}}}"' in fuzz_step
@@ -2382,6 +2464,10 @@ def test_validation_owns_full_extension_tsan_gate() -> None:
     assert "TSAN_OPTIONS: halt_on_error=1:history_size=7:second_deadlock_stack=1" in suite_step
 
     runner = (ROOT / "meta/ci/sanitizers/run_tsan_extension_suite.sh").read_text(encoding="utf-8")
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    normalized_cmake = " ".join(cmake.split())
+    assert "--fixed-cpu-capacity 3 --rounds" in normalized_cmake
+    assert "--fixed-cpu-capacity 4 --case lane_stealing" in normalized_cmake
     domain_inventory = runner.rsplit("tests=(", 1)[1].split(")", 1)[0]
     for domain in (
         "test_threading_native_executor.py",
@@ -2579,14 +2665,14 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     concurrency_step = sanitizer.split(
         "- name: Run externally bounded sanitized concurrency probe", 1
     )[1].split("- name:", 1)[0]
+    lane_stealing_step = sanitizer.split(
+        "- name: Exercise four-lane stealing under macOS ASan/UBSan", 1
+    )[1].split("- name:", 1)[0]
     extension_step = sanitizer.split(
         "- name: Exercise the instrumented extension through public conversions", 1
     )[1].split("- name:", 1)[0]
     linux_extension_step = sanitizer.split(
         "- name: Exercise malformed input, lifecycle, and nested Parquet", 1
-    )[1].split("- name:", 1)[0]
-    capacity_step = sanitizer.split(
-        "- name: Require capacity for complete native concurrency coverage", 1
     )[1].split("- name:", 1)[0]
     fuzz_step = sanitizer.split("- name: Run platform fuzz regressions and mutation campaigns", 1)[
         1
@@ -2594,21 +2680,17 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     linux_fuzz_step = sanitizer.split(
         "- name: Run Linux ASan/UBSan fuzz regressions and mutation campaigns", 1
     )[1].split("- name:", 1)[0]
-    assert "--require-cpu-capacity 3" in capacity_step
-    assert "inputs.mode == 'native'" in capacity_step
-    assert "runner.os != 'Windows'" in capacity_step
-    assert "continue-on-error" not in capacity_step
-    assert "GITHUB_OUTPUT" not in capacity_step
-    assert "::warning" not in capacity_step
+    assert "Require capacity for complete native concurrency coverage" not in sanitizer
+    assert "--require-cpu-capacity" not in sanitizer
     for environment_name in (
         "ASAN_OPTIONS",
         "LSAN_OPTIONS",
         "TSAN_OPTIONS",
         "UBSAN_OPTIONS",
     ):
-        assert f"{environment_name}:" in capacity_step
         for guarded_step in (
             concurrency_step,
+            lane_stealing_step,
             extension_step,
             fuzz_step,
             linux_extension_step,
@@ -2627,13 +2709,21 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
     assert "SANITIZER_MODE: ${{ inputs.mode }}" in concurrency_step
     assert "SANITIZER_NAME: ${{ inputs.sanitizer }}" in concurrency_step
     assert "--case arena_backpressure_deadline" in concurrency_step
+    assert "--fixed-cpu-capacity 3 --rounds 100" in normalized_concurrency_step
     assert "--rounds 100" in concurrency_step
     assert "--timeout" in concurrency_step
     assert "sanitizer_cpu_capacity" not in normalized_concurrency_step
+    assert "inputs.mode == 'native' && runner.os == 'macOS'" in lane_stealing_step
+    assert "--fixed-cpu-capacity 4 --case lane_stealing" in lane_stealing_step
+    assert "--timeout 60" in lane_stealing_step
+    assert (
+        "watchdog-${SANITIZER_NAME}-${SANITIZER_MODE}-${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-lane-stealing.json"
+        in lane_stealing_step
+    )
     assert "if: inputs.mode == 'native'" in fuzz_step
     assert "sanitizer_cpu_capacity" not in fuzz_step
     assert "sanitizer_cpu_capacity" not in linux_fuzz_step
-    assert sanitizer.count("meta/ci/sanitizers/run_with_watchdog.py") == 5
+    assert sanitizer.count("meta/ci/sanitizers/run_with_watchdog.py") == 6
     assert "watchdog-asan-ubsan-linux-full-Linux-X64-extension.json" in sanitizer
     assert "watchdog-asan-ubsan-linux-full-Linux-X64-fuzz.json" in sanitizer
     assert "--timeout 900" in fuzz_step
@@ -2662,6 +2752,7 @@ def test_native_fuzzing_and_platform_sanitizer_matrix_are_owned_by_ci() -> None:
 def test_native_concurrency_gate_links_its_memory_resource_implementation() -> None:
     """The standalone sanitizer executable must own every arena dependency."""
     cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    normalized_cmake = " ".join(cmake.split())
     probe = (ROOT / "cpp/tests/ordered_executor_tsan.cc").read_text(encoding="utf-8")
     target = cmake.split("add_executable(\n    schema_sanitizer_sanitized_ordered_executor", 1)[
         1
@@ -2671,10 +2762,11 @@ def test_native_concurrency_gate_links_its_memory_resource_implementation() -> N
     assert "cpp/src/internal/memory/pool_resource.cc" in target
     assert 'if(NOT (MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan"))' in cmake
     assert "set(_schema_sanitizer_sanitized_executor_rounds 100)" in cmake
-    assert "schema_sanitizer_sanitized_ordered_executor --rounds" in cmake
-    assert 'argc == 3 && std::string_view(argv[1]) == "--rounds"' in probe
+    assert "--fixed-cpu-capacity 3 --rounds" in normalized_cmake
+    assert "--fixed-cpu-capacity 4 --case lane_stealing" in normalized_cmake
+    assert 'option == "--rounds"' in probe
     assert "std::from_chars" in probe
-    assert 'argc == 3 && std::string_view(argv[1]) == "--case"' in probe
+    assert 'option == "--case"' in probe
     assert "shared arena startup timed out" in probe
     assert "available_cpu_capacity()" in probe
     assert "const auto upstream_width = worker_count / 2U" in probe
@@ -2687,10 +2779,11 @@ def test_native_concurrency_gate_links_its_memory_resource_implementation() -> N
     assert "stage cancellation startup timed out" in probe
     assert "cancellation startup timed out" in probe
     assert "sanitizer probe watchdog expired" in probe
-    assert 'std::string_view(argv[1]) == "--require-cpu-capacity"' in probe
-    assert "at least " in probe
-    assert _action("platform-sanitizer").count("--require-cpu-capacity 3") == 1
-    assert _action("thread-sanitizer").count("--require-cpu-capacity 3") == 1
+    assert 'option == "--fixed-cpu-capacity"' in probe
+    assert "set_available_cpu_capacity_for_testing" in probe
+    assert "--require-cpu-capacity" not in probe
+    assert _action("platform-sanitizer").count("--fixed-cpu-capacity 3") == 1
+    assert "--require-cpu-capacity" not in _action("thread-sanitizer")
 
 
 def test_native_concurrency_probes_wait_for_every_asserted_async_metric() -> None:
@@ -2840,7 +2933,10 @@ def test_benchmark_matrix_runs_on_supported_platforms() -> None:
         if "name: Record a cross-platform reader scaling measurement" in step
     )
     assert "shell: bash" in reader_step
-    assert "if: inputs.shard == 'memory-parquet'" in reader_step
+    assert (
+        "if: steps.platform-wheel-availability.outputs.available == 'true' && "
+        "inputs.shard == 'memory-parquet'"
+    ) in " ".join(reader_step.split())
     assert "if python -I benchmarks/readers/linear_scaling.py \\" in reader_step
     assert 'report.get("failures")' in reader_step
     assert "Non-gating reader timing" in reader_step
@@ -2949,10 +3045,13 @@ def test_release_artifact_is_complete_exact_and_self_describing() -> None:
         *(platform["job-id"] for platform in _TEST_PLATFORM_JOBS),
         "validation-matrix",
     )
-    assert source_distribution.count("python -m build --sdist") == 2
-    assert "virtualenv==21.7.1" in source_distribution
-    assert "python -m pip download --no-deps --only-binary=:all:" in source_distribution
-    assert "--dest .work/virtualenv-seed pip==26.2.1" in source_distribution
+    assert source_distribution.count("python -m build --no-isolation --sdist") == 2
+    assert (
+        "--packages build twine packaging virtualenv scikit-build-core cmake ninja"
+        in source_distribution
+    )
+    assert "python -m meta.ci.quality.install_locked_requirements" in source_distribution
+    assert "--download .work/virtualenv-seed --packages pip" in source_distribution
     pip_seed_sha256 = "71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e"  # pragma: allowlist secret
     assert pip_seed_sha256 in source_distribution
     assert f'"{pip_seed_sha256}"  # pragma: allowlist secret' in downstream

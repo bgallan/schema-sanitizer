@@ -14,6 +14,7 @@ import pytest
 from _support.synchronization import (
     SCHEDULER_TIMEOUT_SECONDS,
     join_thread_or_fail,
+    run_isolated_python_probe,
     wait_for_process_exit,
 )
 
@@ -217,9 +218,8 @@ def test_debug_snapshot_covers_integral_runtime() -> None:
         assert key in snapshot
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
-def test_post_fork_child_cannot_reinitialize_retry_runtime() -> None:
-    """Verify post fork child cannot reinitialize retry runtime."""
+def _probe_post_fork_child_cannot_reinitialize_retry_runtime() -> None:
+    """Exercise retry-runtime poisoning in a disposable process."""
     from schema_sanitizer.core_impl.retry_scheduler import _RetryScheduler
 
     scheduler = _RetryScheduler()
@@ -233,6 +233,12 @@ def test_post_fork_child_cannot_reinitialize_retry_runtime() -> None:
     status = wait_for_process_exit(pid)
     assert os.waitstatus_to_exitcode(status) == 0
     assert scheduler.close(deadline_seconds=1.0)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_post_fork_child_cannot_reinitialize_retry_runtime() -> None:
+    """Verify post fork child cannot reinitialize retry runtime."""
+    run_isolated_python_probe(__file__, "_probe_post_fork_child_cannot_reinitialize_retry_runtime")
 
 
 def test_native_shutdown_path_uses_preallocated_detached_metrics() -> None:

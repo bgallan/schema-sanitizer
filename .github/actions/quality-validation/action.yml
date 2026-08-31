@@ -9,60 +9,52 @@ runs:
   using: composite
   steps:
     - name: Install development and audit tools
-      env:
-        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
-        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/quality.txt
       shell: bash
       run: |-
         set -euo pipefail
         rm -rf -- .work/build
         python meta/ci/quality/ensure_pinned_pip.py
-        python -m pip install --no-deps --only-binary=:all: \
-          -r meta/ci/requirements/quality.txt
-        python -m pip install --no-deps '.[dev]'
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/quality.txt --all
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/pre-commit-hooks.txt \
+          --packages setuptools wheel requests semver
+        for attempt in 1 2 3; do
+          if python -m meta.ci.quality.install_locked_requirements \
+            --lock meta/ci/requirements/pre-commit-hooks.txt --all \
+            --allow-sdist actionlint-py; then
+            break
+          fi
+          if (( attempt == 3 )); then
+            exit 1
+          fi
+          sleep "${attempt}"
+        done
+        actionlint_version=$(actionlint -version)
+        [[ "${actionlint_version%%$'\n'*}" == '1.7.12' ]] || {
+          echo "Unexpected actionlint version: ${actionlint_version}" >&2
+          exit 2
+        }
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --packages scikit-build-core cmake ninja
+        python -m pip install --no-build-isolation --no-deps '.[dev]'
         python -m pip check
+        python meta/ci/quality/run_pre_commit_tool.py --check-current
     - name: Compile every Python package module
       shell: bash
       run: |-
         set -euo pipefail
         python -m compileall -q src
-    - name: Reset the owned pre-commit cache path
+    - name: Enforce immutable GitHub Action references
       shell: bash
       run: |-
         set -euo pipefail
-        python - <<'PY'
-        import os
-        import shutil
-        from pathlib import Path
-        workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
-        work_root = workspace / ".work"
-        if work_root.is_symlink() or (work_root.exists() and not work_root.is_dir()):
-            raise SystemExit(f"pre-commit cache parent is unsafe: {work_root}")
-        work_root.mkdir(parents=True, exist_ok=True)
-        cache = work_root / "pre-commit-cache"
-        if cache.is_symlink() or (cache.exists() and not cache.is_dir()):
-            cache.unlink()
-        elif cache.exists():
-            shutil.rmtree(cache)
-        PY
-    - name: Restore the exact pre-commit environment cache
-      continue-on-error: true
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
-      with:
-        path: .work/pre-commit-cache
-        key: >-
-          pre-commit-v1-${{ runner.os }}-${{ runner.arch
-          }}-python-${{ inputs.python-version }}-${{ hashFiles('.pre-commit-config.yaml',
-          'meta/ci/requirements/quality.txt',
-          'meta/ci/requirements/pre-commit-hooks.txt') }}
+        python meta/ci/quality/check_action_pins.py
     - name: Lint, format, and static typing
       env:
-        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/pre-commit-hooks.txt
-        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/pre-commit-hooks.txt
         PRE_COMMIT_HOME: ${{ github.workspace }}/.work/pre-commit-cache
-        VIRTUALENV_NO_PERIODIC_UPDATE: '1'
-        VIRTUALENV_PIP: 26.2.1
-        VIRTUALENV_SETUPTOOLS: 84.0.0
+        SCHEMA_SANITIZER_PRE_COMMIT_CERTIFIED_CURRENT: '1'
       shell: bash
       run: |-
         set -euo pipefail
@@ -71,32 +63,12 @@ runs:
           rm -rf -- "${PRE_COMMIT_HOME}"
         fi
         mkdir -p -- "${PRE_COMMIT_HOME}"
-        for attempt in 1 2 3; do
-          if timeout --signal=TERM --kill-after=15s 120s pre-commit install-hooks; then
-            break
-          fi
-          if (( attempt == 3 )); then
-            exit 1
-          fi
-          rm -rf -- "${PRE_COMMIT_HOME}"
-          mkdir -p -- "${PRE_COMMIT_HOME}"
-          sleep $((attempt * 2))
-        done
         pre-commit run --all-files
-    - name: Build dependency inputs and audit them
+    - name: Verify the reviewed dependency advisory snapshot
       shell: bash
       run: |-
         set -euo pipefail
-        rm -rf -- .work/audit
-        mapfile -t audit_inputs < <(
-          python meta/ci/quality/build_dependency_audit_inputs.py \
-            --output-dir .work/audit
-        )
-        (( ${#audit_inputs[@]} > 0 ))
-        for requirements in "${audit_inputs[@]}"; do
-          pip-audit -r "${requirements}" --no-deps --disable-pip --strict \
-            --progress-spinner off
-        done
+        python -m meta.ci.quality.check_dependency_advisory_snapshot verify
     - name: Static Python security scan
       shell: bash
       run: bandit -r src meta/ci -l

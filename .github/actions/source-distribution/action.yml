@@ -15,11 +15,13 @@ runs:
         rm -rf -- .work/virtualenv-seed
         mkdir -p .work/virtualenv-seed
         python meta/ci/quality/ensure_pinned_pip.py
-        python -m pip install --only-binary=:all: build==1.5.0 twine==7.0.0 \
-          packaging==26.3 virtualenv==21.7.1
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --packages build twine packaging virtualenv scikit-build-core cmake ninja
         python -m pip check
-        python -m pip download --no-deps --only-binary=:all: \
-          --dest .work/virtualenv-seed pip==26.2.1
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --download .work/virtualenv-seed --packages pip
         python - "${PIP_SEED_SHA256}" <<'PY'
         import hashlib
         import sys
@@ -40,7 +42,6 @@ runs:
         PY
     - name: Validate version and build the source distribution
       env:
-        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: |
@@ -51,9 +52,9 @@ runs:
         [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
         export SOURCE_DATE_EPOCH
         python meta/ci/release/validate_release_version.py
-        python -m build --sdist --outdir .work/sdist-reproducibility/first
+        python -m build --no-isolation --sdist --outdir .work/sdist-reproducibility/first
         rm -rf -- .work/build
-        python -m build --sdist --outdir .work/sdist-reproducibility/second
+        python -m build --no-isolation --sdist --outdir .work/sdist-reproducibility/second
         shopt -s nullglob
         first=(.work/sdist-reproducibility/first/*.tar.gz)
         second=(.work/sdist-reproducibility/second/*.tar.gz)
@@ -77,9 +78,8 @@ runs:
         set -euo pipefail
         mkdir -p downstream-wheel
         env \
-          PIP_BUILD_CONSTRAINT="${GITHUB_WORKSPACE}/meta/ci/requirements/build-tools.txt" \
           PIP_CONSTRAINT="${GITHUB_WORKSPACE}/meta/ci/requirements/build-tools.txt" \
-          python -m pip wheel --no-cache-dir --no-deps \
+          python -m pip wheel --no-build-isolation --no-cache-dir --no-deps \
             --wheel-dir downstream-wheel dist/*.tar.gz
         shopt -s nullglob
         wheels=(downstream-wheel/*.whl)

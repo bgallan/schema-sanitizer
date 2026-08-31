@@ -92,6 +92,7 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         "tests/memory/test_memory_process_resource_governor_repairs_from_exact_leases_and_quarantines.py",
         "tests/quality/test_ci_helper_layout.py",
         "tests/quality/test_ci_workflow_topology.py",
+        "tests/quality/test_dependency_audit_inputs.py",
         "tests/quality/test_distribution_archive_cleanliness.py",
         "cpp/tests/ordered_executor_tsan.cc",
     }
@@ -145,7 +146,7 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         token.split('"', 1)[0]
         for token in quality_action.split(environment_lookup)[1:]
         if '"' in token
-    } == {"GITHUB_WORKSPACE"}
+    } == set()
     # YAML environment mappings are limited to composite-action input isolation,
     # exact dependency constraints, the final validation result handoff, and the
     # untrusted-input-safe release preflight boundary. Keeping the expected file

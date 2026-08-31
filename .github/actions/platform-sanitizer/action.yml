@@ -31,17 +31,13 @@ runs:
             exit 2
             ;;
         esac
-    - name: Install the Linux Clang 18 toolchain
+    - name: Require the runner-provided Linux Clang 18 toolchain
       if: inputs.mode == 'linux-full'
       shell: bash
       run: |-
         set -euo pipefail
-        sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
-          -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-        sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
-          -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-          install -y clang-18=1:18.1.3-1ubuntu1
-        [[ "$(dpkg-query -W -f='${Version}' clang-18)" == '1:18.1.3-1ubuntu1' ]]
+        [[ "$(command -v clang-18)" == '/usr/bin/clang-18' ]]
+        [[ "$(command -v clang++-18)" == '/usr/bin/clang++-18' ]]
         [[ "$(clang-18 -dumpfullversion -dumpversion)" == '18.1.3' ]]
         [[ "$(clang++-18 -dumpfullversion -dumpversion)" == '18.1.3' ]]
     - name: Select the macOS sanitizer toolchain
@@ -65,9 +61,9 @@ runs:
       run: |-
         set -euo pipefail
         python meta/ci/quality/ensure_pinned_pip.py
-        python -m pip install --only-binary=:all: \
-          ninja==1.13.0 cmake==4.3.4 scikit-build-core==0.11.6 \
-          pytest==9.1.1 pyarrow==25.0.1
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --packages ninja cmake scikit-build-core pytest pyarrow
     - name: Reset generated sanitizer paths
       shell: bash
       run: |-
@@ -228,17 +224,31 @@ runs:
       env:
         SANITIZER: ${{ inputs.sanitizer }}
       shell: bash
+      run: |
+        set -euo pipefail
+        cmake -S . -B .work/build/platform-sanitizer \
+          -G "Visual Studio 17 2022" \
+          -A x64 \
+          -T v143,host=x64,version=14.44.35207 \
+          -DCMAKE_GENERATOR_INSTANCE='C:/Program Files/Microsoft Visual Studio/2022/Enterprise' \
+          -DCMAKE_SYSTEM_VERSION=10.0.26100.0 \
+          -DSCHEMA_SANITIZER_ENABLE_LTO=OFF \
+          -DSCHEMA_SANITIZER_ENABLE_PCH=OFF \
+          -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}" \
+          -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON \
+          -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone \
+          -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled \
+          -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
+          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON \
+          2>&1 | tee .work/windows-asan-cmake.log
+    - name: Certify the Windows ASan toolchain
+      if: runner.os == 'Windows'
+      shell: bash
       run: >-
-        cmake -S . -B .work/build/platform-sanitizer
-        -G "Visual Studio 17 2022" -A x64 -T v143,host=x64
-        -DSCHEMA_SANITIZER_ENABLE_LTO=OFF
-        -DSCHEMA_SANITIZER_ENABLE_PCH=OFF
-        -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}"
-        -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON
-        -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone
-        -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled
-        -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON
-        -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
+        python meta/ci/native/certify_windows_toolchain.py
+        .work/build/platform-sanitizer .work/windows-asan-cmake.log
+        --direct-build
+        --certificate .work/sanitizer-evidence/windows-toolchain-Windows-X64.json
     - name: Configure macOS ASan/UBSan
       if: runner.os == 'macOS'
       env:
@@ -282,18 +292,6 @@ runs:
           schema_sanitizer_sanitized_ordered_executor \
           schema_sanitizer_fuzz_json schema_sanitizer_fuzz_csv \
           schema_sanitizer_fuzz_xml schema_sanitizer_fuzz_parquet
-    - name: Require capacity for complete native concurrency coverage
-      if: inputs.mode == 'native' && runner.os != 'Windows'
-      env:
-        ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:strict_string_checks=1
-        LSAN_OPTIONS: ''
-        TSAN_OPTIONS: ''
-        UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
-      shell: bash
-      run: |-
-        set -euo pipefail
-        .work/build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor \
-          --require-cpu-capacity 3
     - name: Run externally bounded sanitized concurrency probe
       if: inputs.mode == 'native'
       env:
@@ -315,7 +313,9 @@ runs:
           timeout_seconds=60
         else
           executable=.work/build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor
-          arguments=(--rounds 100)
+          # The standalone probe fixes its logical CPU governor at three so
+          # every capability-bound case runs even when the host is smaller.
+          arguments=(--fixed-cpu-capacity 3 --rounds 100)
           timeout_seconds=300
         fi
         [[ -f "${executable}" && ! -L "${executable}" ]] || {
@@ -331,6 +331,34 @@ runs:
           --label "${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-${SANITIZER_NAME}-${SANITIZER_MODE}-concurrency" \
           --timeout "${timeout_seconds}" \
           -- "${executable}" "${arguments[@]}"
+    - name: Exercise four-lane stealing under macOS ASan/UBSan
+      if: inputs.mode == 'native' && runner.os == 'macOS'
+      env:
+        ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:strict_string_checks=1
+        LSAN_OPTIONS: ''
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        RUNNER_SYSTEM: ${{ runner.os }}
+        SANITIZER_MODE: ${{ inputs.mode }}
+        SANITIZER_NAME: ${{ inputs.sanitizer }}
+        TSAN_OPTIONS: ''
+        UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      shell: bash
+      run: |-
+        set -euo pipefail
+        executable=.work/build/platform-sanitizer/schema_sanitizer_sanitized_ordered_executor
+        [[ -f "${executable}" && ! -L "${executable}" ]] || {
+          echo "Sanitized concurrency executable is missing or unsafe: ${executable}" >&2
+          exit 2
+        }
+        python meta/ci/sanitizers/run_with_watchdog.py \
+          --certificate ".work/sanitizer-evidence/watchdog-${SANITIZER_NAME}-${SANITIZER_MODE}-${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-lane-stealing.json" \
+          --environment "ASAN_OPTIONS=${ASAN_OPTIONS}" \
+          --environment "LSAN_OPTIONS=${LSAN_OPTIONS}" \
+          --environment "TSAN_OPTIONS=${TSAN_OPTIONS}" \
+          --environment "UBSAN_OPTIONS=${UBSAN_OPTIONS}" \
+          --label "${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-${SANITIZER_NAME}-${SANITIZER_MODE}-lane-stealing" \
+          --timeout 60 \
+          -- "${executable}" --fixed-cpu-capacity 4 --case lane_stealing
     - name: Exercise the instrumented extension through public conversions
       if: inputs.mode == 'native'
       env:

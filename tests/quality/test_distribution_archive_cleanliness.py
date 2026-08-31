@@ -350,7 +350,7 @@ def test_sdist_downstream_rebuild_cannot_reuse_pip_wheel_cache() -> None:
     ).read_text(encoding="utf-8")
     rebuild = action.split("Rebuild and test as an isolated downstream consumer", 1)[1]
     rebuild = rebuild.split("Upload the validated source distribution", 1)[0]
-    assert "python -m pip wheel --no-cache-dir --no-deps" in rebuild
+    assert "python -m pip wheel --no-build-isolation --no-cache-dir --no-deps" in rebuild
 
 
 def test_release_manifest_is_canonical_complete_and_verifiable(tmp_path: Path) -> None:

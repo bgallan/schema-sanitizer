@@ -435,7 +435,11 @@ def test_uncertain_fd_exact_slot_beats_stale_high_counter(monkeypatch: pytest.Mo
     )
     monkeypatch.setattr(module, "publish_terminal_owner", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(module, "diagnostic_transition", lambda: None)
-    module._UNCERTAIN_FD_CLOSE_COUNT = governor.capacity  # stale-high derived mirror
+    monkeypatch.setattr(
+        module,
+        "_UNCERTAIN_FD_CLOSE_COUNT",
+        governor.capacity,  # stale-high derived mirror
+    )
 
     lease = governor.try_acquire_up_to(1, minimum=1)
     assert (

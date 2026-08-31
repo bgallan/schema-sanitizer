@@ -1,0 +1,81 @@
+---
+name: Dependency advisory refresh
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: 17 6 * * 1
+permissions:
+  contents: read
+concurrency:
+  group: dependency-advisory-refresh
+  cancel-in-progress: false
+jobs:
+  refresh:
+    name: compare live advisories with reviewed snapshot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.11.9
+          cache: pip
+          cache-dependency-path: |-
+            meta/ci/requirements/quality.txt
+            meta/ci/requirements/python-artifact-sha256.lock
+      - name: Install the hash-locked advisory client
+        shell: bash
+        run: |-
+          set -euo pipefail
+          export PIP_DISABLE_PIP_VERSION_CHECK=1
+          export PIP_NO_INPUT=1
+          export PIP_RETRIES=3
+          export PIP_TIMEOUT=30
+          export PYTHONHASHSEED=0
+          export PYTHONUTF8=1
+          export TZ=UTC
+          python meta/ci/quality/ensure_pinned_pip.py
+          python -m meta.ci.quality.install_locked_requirements \
+            --lock meta/ci/requirements/quality.txt --packages pip-audit
+      - name: Query live advisory data into a candidate snapshot
+        shell: bash
+        run: |-
+          set -euo pipefail
+          mkdir -p .work/advisories
+          python -m meta.ci.quality.check_dependency_advisory_snapshot refresh \
+            --snapshot .work/advisories/dependency-advisories.json
+      - name: Upload the reviewable advisory candidate
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dependency-advisory-candidate
+          path: .work/advisories/dependency-advisories.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
+          overwrite: true
+      - name: Validate and compare the current advisory candidate
+        shell: bash
+        run: |-
+          set -euo pipefail
+          python -m meta.ci.quality.check_dependency_advisory_snapshot verify-candidate \
+            --snapshot .work/advisories/dependency-advisories.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          candidate = Path(".work/advisories/dependency-advisories.json")
+          findings = json.loads(candidate.read_text(encoding="utf-8"))["vulnerabilities"]
+          if findings:
+              identifiers = sorted({finding["id"] for finding in findings})
+              print(
+                  "::warning title=Dependency advisories require review::"
+                  + ", ".join(identifiers)
+              )
+          PY
+          if ! cmp --silent -- \
+            meta/ci/requirements/dependency-advisories.json \
+            .work/advisories/dependency-advisories.json; then
+            echo '::warning title=Dependency advisory snapshot changed::Download dependency-advisory-candidate, review it, and commit the approved snapshot.'
+          fi

@@ -36,6 +36,11 @@ _AUXILIARY_TRANSLATION_UNITS = tuple(
     for path in sorted(root.rglob("*"))
     if path.is_file() and path.suffix in _TRANSLATION_UNIT_SUFFIXES
 )
+_AUXILIARY_COMPILE_DEFINITIONS = {
+    (_REPO_ROOT / "cpp/tests/ordered_executor_tsan.cc").resolve(): (
+        "SCHEMA_SANITIZER_TEST_CPU_CAPACITY_OVERRIDE=1",
+    ),
+}
 
 _CALLABLE_AUDITOR_SOURCE = r"""// Audits explicit native callables through Clang's complete semantic AST.
 // Stable USRs join declarations to definitions while file callbacks prove source reachability.
@@ -463,7 +468,7 @@ def _is_maintained_cpp_path(path: Path) -> bool:
 
 
 def _augmented_compile_database(compile_commands: Path, output_dir: Path) -> Path:
-    """Add maintained test, fuzz, and launcher translation units to a database."""
+    """Add auxiliary units with the definitions owned by their real targets."""
     entries = [
         entry
         for entry in json.loads(compile_commands.read_text(encoding="utf-8"))
@@ -488,6 +493,10 @@ def _augmented_compile_database(compile_commands: Path, output_dir: Path) -> Pat
             str(source) if argument in {template_file, template_source} else argument
             for argument in arguments
         ]
+        arguments.extend(
+            f"-D{definition}"
+            for definition in _AUXILIARY_COMPILE_DEFINITIONS.get(source.resolve(), ())
+        )
         for position, argument in enumerate(arguments[:-1]):
             if argument == "-o":
                 arguments[position + 1] = str(object_dir / f"auxiliary-{index}.o")

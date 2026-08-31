@@ -50,20 +50,26 @@ downstream installer launches its smoke and type-check programs by path.
 Do not add compatibility wrappers at the `meta/ci` root. Update every
 versioned caller atomically when moving or renaming an entry point.
 
-CI package downloads use bounded pip retries and complete exact owner locks.
+CI package downloads use a bounded process-tree watchdog, complete exact owner
+locks, and a reviewed SHA-256 allowlist for every permitted distribution artifact.
 `build-tools.txt` constrains ordinary and isolated builds, including
-cibuildwheel's container and test environment; `pre-commit-hooks.txt` constrains
-each independently bootstrapped hook environment. The dependency audit evaluates
-each real lock separately and statically rejects a declared project or CI tool
-without a compatible owner pin, rather than resolving a floating synthetic union.
+cibuildwheel's container and test environment; `pre-commit-hooks.txt` owns the
+single hash-installed tool set used by local `language: system` hooks. The
+repository dispatcher reuses CI's already exact environment or creates a
+content-addressed, certified environment below `.work/pre-commit-tools` without
+mutating the developer's active environment. Pre-commit therefore neither clones
+hook repositories nor creates independently resolved environments. The
+dependency audit evaluates each real lock separately and
+statically rejects a declared project or CI tool without a compatible owner pin,
+rather than resolving a floating synthetic union. Pull-request validation checks
+the reviewed, dependency-content-bound advisory snapshot without querying a live
+service; the scheduled maintenance workflow uploads current reviewable candidates.
 Validation pip caches are disposable download accelerators, not environments:
 their exact keys include workload, operating system, architecture, Python patch,
 and a digest over that workload's lock-owning inputs, without partial restore
 prefixes. Installation and `pip check` remain authoritative after every restore.
-The exact pre-commit environment cache follows the same boundary; every hook is
-still bootstrapped and run, and a failed bootstrap clears only its owned cache
-before retrying.
-Apt-owned toolchains add repository, connection, and dpkg-lock bounds. Release preflight
+Runner-owned toolchains are admitted only after exact executable-path and version
+certification; CI never mutates the runner package inventory. Release preflight
 retries transport failures, HTTP 429, server errors, and HTTP 403 only with an
 official GitHub rate-limit header; its server-requested delay is capped at 30
 seconds per attempt, while semantic client errors fail immediately. Platform
@@ -109,6 +115,7 @@ pre-commit run --all-files
 
 Release publication additionally requires the PyPI Trusted Publisher
 configuration documented in [`docs/project/ci-cd.md`](../../docs/project/ci-cd.md).
-The current workflow grants OIDC only to its final job and does not attach that
-job to a GitHub Environment, so the Trusted Publisher's optional environment is
-unset.
+The current workflow grants OIDC only to its final job and attaches that job to
+the protected `pypi` GitHub Environment. Its preflight requires administrator
+bypass to be disabled, at least one non-self reviewer, and an exact deployment
+policy for the literal `main` branch before canonical validation can begin.

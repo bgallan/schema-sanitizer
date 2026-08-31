@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import re
 import subprocess
 import sys
@@ -332,6 +333,40 @@ def _cpp_documentation_helper() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_cpp_documentation_audit_preserves_auxiliary_target_definitions(tmp_path: Path) -> None:
+    """Synthetic AST commands retain test-only definitions from their CMake target."""
+    helper = _cpp_documentation_helper()
+    source = (ROOT / "cpp/tests/ordered_executor_tsan.cc").resolve()
+    template = (ROOT / "cpp/src/core/numeric/integer.cpp").resolve()
+    compile_commands = tmp_path / "compile_commands.json"
+    compile_commands.write_text(
+        json.dumps(
+            [
+                {
+                    "arguments": [
+                        "clang++",
+                        "-c",
+                        str(template),
+                        "-o",
+                        "integer.o",
+                    ],
+                    "directory": str(ROOT),
+                    "file": str(template),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    augmented = helper._augmented_compile_database(compile_commands, tmp_path / "augmented")
+    entries = json.loads(augmented.read_text(encoding="utf-8"))
+    command = next(entry for entry in entries if Path(entry["file"]).resolve() == source)
+
+    assert "-DSCHEMA_SANITIZER_TEST_CPU_CAPACITY_OVERRIDE=1" in command["arguments"]
+    assert "SCHEMA_SANITIZER_TEST_CPU_CAPACITY_OVERRIDE=1" in (ROOT / "CMakeLists.txt").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_compile_database_is_confined_to_the_approved_build_root(tmp_path: Path) -> None:

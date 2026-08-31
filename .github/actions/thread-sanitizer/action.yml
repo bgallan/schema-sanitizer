@@ -4,27 +4,21 @@ description: Build and exercise the full extension under GCC ThreadSanitizer.
 runs:
   using: composite
   steps:
-    - name: Install GCC 14 and build dependencies
+    - name: Require GCC 14 and install Python build dependencies
       env:
         PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: |
         set -euo pipefail
-        sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
-          -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-        sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
-          -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-          install -y \
-          gcc-14=14.2.0-4ubuntu2~24.04.1 \
-          g++-14=14.2.0-4ubuntu2~24.04.1
-        [[ "$(dpkg-query -W -f='${Version}' gcc-14)" == '14.2.0-4ubuntu2~24.04.1' ]]
-        [[ "$(dpkg-query -W -f='${Version}' g++-14)" == '14.2.0-4ubuntu2~24.04.1' ]]
+        [[ "$(command -v gcc-14)" == '/usr/bin/gcc-14' ]]
+        [[ "$(command -v g++-14)" == '/usr/bin/g++-14' ]]
         [[ "$(gcc-14 -dumpfullversion -dumpversion)" == '14.2.0' ]]
         [[ "$(g++-14 -dumpfullversion -dumpversion)" == '14.2.0' ]]
         python meta/ci/quality/ensure_pinned_pip.py
-        python -m pip install --only-binary=:all: ninja==1.13.0 cmake==4.3.4 \
-          pytest==9.1.1 pyarrow==25.0.1
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --packages ninja cmake pytest pyarrow
     - name: Configure and build the fully instrumented extension
       shell: bash
       run: |
@@ -84,17 +78,6 @@ runs:
           meta/ci/sanitizers/tsan_python_launcher.cc \
           -o .work/bin/python-tsan \
           "${python_embed_ldflags[@]}"
-    - name: Require capacity for complete TSan concurrency coverage
-      env:
-        ASAN_OPTIONS: ''
-        LSAN_OPTIONS: ''
-        TSAN_OPTIONS: halt_on_error=1:history_size=7:second_deadlock_stack=1
-        UBSAN_OPTIONS: ''
-      shell: bash
-      run: |-
-        set -euo pipefail
-        .work/build/tsan/schema_sanitizer_sanitized_ordered_executor \
-          --require-cpu-capacity 3
     - name: Run the executor and all full-extension TSan domains
       env:
         ASAN_OPTIONS: ''

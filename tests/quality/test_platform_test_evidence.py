@@ -12,7 +12,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from _support.ci_integrity import StrictPlatformIntegrity, _skip_is_allowed, _SkipRecord
+from _support.ci_integrity import (
+    StrictPlatformIntegrity,
+    _skip_inventory_sha256,
+    _skip_is_allowed,
+    _SkipRecord,
+)
 
 from meta.ci.quality import platform_test_evidence as evidence
 
@@ -30,8 +35,10 @@ _TEST_COUNTS = {
 
 def _integrity_payload(platform: str, shard: str) -> dict[str, object]:
     """Return one minimal satisfied in-process integrity certificate."""
+    inventory = evidence.EXPECTED_TEST_INVENTORY[shard]["sha256"]
+    skip_inventory = _skip_inventory_sha256([])
     return {
-        "format": "schema-sanitizer-platform-integrity-v1",
+        "format": "schema-sanitizer-platform-integrity-v2",
         "github": {"sha": _SHA, "run_id": _RUN_ID, "run_attempt": _RUN_ATTEMPT},
         "platform": platform,
         "shard": shard,
@@ -40,8 +47,12 @@ def _integrity_payload(platform: str, shard: str) -> dict[str, object]:
         "pytest_exitstatus": 0,
         "maximum_skip_count": 1,
         "skips": [],
+        "expected_skip_inventory_sha256": None,
+        "skip_inventory_sha256": skip_inventory,
         "expected_test_count": _TEST_COUNTS[shard],
         "selected_test_count": _TEST_COUNTS[shard],
+        "expected_test_inventory_sha256": inventory,
+        "selected_test_inventory_sha256": inventory,
     }
 
 
@@ -126,6 +137,9 @@ def test_platform_job_certificate_requires_satisfied_process_integrity(tmp_path:
     payload["issues"] = []
     payload["maximum_skip_count"] = 0
     payload["skips"] = [{"nodeid": "tests/example.py::test_case", "reason": "reviewed"}]
+    payload["skip_inventory_sha256"] = _skip_inventory_sha256(
+        [_SkipRecord("tests/example.py::test_case", "reviewed")]
+    )
     integrity.write_text(json.dumps(payload) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="skip ceiling"):
         evidence.create_certificate(
@@ -144,6 +158,35 @@ def test_platform_job_certificate_rejects_extra_inventory(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="inventory mismatch"):
         evidence.create_certificate(root, certificate, **_options("linux", "io-pipeline"))
+
+
+def test_platform_job_certificate_rejects_replaced_test_identity(tmp_path: Path) -> None:
+    """Equal test counts cannot hide a changed selected-node inventory."""
+    root = tmp_path / "artifacts"
+    certificate = root / "platform-test-certificate-linux-io-pipeline.json"
+    _complete_evidence(root, "linux", "io-pipeline")
+    integrity = root / "integrity-linux-io-pipeline.json"
+    payload = json.loads(integrity.read_text(encoding="utf-8"))
+    payload["selected_test_inventory_sha256"] = "f" * 64
+    integrity.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="test identities"):
+        evidence.create_certificate(root, certificate, **_options("linux", "io-pipeline"))
+
+
+def test_platform_job_certificate_rejects_changed_exact_skip_set(tmp_path: Path) -> None:
+    """A reviewed exact skip digest cannot be replaced at the same count."""
+    root = tmp_path / "artifacts"
+    certificate = root / "platform-test-certificate-linux-memory-parquet.json"
+    _complete_evidence(root, "linux", "memory-parquet")
+    integrity = root / "integrity-linux-memory-parquet.json"
+    payload = json.loads(integrity.read_text(encoding="utf-8"))
+    payload["expected_skip_inventory_sha256"] = "a" * 64
+    payload["skip_inventory_sha256"] = "b" * 64
+    integrity.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="skip identities"):
+        evidence.create_certificate(root, certificate, **_options("linux", "memory-parquet"))
 
 
 def test_platform_job_verifier_rejects_run_binding_tamper(tmp_path: Path) -> None:
@@ -215,6 +258,28 @@ def test_platform_job_verifier_rejects_symlinked_evidence(tmp_path: Path) -> Non
             "at least four effective workers",
         ),
         (
+            "linux",
+            "concurrency",
+            "tests/concurrency/test_operation_arena_telemetry_contracts.py::"
+            "test_public_four_worker_stats_cover_every_shard",
+            "at least four available CPUs are required",
+        ),
+        (
+            "linux",
+            "concurrency",
+            "tests/concurrency/test_concurrency_memory_governor.py::"
+            "test_process_cpu_governor_observes_live_affinity_changes",
+            "host exposes only one CPU",
+        ),
+        (
+            "macos-arm64",
+            "concurrency",
+            "tests/concurrency/"
+            "test_concurrency_output_steal_preference_is_dormant_through_eight_workers.py::"
+            "test_output_steal_preference_is_dormant_through_eight_workers",
+            "output-steal topology requires at least three runnable CPUs",
+        ),
+        (
             "windows",
             "memory-parquet",
             "tests/memory/test_memory_live_owner_prepared_storage_transaction_rolls_back_before_retry.py::"
@@ -250,13 +315,28 @@ def test_platform_skip_allowlist_binds_exact_node_and_reason(
 
 
 def test_windows_module_skip_is_limited_to_its_reviewed_file() -> None:
-    """A module-wide POSIX skip cannot authorize another memory module."""
+    """A POSIX module skip requires the authenticated full shard inventory."""
     reason = "POSIX descriptor-relative filesystem hardening suite"
-    reviewed = "tests/memory/test_memory_process_identity_includes_linux_boot_id.py::test_one"
+    reviewed = (
+        "tests/memory/test_memory_process_identity_includes_linux_boot_id.py::"
+        "test_process_identity_includes_linux_boot_id"
+    )
     adjacent = "tests/memory/test_unreviewed.py::test_one"
+    inventory = str(evidence.EXPECTED_TEST_INVENTORY["memory-parquet"]["sha256"])
 
-    assert _skip_is_allowed("windows", "memory-parquet", _SkipRecord(reviewed, reason))
-    assert not _skip_is_allowed("windows", "memory-parquet", _SkipRecord(adjacent, reason))
+    assert not _skip_is_allowed("windows", "memory-parquet", _SkipRecord(reviewed, reason))
+    assert _skip_is_allowed(
+        "windows",
+        "memory-parquet",
+        _SkipRecord(reviewed, reason),
+        selected_inventory_sha256=inventory,
+    )
+    assert not _skip_is_allowed(
+        "windows",
+        "memory-parquet",
+        _SkipRecord(adjacent, reason),
+        selected_inventory_sha256=inventory,
+    )
 
 
 def test_concurrency_skips_are_bound_to_the_reviewed_platforms() -> None:

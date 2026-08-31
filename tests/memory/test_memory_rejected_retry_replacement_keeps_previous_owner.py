@@ -329,9 +329,11 @@ def test_published_claim_is_rolled_back_if_parent_fsync_fails(
             raise OSError("directory persistence failed")
         real_fsync(descriptor)
 
-    # Finalizers from earlier tests may leave a deliberately delayed external
-    # claim cleanup in the bounded registry. Drain that independent owner before
-    # measuring this transaction's admission balance.
+    # Finalizers from earlier tests may leave deliberately delayed external
+    # claim cleanup in either bounded registry. Drain those independent owners
+    # before measuring this transaction's admission balance.
+    while module._drain_path_claim_finalizers(limit=64):
+        pass
     module._drain_abandoned_claim_owners(limit=64)
     before = module._PATH_CLAIM_ADMISSIONS
     monkeypatch.setattr(module.os, "fsync", fail_directory_fsync)
@@ -342,14 +344,24 @@ def test_published_claim_is_rolled_back_if_parent_fsync_fails(
     assert module._PATH_CLAIM_ADMISSIONS == before
     monkeypatch.setattr(module.os, "fsync", real_fsync)
     identity = module.claim_path_identity(artifact)
-    assert identity is not None
-    module.release_path_identity(identity)
+    try:
+        assert identity is not None
+    finally:
+        if identity is not None:
+            module.release_path_identity(identity)
 
 
-def test_claim_owner_finalizer_only_transfers_ownership() -> None:
+def test_claim_owner_finalizer_only_transfers_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Verify claim owner finalizer only transfers ownership."""
     import schema_sanitizer.core_impl.path_identity as module
 
+    monkeypatch.setattr(
+        module,
+        "_PATH_CLAIM_FINALIZER_ESCROW",
+        module.ReservedFinalizerEscrow(2),
+    )
     owner = module.PathClaimOwner(None, None, None)
     owner.__del__()
     assert owner.finalizer_ticket == -1
@@ -448,10 +460,22 @@ def test_cleanup_worker_start_is_published_before_start_commit(
             self.started = True
 
     monkeypatch.setattr(module, "acquire_project_threads", lambda *_a, **_k: Lease())
-    monkeypatch.setattr(module.threading, "Thread", FakeThread)
-    assert dispatcher.submit(lambda: None)
-    assert created == 1
-    assert dispatcher._workers_starting == 0
+    monkeypatch.setattr(module, "threading", SimpleNamespace(Thread=FakeThread))
+    monkeypatch.setattr(module, "start_governed_thread", lambda thread: thread.start())
+    try:
+        assert dispatcher.submit(lambda: None)
+        assert created == 1
+        assert dispatcher._workers_starting == 0
+    finally:
+        tickets = []
+        with dispatcher._condition:
+            for call in dispatcher._owned_index.values():
+                ticket = call.control_ticket
+                call.control_ticket = None
+                if ticket is not None:
+                    tickets.append(ticket)
+        for ticket in tickets:
+            module.release_control_plane(ticket)
 
 
 def test_async_bridge_transfers_failed_lease_to_guardian(

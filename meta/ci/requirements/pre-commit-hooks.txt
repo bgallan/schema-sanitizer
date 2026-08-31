@@ -25,6 +25,7 @@ pre-commit-hooks==6.0.0
 pydantic==2.13.5
 pydantic-core==2.46.5
 pygments==2.21.0
+pyyaml==6.0.3
 requests==2.34.2
 rich==15.0.0
 ruamel.yaml==0.19.1

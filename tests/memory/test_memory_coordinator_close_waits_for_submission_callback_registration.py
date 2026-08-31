@@ -217,10 +217,13 @@ def test_janitor_deletes_dangling_symlink_before_releasing_lease(
     assert janitor.quarantine(link, is_dir=False, lease=lease)
     assert lease.calls == 0
     assert janitor.snapshot().pending_artifacts == 1
+    with janitor._lock:
+        quarantined_path = next(iter(janitor._pending.values())).path
     janitor.sweep()
     assert lease.calls == 1
     assert janitor.snapshot().pending_artifacts == 0
-    assert not any(quarantine.iterdir())
+    assert quarantined_path.parent == quarantine
+    assert not os.path.lexists(quarantined_path)
 
 
 def test_janitor_retains_lease_when_quarantined_inode_is_replaced(
@@ -244,7 +247,9 @@ def test_janitor_retains_lease_when_quarantined_inode_is_replaced(
     quarantine = janitor.root()
     monkeypatch.setattr(janitor, "_ensure_worker", lambda: None)
     assert janitor.quarantine(source, is_dir=False, lease=lease)
-    retained = next(iter(quarantine.iterdir()))
+    with janitor._lock:
+        retained = next(iter(janitor._pending.values())).path
+    assert retained.parent == quarantine
     retained.unlink()
     retained.write_text("replacement")
     janitor.sweep()

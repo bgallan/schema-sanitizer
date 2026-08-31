@@ -16,6 +16,7 @@ import pytest
 from _support.synchronization import (
     SCHEDULER_TIMEOUT_SECONDS,
     join_thread_or_fail,
+    run_isolated_python_probe,
     wait_event_or_fail,
     wait_for_process_exit,
 )
@@ -76,9 +77,8 @@ class _ExactNative:
         return int(receipt.amount)  # type: ignore[attr-defined]
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
-def test_external_runtime_shrink_fails_before_inherited_lock_after_fork() -> None:
-    """Verify external runtime shrink fails before inherited lock after fork."""
+def _probe_external_runtime_shrink_after_fork() -> None:
+    """Exercise the inherited runtime lock in a disposable process."""
     from schema_sanitizer.core_impl import process_resources as module
 
     runtime = module.ExternalRuntimeConcurrencyLease(None, workers=2, parallel=True)
@@ -126,6 +126,12 @@ def test_external_runtime_shrink_fails_before_inherited_lock_after_fork() -> Non
     assert os.waitstatus_to_exitcode(status) == 0
     assert message.startswith("ok:")
     assert "cannot be reused after fork" in message
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_external_runtime_shrink_fails_before_inherited_lock_after_fork() -> None:
+    """Verify external runtime shrink fails before inherited lock after fork."""
+    run_isolated_python_probe(__file__, "_probe_external_runtime_shrink_after_fork")
 
 
 def test_arrow_table_to_polars_admits_reported_polars_pool(monkeypatch: pytest.MonkeyPatch) -> None:

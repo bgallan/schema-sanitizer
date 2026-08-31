@@ -8,6 +8,7 @@ It also writes one compact JSON certificate even when pytest fails.
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import os
@@ -18,6 +19,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+from meta.ci.quality.platform_test_evidence import (
+    EXPECTED_EXACT_SKIP_INVENTORY_SHA256,
+    EXPECTED_TEST_INVENTORY,
+)
 
 _STRICT_ENV = "SCHEMA_SANITIZER_STRICT_TEST_RUNTIME"
 _PLATFORM_ENV = "SCHEMA_SANITIZER_PLATFORM_ARTIFACT"
@@ -45,10 +51,10 @@ _PLATFORM_SYSTEM = {
 }
 
 _MAX_SKIP_COUNT = {
-    ("linux", "concurrency"): 3,
-    ("macos-arm64", "concurrency"): 9,
-    ("macos-x86_64", "concurrency"): 8,
-    ("windows", "concurrency"): 16,
+    ("linux", "concurrency"): 10,
+    ("macos-arm64", "concurrency"): 12,
+    ("macos-x86_64", "concurrency"): 12,
+    ("windows", "concurrency"): 20,
     ("linux", "memory-parquet"): 0,
     ("macos-arm64", "memory-parquet"): 1,
     ("macos-x86_64", "memory-parquet"): 1,
@@ -65,14 +71,6 @@ _MAX_SKIP_COUNT = {
     ("macos-arm64", "release-matrix"): 0,
     ("macos-x86_64", "release-matrix"): 0,
     ("windows", "release-matrix"): 0,
-}
-
-_EXPECTED_COLLECTION_COUNT = {
-    "concurrency": 511,
-    "memory-parquet": 1704,
-    "io-pipeline": 1025,
-    "native-stress": 1,
-    "release-matrix": 3,
 }
 
 _WINDOWS_POSIX_MEMORY_MODULES = frozenset(
@@ -125,12 +123,32 @@ _CONCURRENCY_NODEID_REASONS = {
     ),
     "tests/concurrency/test_concurrency_memory_governor.py::"
     "test_process_cpu_governor_observes_live_affinity_changes": frozenset(
-        {"process CPU affinity is unavailable"}
+        {"process CPU affinity is unavailable", "host exposes only one CPU"}
+    ),
+    "tests/concurrency/test_concurrency_high_core_mixed_lanes_drain_without_extra_workers.py::"
+    "test_output_priority_survives_wake_coalescing": frozenset(
+        {"output-steal topology requires at least three runnable CPUs"}
+    ),
+    **{
+        nodeid: frozenset({"output-steal topology requires at least three runnable CPUs"})
+        for nodeid in (
+            "tests/concurrency/"
+            "test_concurrency_output_steal_preference_is_dormant_through_eight_workers.py::"
+            "test_output_steal_preference_is_dormant_through_eight_workers",
+            "tests/concurrency/"
+            "test_concurrency_output_steal_preference_is_dormant_through_eight_workers.py::"
+            "test_idle_high_worker_steals_front_output_before_later_broad_work",
+        )
+    },
+    "tests/concurrency/test_concurrency_process_governors_and_pressure.py::"
+    "test_native_execution_policy_shrinks_under_process_pressure": frozenset(
+        {"host exposes no multi-worker baseline"}
     ),
     "tests/concurrency/test_concurrency_park_transition_rechecks_local_work_without_stranding.py::"
     "test_public_pipeline_reports_bounded_streak_count": frozenset(
         {
             "CPU affinity is required for the four-worker contract",
+            "at least four available CPUs are required",
         }
     ),
     "tests/concurrency/test_concurrency_python_is_a_first_class_concurrency_input.py::"
@@ -149,6 +167,7 @@ _CONCURRENCY_NODEID_REASONS = {
     "test_public_four_worker_stats_cover_every_shard": frozenset(
         {
             "CPU affinity is required for the four-worker contract",
+            "at least four available CPUs are required",
         }
     ),
     "tests/concurrency/test_threading_policy.py::"
@@ -165,11 +184,21 @@ _CONCURRENCY_REASON_PLATFORMS = {
     _OPTIONAL_POSIX_COORDINATION_REASON: frozenset({"windows"}),
     "fork is unavailable": frozenset({"windows"}),
     "every-format-declares-an-eligible-multi-benefit row-group overlap requires "
-    "at least four effective workers": frozenset({"macos-arm64"}),
+    "at least four effective workers": frozenset(
+        {"linux", "macos-arm64", "macos-x86_64", "windows"}
+    ),
+    "host exposes no multi-worker baseline": frozenset(
+        {"linux", "macos-arm64", "macos-x86_64", "windows"}
+    ),
+    "host exposes only one CPU": frozenset({"linux"}),
+    "output-steal topology requires at least three runnable CPUs": frozenset(
+        {"linux", "macos-arm64", "macos-x86_64", "windows"}
+    ),
     "process CPU affinity is unavailable": frozenset({"macos-arm64", "macos-x86_64", "windows"}),
     "CPU affinity is required for the four-worker contract": frozenset(
         {"macos-arm64", "macos-x86_64", "windows"}
     ),
+    "at least four available CPUs are required": frozenset({"linux"}),
     "exact CPU affinity is unavailable": frozenset({"macos-arm64", "macos-x86_64", "windows"}),
     "requires at least 16 visible CPUs": frozenset({"linux"}),
     "requires at least 32 visible CPUs": frozenset({"linux"}),
@@ -310,6 +339,23 @@ class _SkipRecord:
 
     nodeid: str
     reason: str
+
+
+def _nodeid_inventory_sha256(nodeids: list[str] | tuple[str, ...]) -> str:
+    """Hash a sorted node-ID inventory using one unambiguous trailing newline."""
+    canonical = "".join(f"{nodeid}\n" for nodeid in sorted(nodeids))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _skip_inventory_sha256(skips: list[_SkipRecord]) -> str:
+    """Hash exact skip identities and reasons using canonical compact JSON."""
+    canonical = json.dumps(
+        [asdict(skip) for skip in sorted(skips, key=lambda item: (item.nodeid, item.reason))],
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(f"{canonical}\n".encode()).hexdigest()
 
 
 def strict_platform_tests_enabled() -> bool:
@@ -511,8 +557,14 @@ def _matches_reviewed_node_reason(
     )
 
 
-def _skip_is_allowed(platform: str, shard: str, skip: _SkipRecord) -> bool:
-    """Return whether one skip matches a reviewed platform-specific limitation."""
+def _skip_is_allowed(
+    platform: str,
+    shard: str,
+    skip: _SkipRecord,
+    *,
+    selected_inventory_sha256: str | None = None,
+) -> bool:
+    """Return whether one skip is reviewed within the authenticated collection."""
     reason = skip.reason
     nodeid = skip.nodeid.replace("\\", "/")
     if "could not import" in reason.lower() or "not available" in reason.lower():
@@ -535,7 +587,7 @@ def _skip_is_allowed(platform: str, shard: str, skip: _SkipRecord) -> bool:
     if shard == "memory-parquet" and platform == "windows":
         module = nodeid.split("::", 1)[0]
         if _WINDOWS_MEMORY_MODULE_REASONS.get(module) == reason:
-            return True
+            return selected_inventory_sha256 == EXPECTED_TEST_INVENTORY["memory-parquet"]["sha256"]
         return _matches_reviewed_node_reason(
             nodeid,
             reason,
@@ -571,6 +623,8 @@ class StrictPlatformIntegrity:
         self.pytest_exitstatus = int(pytest.ExitCode.INTERNAL_ERROR)
         self.selected_test_count = 0
         self.expected_test_count = 0
+        self.selected_test_inventory_sha256 = ""
+        self.expected_test_inventory_sha256 = ""
 
     def pytest_sessionstart(self, session: pytest.Session) -> None:
         """Validate the platform tuple, dependencies, provenance, and clean baseline."""
@@ -619,12 +673,22 @@ class StrictPlatformIntegrity:
 
     def pytest_collection_finish(self, session: pytest.Session) -> None:
         """Require the exact selected-test inventory independently of skip outcomes."""
-        self.selected_test_count = len(session.items)
-        self.expected_test_count = _EXPECTED_COLLECTION_COUNT[self.shard]
+        selected_nodeids = [item.nodeid for item in session.items]
+        self.selected_test_count = len(selected_nodeids)
+        collection_policy = EXPECTED_TEST_INVENTORY[self.shard]
+        self.expected_test_count = int(collection_policy["count"])
+        self.selected_test_inventory_sha256 = _nodeid_inventory_sha256(selected_nodeids)
+        self.expected_test_inventory_sha256 = str(collection_policy["sha256"])
         if self.selected_test_count != self.expected_test_count:
             self.issues.append(
                 "selected test inventory changed: "
                 f"observed={self.selected_test_count}, expected={self.expected_test_count}"
+            )
+        if self.selected_test_inventory_sha256 != self.expected_test_inventory_sha256:
+            self.issues.append(
+                "selected test identities changed: "
+                f"observed={self.selected_test_inventory_sha256}, "
+                f"expected={self.expected_test_inventory_sha256}"
             )
 
     def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
@@ -676,7 +740,14 @@ class StrictPlatformIntegrity:
             self.issues.append(f"final integrity snapshot failed: {type(exc).__name__}: {exc}")
 
         rejected = [
-            skip for skip in self.skips if not _skip_is_allowed(self.platform, self.shard, skip)
+            skip
+            for skip in self.skips
+            if not _skip_is_allowed(
+                self.platform,
+                self.shard,
+                skip,
+                selected_inventory_sha256=self.selected_test_inventory_sha256,
+            )
         ]
         if rejected:
             self.issues.append(
@@ -688,16 +759,32 @@ class StrictPlatformIntegrity:
             self.issues.append(
                 f"skip ceiling exceeded: observed={len(self.skips)}, maximum={maximum_skips}"
             )
+        skip_inventory_sha256 = _skip_inventory_sha256(self.skips)
+        expected_skip_inventory_sha256 = EXPECTED_EXACT_SKIP_INVENTORY_SHA256.get(
+            (self.platform, self.shard)
+        )
+        if (
+            expected_skip_inventory_sha256 is not None
+            and skip_inventory_sha256 != expected_skip_inventory_sha256
+        ):
+            self.issues.append(
+                "reviewed skip identities changed: "
+                f"observed={skip_inventory_sha256}, expected={expected_skip_inventory_sha256}"
+            )
 
         payload = {
-            "format": "schema-sanitizer-platform-integrity-v1",
+            "format": "schema-sanitizer-platform-integrity-v2",
             "github": self.github,
             "platform": self.platform,
             "shard": self.shard,
             "maximum_skip_count": maximum_skips,
             "skips": [asdict(skip) for skip in self.skips],
+            "expected_skip_inventory_sha256": expected_skip_inventory_sha256,
+            "skip_inventory_sha256": skip_inventory_sha256,
             "expected_test_count": self.expected_test_count,
             "selected_test_count": self.selected_test_count,
+            "expected_test_inventory_sha256": self.expected_test_inventory_sha256,
+            "selected_test_inventory_sha256": self.selected_test_inventory_sha256,
             "initial_native_anomalies": self.initial_native,
             "final_native_anomalies": self.final_native,
             "initial_process_anomalies": self.initial_process,

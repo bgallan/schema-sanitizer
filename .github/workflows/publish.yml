@@ -34,6 +34,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
+      actions: read
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -52,6 +53,10 @@ jobs:
             echo "Publish must run from main, got ${GITHUB_REF}" >&2
             exit 1
           fi
+          printf '%s' "${GITHUB_TOKEN}" | \
+            python meta/ci/release/check_publish_environment.py \
+              --repository "${GITHUB_REPOSITORY}" \
+              --api-url "${GITHUB_API_URL}"
           python meta/ci/release/validate_release_version.py \
             --github-event "${GITHUB_EVENT_PATH}" \
             --require-release-version \
@@ -217,8 +222,8 @@ jobs:
           timeout --signal=TERM --kill-after=15s 180s \
             python meta/ci/quality/ensure_pinned_pip.py
           timeout --signal=TERM --kill-after=15s 600s \
-            python -m pip install --no-deps \
-              --requirement meta/ci/requirements/release-verification.txt
+            python -m meta.ci.quality.install_locked_requirements \
+              --lock meta/ci/requirements/release-verification.txt --all
           python -m pip check
           python - <<'PY'
           import pypi_attestations

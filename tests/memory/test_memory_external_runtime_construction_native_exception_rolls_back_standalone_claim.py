@@ -14,6 +14,7 @@ import pytest
 from _support.synchronization import (
     SCHEDULER_TIMEOUT_SECONDS,
     join_thread_or_fail,
+    run_isolated_python_probe,
     wait_event_or_fail,
     wait_for_process_exit,
 )
@@ -402,9 +403,8 @@ def test_configurable_standalone_runtime_degrades_partially_not_to_serial(
         assert logical_owner_lease_id not in governor._active_leases
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
-def test_parquet_dataset_lifetime_lease_fails_before_inherited_lock_after_fork() -> None:
-    """Verify Parquet dataset lifetime lease fails before inherited lock after fork."""
+def _probe_parquet_dataset_lifetime_lease_after_fork() -> None:
+    """Exercise the inherited lifetime lock in a disposable process."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as module
 
     class Capability:
@@ -455,6 +455,12 @@ def test_parquet_dataset_lifetime_lease_fails_before_inherited_lock_after_fork()
     assert os.waitstatus_to_exitcode(status) == 0
     assert message.startswith("ok:")
     assert "cannot be reused after fork" in message
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_parquet_dataset_lifetime_lease_fails_before_inherited_lock_after_fork() -> None:
+    """Verify Parquet dataset lifetime lease fails before inherited lock after fork."""
+    run_isolated_python_probe(__file__, "_probe_parquet_dataset_lifetime_lease_after_fork")
 
 
 def test_route_profiles_are_orthogonal_and_payload_contract_backed() -> None:

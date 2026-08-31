@@ -16,6 +16,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+from meta.ci.quality.locked_requirements import (
+    read_artifact_lock,
+    read_owner_lock,
+    render_hashed_requirements,
+    select_requirements,
+)
+
 EXTRA_IMPORTS = {
     "core": (),
     "pyarrow": ("pyarrow",),
@@ -137,6 +144,7 @@ def _validate_plan_paths(
     wheel: Path,
     scripts: Path,
     constraints: Path,
+    artifact_lock: Path,
     seed_wheels: Path,
     command_output: Path | None,
 ) -> None:
@@ -149,6 +157,7 @@ def _validate_plan_paths(
         "wheel": wheel.resolve(),
         "scripts root": scripts.resolve(),
         "constraints": constraints.resolve(),
+        "artifact lock": artifact_lock.resolve(),
         "virtualenv seed root": seed_wheels.resolve(),
     }
     for owned_name, owned_path in owned_roots.items():
@@ -182,9 +191,14 @@ def shell_plan(
     constraints: Path,
     seed_wheels: Path,
     *,
+    artifact_lock: Path | None = None,
     command_output: Path | None = None,
 ) -> str:
     """Return one fail-fast Bash plan preserving per-extra isolation."""
+    if artifact_lock is None:
+        artifact_lock = (
+            Path(__file__).resolve().parents[1] / "requirements/python-artifact-sha256.lock"
+        )
     if work_root.is_symlink():
         raise ValueError(f"work root must be a regular directory: {work_root}")
     isolated_root = work_root.resolve() / _ISOLATED_DIRECTORY
@@ -195,6 +209,7 @@ def shell_plan(
         wheel=wheel,
         scripts=scripts,
         constraints=constraints,
+        artifact_lock=artifact_lock,
         seed_wheels=seed_wheels,
         command_output=command_output,
     )
@@ -206,6 +221,30 @@ def shell_plan(
     app_data_root = work_root / "virtualenv-app-data"
     expected_python = tuple(sys.version_info[:3])
     expected_pointer_bits = struct.calcsize("P") * 8
+    wheel_sha256 = hashlib.sha256(wheel.read_bytes()).hexdigest()
+    hashed_constraints = work_root / "hashed-downstream-constraints.txt"
+    owner_requirements = read_owner_lock(constraints)
+    artifact_hashes = read_artifact_lock(artifact_lock)
+    _write_text_atomically(
+        hashed_constraints,
+        render_hashed_requirements(owner_requirements, artifact_hashes),
+    )
+
+    def write_install_requirements(name: str, extra: str | None, packages: tuple[str, ...]) -> Path:
+        """Write exact registry requests plus the digest-bound local wheel requirement."""
+        output = work_root / f"requirements-{name}.txt"
+        project = "schema-sanitizer" + (f"[{extra}]" if extra else "")
+        content = (
+            render_hashed_requirements(
+                select_requirements(owner_requirements, packages), artifact_hashes
+            )
+            if packages
+            else ""
+        )
+        content += f"{project} @ {wheel.as_uri()} --hash=sha256:{wheel_sha256}\n"
+        _write_text_atomically(output, content)
+        return output
+
     lines = [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
@@ -270,6 +309,7 @@ def shell_plan(
         return python
 
     consumer = create_environment("consumer")
+    consumer_requirements = write_install_requirements("consumer", None, ("mypy", "pyarrow"))
     lines.extend(
         (
             _command(
@@ -278,11 +318,12 @@ def shell_plan(
                     "-m",
                     "pip",
                     "install",
-                    "-c",
-                    constraints,
-                    "mypy",
-                    "pyarrow",
-                    wheel,
+                    "--require-hashes",
+                    "--only-binary=:all:",
+                    "--constraint",
+                    hashed_constraints,
+                    "--requirement",
+                    consumer_requirements,
                 ]
             ),
             _command([consumer, "-I", scripts / "downstream_smoke.py"]),
@@ -302,8 +343,25 @@ def shell_plan(
     for extra, imports in EXTRA_IMPORTS.items():
         lines.append("printf '%s\\n' " + shlex.quote(f"[downstream-extra] {extra}"))
         python = create_environment(f"extra-{extra}")
-        requirement = _shell_path(wheel) if extra == "core" else f"{_shell_path(wheel)}[{extra}]"
-        lines.append(_command([python, "-m", "pip", "install", "-c", constraints, requirement]))
+        requirement = write_install_requirements(
+            f"extra-{extra}", None if extra == "core" else extra, ()
+        )
+        lines.append(
+            _command(
+                [
+                    python,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--require-hashes",
+                    "--only-binary=:all:",
+                    "--constraint",
+                    hashed_constraints,
+                    "--requirement",
+                    requirement,
+                ]
+            )
+        )
         statements = ["import schema_sanitizer", *(f"import {name}" for name in imports)]
         lines.append(_command([python, "-I", "-c", "; ".join(statements)]))
     lines.append("printf '%s\\n' 'downstream wheel and isolated extras passed'")
@@ -327,11 +385,17 @@ def main() -> None:
         type=Path,
         default=Path(__file__).resolve().parents[1] / "requirements/downstream.txt",
     )
+    parser.add_argument(
+        "--artifact-lock",
+        type=Path,
+        default=Path(__file__).resolve().parents[1] / "requirements/python-artifact-sha256.lock",
+    )
     args = parser.parse_args()
 
     try:
         wheel = _resolved_regular_file(args.wheel, "wheel")
         constraints = _resolved_regular_file(args.constraints, "constraints")
+        artifact_lock = _resolved_regular_file(args.artifact_lock, "artifact lock")
         seed_wheels = _validated_seed_directory(args.seed_wheel_dir)
         if args.scripts.is_symlink() or not args.scripts.is_dir():
             raise ValueError(f"scripts root is not a regular directory: {args.scripts}")
@@ -344,6 +408,7 @@ def main() -> None:
             scripts,
             constraints,
             seed_wheels,
+            artifact_lock=artifact_lock,
             command_output=args.command_output,
         )
         _write_text_atomically(args.command_output, plan)

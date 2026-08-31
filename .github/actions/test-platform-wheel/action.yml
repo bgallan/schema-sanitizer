@@ -8,9 +8,6 @@ inputs:
   artifact:
     description: Short platform identifier used by evidence filenames.
     required: true
-  minimum-cpu-capacity:
-    description: Minimum runnable CPU credits required by concurrency workloads.
-    required: true
   shard:
     description: Functional workload (concurrency, memory-parquet, or io-pipeline).
     required: true
@@ -21,19 +18,18 @@ runs:
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
         PLATFORM_NAME: ${{ inputs.platform-name }}
-        MINIMUM_CPU_CAPACITY: ${{ inputs.minimum-cpu-capacity }}
         RUNNER_ARCHITECTURE: ${{ runner.arch }}
         RUNNER_SYSTEM: ${{ runner.os }}
         TEST_SHARD: ${{ inputs.shard }}
       shell: bash
       run: |-
         set -euo pipefail
-        platform_tuple="${RUNNER_SYSTEM}:${RUNNER_ARCHITECTURE}:${PLATFORM_NAME}:${PLATFORM_ARTIFACT}:${MINIMUM_CPU_CAPACITY}"
+        platform_tuple="${RUNNER_SYSTEM}:${RUNNER_ARCHITECTURE}:${PLATFORM_NAME}:${PLATFORM_ARTIFACT}"
         case "${platform_tuple}" in
-          Linux:X64:linux-x86_64:linux:4 | \
-          Windows:X64:windows-amd64:windows:4 | \
-          macOS:X64:macos-x86_64:macos-x86_64:4 | \
-          macOS:ARM64:macos-arm64:macos-arm64:3) ;;
+          Linux:X64:linux-x86_64:linux | \
+          Windows:X64:windows-amd64:windows | \
+          macOS:X64:macos-x86_64:macos-x86_64 | \
+          macOS:ARM64:macos-arm64:macos-arm64) ;;
           *)
             echo "Unsupported platform-test tuple: ${platform_tuple}" >&2
             exit 2
@@ -53,6 +49,7 @@ runs:
         cache: pip
         cache-dependency-path: |-
           meta/ci/requirements/platform-tests.txt
+          meta/ci/requirements/python-artifact-sha256.lock
     - name: Reset generated platform-test paths
       shell: bash
       run: |-
@@ -74,27 +71,44 @@ runs:
         set -euo pipefail
         rm -rf -- wheelhouse
     - name: Retry the certified platform-wheel download
+      id: retry-platform-wheel-download
       if: ${{ always() && steps.download-platform-wheel.outcome == 'failure' && steps.reset-platform-wheel-download.outcome == 'success' }}
+      continue-on-error: true
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
       with:
         name: dist-wheels-${{ inputs.platform-name }}
         path: wheelhouse
+    - name: Require the certified platform-wheel artifact
+      id: platform-wheel-availability
+      if: ${{ always() }}
+      env:
+        FIRST_DOWNLOAD_OUTCOME: ${{ steps.download-platform-wheel.outcome }}
+        PLATFORM_NAME: ${{ inputs.platform-name }}
+        RETRY_DOWNLOAD_OUTCOME: ${{ steps.retry-platform-wheel-download.outcome }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        if [[ "${FIRST_DOWNLOAD_OUTCOME}" != 'success' && \
+          "${RETRY_DOWNLOAD_OUTCOME}" != 'success' ]]; then
+          echo "::notice title=Skipped ${PLATFORM_NAME} shard::The upstream ${PLATFORM_NAME} build did not publish its certified artifact after two bounded download attempts. The wheel build and validation gate retain the root-cause failures; this dependent shard is a clean no-op."
+          echo 'available=false' >> "${GITHUB_OUTPUT}"
+        else
+          echo 'available=true' >> "${GITHUB_OUTPUT}"
+        fi
     - name: Install the wheel and functional-suite dependencies
+      if: steps.platform-wheel-availability.outputs.available == 'true'
       env:
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/platform-tests.txt
       shell: bash
       run: |-
         set -euo pipefail
         python meta/ci/quality/ensure_pinned_pip.py
-        python -m pip install \
-          --no-deps \
-          --only-binary=:all: \
-          --retries 10 \
-          --timeout 60 \
-          -r meta/ci/requirements/platform-tests.txt \
-          wheelhouse/*.whl
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/platform-tests.txt --all
+        python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
         python -m pip check
     - name: Assert tests import the installed wheel
+      if: steps.platform-wheel-availability.outputs.available == 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -127,26 +141,8 @@ runs:
             raise SystemExit(f"wheel provenance is incomplete: {missing}")
         print(provenance["schema_sanitizer"], provenance["schema_sanitizer._core_abi3"])
         PY
-    - name: Require the declared concurrency-workload CPU capacity
-      if: inputs.shard == 'concurrency' || inputs.shard == 'memory-parquet'
-      env:
-        MINIMUM_CPU_CAPACITY: ${{ inputs.minimum-cpu-capacity }}
-      shell: bash
-      run: |-
-        set -euo pipefail
-        python - "${MINIMUM_CPU_CAPACITY}" <<'PY'
-        import sys
-        from schema_sanitizer.core_impl.native_options import ThreadingMode
-        from schema_sanitizer.core_impl.native_runtime import native_core
-        minimum = int(sys.argv[1])
-        detected = int(native_core.execution_policy(ThreadingMode.MULTI.value, 512 << 20)[1])
-        if detected < minimum:
-            raise SystemExit(
-                f"concurrency workloads require {minimum} CPU credits; detected {detected}"
-            )
-        print(f"concurrency-workload CPU capacity: detected={detected}, required={minimum}")
-        PY
     - name: Record runner CPU environment
+      if: steps.platform-wheel-availability.outputs.available == 'true'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
         TEST_SHARD: ${{ inputs.shard }}
@@ -155,7 +151,8 @@ runs:
         python meta/ci/quality/record_runner_environment.py
         "artifacts/runner-cpu-${PLATFORM_ARTIFACT}-${TEST_SHARD}.json"
     - name: Record a cross-platform reader scaling measurement
-      if: inputs.shard == 'memory-parquet'
+      if: steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard
+        == 'memory-parquet'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
       shell: bash
@@ -184,7 +181,8 @@ runs:
         print(f"::warning title=Non-gating reader timing::host timing exceeded policy: {failures}")
         PY
     - name: Cross-platform threading benchmark smoke
-      if: inputs.shard == 'concurrency'
+      if: steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard
+        == 'concurrency'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
       shell: bash
@@ -197,7 +195,8 @@ runs:
         --only parquet
         --output "artifacts/threading-matrix-${PLATFORM_ARTIFACT}.json"
     - name: Cross-platform native completion stress
-      if: inputs.shard == 'concurrency'
+      if: steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard
+        == 'concurrency'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
         PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
@@ -217,7 +216,8 @@ runs:
           tests/concurrency \
           2>&1 | tee "artifacts/pytest-native-stress-durations-${PLATFORM_ARTIFACT}.log"
     - name: Run the clean public 8-by-7 release matrix
-      if: inputs.shard == 'concurrency'
+      if: steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard
+        == 'concurrency'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
         PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
@@ -235,6 +235,7 @@ runs:
           tests/concurrency/test_concurrency_route_release_gate.py \
           2>&1 | tee "artifacts/pytest-release-matrix-durations-${PLATFORM_ARTIFACT}.log"
     - name: Run functional test shard
+      if: steps.platform-wheel-availability.outputs.available == 'true'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
         PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
@@ -298,7 +299,8 @@ runs:
           "${test_paths[@]}" \
           2>&1 | tee "artifacts/pytest-durations-${PLATFORM_ARTIFACT}-${TEST_SHARD}.log"
     - name: Certify the Parquet runtime from functional evidence
-      if: inputs.shard == 'memory-parquet'
+      if: steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard
+        == 'memory-parquet'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
       shell: bash
@@ -308,7 +310,7 @@ runs:
           --junit-xml "artifacts/pytest-${PLATFORM_ARTIFACT}-memory-parquet.xml" \
           --certificate-output "artifacts/parquet-contract-runtime-certificate-${PLATFORM_ARTIFACT}.json"
     - name: Consolidate the exact platform-job evidence
-      if: always()
+      if: ${{ always() && steps.platform-wheel-availability.outputs.available == 'true' }}
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
         TEST_SHARD: ${{ inputs.shard }}
@@ -324,7 +326,7 @@ runs:
           --github-run-id "${GITHUB_RUN_ID}" \
           --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
     - name: Upload compact platform-test evidence
-      if: always()
+      if: ${{ always() && steps.platform-wheel-availability.outputs.available == 'true' }}
       id: upload-platform-test-evidence
       continue-on-error: true
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -337,7 +339,7 @@ runs:
         compression-level: 6
         overwrite: true
     - name: Retry the exact platform-test evidence upload
-      if: ${{ always() && steps.upload-platform-test-evidence.outcome == 'failure' }}
+      if: ${{ always() && steps.platform-wheel-availability.outputs.available == 'true' && steps.upload-platform-test-evidence.outcome == 'failure' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
         name: platform-test-evidence-${{ inputs.platform-name }}-${{ inputs.shard

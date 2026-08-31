@@ -32,10 +32,13 @@ pytest -q
 pre-commit run --all-files
 ```
 
-The ShellCheck and shfmt hooks install their exact wrapper-wheel dependencies
-inside pre-commit environments; do not require separate system executables or
-duplicate those packages in the `dev` extra. After changing either pin, use a
-fresh `PRE_COMMIT_HOME` to verify that a cold hook bootstrap succeeds.
+The first plain `pre-commit run --all-files` automatically creates one
+content-addressed, hash-verified tool environment below
+`.work/pre-commit-tools` when the active environment lacks any exact hook pin.
+It never installs into the active environment; later runs reuse the certified
+cache, while CI takes the no-bootstrap fast path from its already exact tool
+installation. ShellCheck, shfmt, and the other hook executables therefore need
+no separate system installation or duplicate entry in the `dev` extra.
 
 Pytest, mypy, Ruff, coverage, and local native builds keep their regenerable
 state below the ignored `.work/` directory. Deleting it clears those caches,

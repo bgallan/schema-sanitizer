@@ -16,7 +16,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, wait_for_process_exit
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    run_isolated_python_probe,
+    wait_for_process_exit,
+)
 
 _NATIVE_STUB_MODULES = (
     "schema_sanitizer.core_impl.native_options",
@@ -412,11 +416,11 @@ def test_remote_inline_stage_base_exception_releases_storage_lease() -> None:
     assert lease.releases == 1
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
-def test_native_options_actual_fork_replaces_inherited_locked_cache(
-    native_stub: None,
-) -> None:
-    """The registered at-fork hook must replace a lock held by another thread."""
+def _probe_native_options_actual_fork() -> None:
+    """Exercise the native-options at-fork hook in a disposable process."""
+    from schema_sanitizer.core_impl import native_runtime
+
+    native_runtime.native_core = SimpleNamespace(options_catalog=lambda: ())
     from schema_sanitizer.core_impl import native_options as module
 
     module._PREPARED_OPTIONS_CACHE = OrderedDict([(b"inherited", object())])
@@ -453,6 +457,12 @@ def test_native_options_actual_fork_replaces_inherited_locked_cache(
         status = wait_for_process_exit(pid)
     assert os.waitstatus_to_exitcode(status) == 0
     assert payload == "0:0:1"
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_native_options_actual_fork_replaces_inherited_locked_cache() -> None:
+    """The registered at-fork hook must replace a lock held by another thread."""
+    run_isolated_python_probe(__file__, "_probe_native_options_actual_fork")
 
 
 def test_remote_prefetch_refill_failure_closes_consumed_chunk() -> None:
@@ -520,9 +530,8 @@ def test_remote_prefetch_unexpected_stop_iteration_still_closes() -> None:
     assert close_calls == 1
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
-def test_system_pressure_actual_fork_replaces_lock_and_hysteresis() -> None:
-    """A fork child must not inherit a locked sampler or parent pressure history."""
+def _probe_system_pressure_actual_fork() -> None:
+    """Exercise the pressure sampler at-fork hook in a disposable process."""
     from schema_sanitizer.core_impl import system_pressure as module
 
     previous = (
@@ -580,3 +589,9 @@ def test_system_pressure_actual_fork_replaces_lock_and_hysteresis() -> None:
             ) = previous
     assert os.waitstatus_to_exitcode(status) == 0
     assert payload == "1.0:0.0:0:0:0.0:1"
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_system_pressure_actual_fork_replaces_lock_and_hysteresis() -> None:
+    """A fork child must not inherit a locked sampler or parent pressure history."""
+    run_isolated_python_probe(__file__, "_probe_system_pressure_actual_fork")

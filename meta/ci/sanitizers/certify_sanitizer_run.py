@@ -14,11 +14,18 @@ import json
 import os
 import re
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any, Mapping
 
-CERTIFICATE_FORMAT = "schema-sanitizer-sanitizer-run-v1"
+CERTIFICATE_FORMAT = "schema-sanitizer-sanitizer-run-v2"
 WATCHDOG_FORMAT = "schema-sanitizer-sanitizer-watchdog-v1"
+WINDOWS_TOOLCHAIN_FORMAT = "schema-sanitizer-windows-toolchain-certificate-v1"
+WINDOWS_TOOLCHAIN_FILENAME = "windows-toolchain-Windows-X64.json"
+WINDOWS_TOOLCHAIN_POLICY = (
+    Path(__file__).resolve().parents[1] / "native/windows-release-toolchain.json"
+)
+PROJECT_CONFIGURATION = Path(__file__).resolve().parents[3] / "pyproject.toml"
 _GIT_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _ASAN_NO_LEAKS = "detect_leaks=0:halt_on_error=1:strict_string_checks=1"
 _ASAN_WITH_LEAKS = "detect_leaks=1:halt_on_error=1:strict_string_checks=1"
@@ -107,7 +114,10 @@ def _runtime_environment(
         ("asan", "native", "Windows"),
         ("asan-ubsan", "native", "macOS"),
     }:
-        if kind not in {"concurrency", "extension", "fuzz"}:
+        allowed_kinds = {"concurrency", "extension", "fuzz"}
+        if runner_os == "macOS":
+            allowed_kinds.add("lane-stealing")
+        if kind not in allowed_kinds:
             raise ValueError(f"unsupported native sanitizer process kind: {kind}")
         return {
             "ASAN_OPTIONS": _ASAN_NO_LEAKS,
@@ -171,11 +181,12 @@ def _policy(sanitizer: str, mode: str, runner_os: str) -> dict[str, Any]:
             "process_tree_watchdog": True,
             "runtime_environments": {
                 kind: _runtime_environment(sanitizer, mode, runner_os, kind)
-                for kind in ("concurrency", "extension", "fuzz")
+                for kind in ("concurrency", "lane-stealing", "extension", "fuzz")
             },
             "suppressions": [],
             "watchdog_modes": {
                 "concurrency": "external-process-tree",
+                "lane-stealing": "external-process-tree",
                 "extension": "external-process-tree",
                 "fuzz": "external-process-tree",
             },
@@ -266,11 +277,11 @@ def _watchdog_specs(
         concurrency_args = (
             ["--case", "arena_backpressure_deadline"]
             if runner_os == "Windows"
-            else ["--rounds", "100"]
+            else ["--fixed-cpu-capacity", "3", "--rounds", "100"]
         )
         concurrency_timeout = 60 if runner_os == "Windows" else 300
         build_root = ".work/build/platform-sanitizer"
-        return {
+        specifications = {
             f"{stem}-concurrency.json": spec(
                 "concurrency",
                 [
@@ -290,6 +301,19 @@ def _watchdog_specs(
             ),
             f"{stem}-fuzz.json": spec("fuzz", _fuzz_command(f"{build_root}/fuzz", 500), 900),
         }
+        if runner_os == "macOS":
+            specifications[f"{stem}-lane-stealing.json"] = spec(
+                "lane-stealing",
+                [
+                    f"{build_root}/schema_sanitizer_sanitized_ordered_executor",
+                    "--fixed-cpu-capacity",
+                    "4",
+                    "--case",
+                    "lane_stealing",
+                ],
+                60,
+            )
+        return specifications
     return {
         f"{stem}-fuzz.json": spec("fuzz", _fuzz_command(".work/build/tsan/fuzz", 1_000), 900),
     }
@@ -327,6 +351,66 @@ def _watchdog_evidence(
     return evidence
 
 
+def _windows_toolchain_payload() -> dict[str, Any]:
+    """Return the exact Windows sanitizer toolchain certificate payload."""
+    _regular_file(WINDOWS_TOOLCHAIN_POLICY, "Windows toolchain policy")
+    _regular_file(PROJECT_CONFIGURATION, "project configuration")
+    policy_serialized = WINDOWS_TOOLCHAIN_POLICY.read_text(encoding="utf-8")
+    policy = json.loads(policy_serialized)
+    if not isinstance(policy, dict) or policy_serialized != _canonical_json(policy):
+        raise AssertionError("Windows toolchain policy is not canonical JSON")
+    try:
+        cmake_spec = tomllib.loads(PROJECT_CONFIGURATION.read_text(encoding="utf-8"))["tool"][
+            "scikit-build"
+        ]["cmake"]["version"]
+    except (KeyError, TypeError, tomllib.TOMLDecodeError) as error:
+        raise AssertionError("project configuration has no CMake pin") from error
+    if (
+        not isinstance(cmake_spec, str)
+        or re.fullmatch(r"==[0-9]+(?:\.[0-9]+){2}", cmake_spec) is None
+    ):
+        raise AssertionError("project configuration has no exact CMake pin")
+    compiler = (
+        f"{policy['generator_instance']}/VC/Tools/MSVC/{policy['vc_tools_version']}"
+        "/bin/Hostx64/x64/cl.exe"
+    )
+    return {
+        "build_directory": ".work/build/platform-sanitizer",
+        "cmake_version": cmake_spec.removeprefix("=="),
+        "compiler": {"path": compiler, "version": policy["compiler_version"]},
+        "format": WINDOWS_TOOLCHAIN_FORMAT,
+        "generator": policy["generator"],
+        "generator_instance": policy["generator_instance"],
+        "platform": "x64",
+        "sdk_version": policy["sdk_version"],
+        "toolset": policy["toolset"],
+        "vc_tools_version": policy["vc_tools_version"],
+    }
+
+
+def _windows_toolchain_evidence(
+    directory: Path, *, runner_os: str, runner_arch: str
+) -> list[dict[str, Any]]:
+    """Authenticate the exact generated Windows compiler certificate."""
+    if (runner_os, runner_arch) != ("Windows", "X64"):
+        return []
+    path = directory / WINDOWS_TOOLCHAIN_FILENAME
+    _regular_file(path, "Windows toolchain certificate")
+    serialized = path.read_text(encoding="utf-8")
+    payload = json.loads(serialized)
+    if not isinstance(payload, Mapping) or serialized != _canonical_json(payload):
+        raise AssertionError("Windows toolchain certificate is not canonical JSON")
+    if payload != _windows_toolchain_payload():
+        raise AssertionError("Windows toolchain certificate policy mismatch")
+    return [
+        {
+            "filename": path.name,
+            "label": "Windows-X64-reviewed-toolchain",
+            "sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+        }
+    ]
+
+
 def build_certificate(
     *,
     evidence_directory: Path,
@@ -344,7 +428,11 @@ def build_certificate(
     if github_run_id < 1 or github_run_attempt < 1:
         raise ValueError("GitHub run identity values must be positive integers")
     policy = _policy(sanitizer, mode, runner_os)
-    evidence = _watchdog_evidence(
+    evidence = _windows_toolchain_evidence(
+        evidence_directory,
+        runner_os=runner_os,
+        runner_arch=runner_arch,
+    ) + _watchdog_evidence(
         evidence_directory,
         sanitizer=sanitizer,
         mode=mode,
@@ -409,6 +497,7 @@ def verify_directory(
         _regular_file(path, "sanitizer evidence")
     observed_files = {path.name for path in evidence_paths}
     expected_files = expected_certificates | expected_watchdogs
+    expected_files.add(WINDOWS_TOOLCHAIN_FILENAME)
     if observed_files != expected_files:
         raise AssertionError(
             "sanitizer evidence inventory mismatch: "

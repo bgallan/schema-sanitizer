@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -41,11 +43,31 @@ _SDK_SELECTION_LINE = re.compile(
     r"(?P<version>[0-9]+(?:\.[0-9]+){3}) "
     r"to target Windows [0-9]+(?:\.[0-9]+){1,3}\.$"
 )
+_CERTIFICATE_FORMAT = "schema-sanitizer-windows-toolchain-certificate-v1"
 
 
 def _canonical_json(payload: dict[str, Any]) -> str:
     """Serialize policy data with its required stable representation."""
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def _write_atomically(destination: Path, payload: dict[str, Any]) -> None:
+    """Publish one canonical certificate without following an output symlink."""
+    if destination.is_symlink() or (destination.exists() and not destination.is_file()):
+        raise AssertionError(f"Windows toolchain certificate output is unsafe: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(_canonical_json(payload))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _require_regular_file(path: Path, label: str) -> None:
@@ -219,11 +241,35 @@ def _expected_metadata(language: str, policy: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _certificate_payload(
+    policy: dict[str, Any], cmake_version: str, build_directory: Path
+) -> dict[str, Any]:
+    """Describe the exact certified compiler selection in portable JSON."""
+    compiler = (
+        f"{policy['generator_instance']}/VC/Tools/MSVC/{policy['vc_tools_version']}"
+        "/bin/Hostx64/x64/cl.exe"
+    )
+    return {
+        "build_directory": build_directory.as_posix(),
+        "cmake_version": cmake_version,
+        "compiler": {"path": compiler, "version": policy["compiler_version"]},
+        "format": _CERTIFICATE_FORMAT,
+        "generator": policy["generator"],
+        "generator_instance": policy["generator_instance"],
+        "platform": "x64",
+        "sdk_version": policy["sdk_version"],
+        "toolset": policy["toolset"],
+        "vc_tools_version": policy["vc_tools_version"],
+    }
+
+
 def certify_windows_toolchain(
     build_root: Path,
     build_log: Path,
     policy_path: Path = WINDOWS_TOOLCHAIN,
     project_configuration: Path = PROJECT_CONFIGURATION,
+    *,
+    direct_build: bool = False,
 ) -> Path:
     """Certify one Visual Studio build tree and return its binary directory."""
     policy = _load_policy(policy_path)
@@ -234,7 +280,11 @@ def certify_windows_toolchain(
             f"Windows SDK selection mismatch: {sdk_version!r} != {policy['sdk_version']!r}"
         )
     _require_directory(build_root, "Windows build root")
-    cache = _single_path(list(build_root.glob("*/CMakeCache.txt")), "root CMake cache")
+    cache = (
+        build_root / "CMakeCache.txt"
+        if direct_build
+        else _single_path(list(build_root.glob("*/CMakeCache.txt")), "root CMake cache")
+    )
     _require_tree_file(cache, build_root, "root CMake cache")
     build_directory = cache.parent
 
@@ -290,13 +340,32 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("build_root", type=Path)
     parser.add_argument("build_log", type=Path)
     parser.add_argument("--policy", type=Path, default=WINDOWS_TOOLCHAIN)
+    parser.add_argument("--certificate", type=Path)
+    parser.add_argument(
+        "--direct-build",
+        action="store_true",
+        help="certify a CMakeCache.txt directly below BUILD_ROOT",
+    )
     return parser
 
 
 def main() -> int:
     """Certify the requested build tree for command-line callers."""
     args = _parser().parse_args()
-    build_directory = certify_windows_toolchain(args.build_root, args.build_log, args.policy)
+    build_directory = certify_windows_toolchain(
+        args.build_root,
+        args.build_log,
+        args.policy,
+        direct_build=args.direct_build,
+    )
+    if args.certificate is not None:
+        policy = _load_policy(args.policy)
+        _write_atomically(
+            args.certificate,
+            _certificate_payload(
+                policy, _cmake_version_pin(PROJECT_CONFIGURATION), build_directory
+            ),
+        )
     print(f"Certified Windows toolchain metadata: {build_directory.as_posix()}")
     return 0
 

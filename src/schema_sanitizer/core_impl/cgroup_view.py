@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -145,6 +146,8 @@ _CGROUP_MAX_RECORDS = 4096
 _MOUNTINFO_MAX_LINE_BYTES = 64 * 1024
 _MOUNTINFO_MAX_TOTAL_BYTES = 8 * 1024 * 1024
 _MOUNTINFO_MAX_RECORDS = 65_536
+_SIGNED_64_MAX = (1 << 63) - 1
+_CGROUP_DECIMAL = re.compile(r"(?:-1|[0-9]+)")
 
 
 class _ProcReadLimitExceeded(RuntimeError):
@@ -506,13 +509,14 @@ def _parse_cgroup_integer(raw: str | None, *, path: Path | None) -> CgroupIntege
         return CgroupIntegerSample(CgroupValueState.UNKNOWN, path=path)
     if raw == "max":
         return CgroupIntegerSample(CgroupValueState.UNBOUNDED, path=path)
-    try:
-        value = int(raw, 10)
-    except ValueError:
+    if _CGROUP_DECIMAL.fullmatch(raw) is None:
         return CgroupIntegerSample(CgroupValueState.UNKNOWN, path=path)
-    if value < 0:
-        # v1 CPU quota uses -1 for unlimited; generic integer limit files that
-        # reach this parser also treat a negative sentinel as known-unbounded.
+    value = int(raw, 10)
+    if value < -1 or value > _SIGNED_64_MAX:
+        return CgroupIntegerSample(CgroupValueState.UNKNOWN, path=path)
+    if value == -1:
+        # cgroup-v1 CPU quota uses exactly -1 for unlimited. Other negative
+        # values are malformed and must not disable resource enforcement.
         return CgroupIntegerSample(CgroupValueState.UNBOUNDED, path=path)
     if value >= (1 << 62):
         # Cgroup-v1 memory controllers often encode "unlimited" as a huge

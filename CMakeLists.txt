@@ -296,6 +296,9 @@ if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
     cpp/src/internal/json_encoding/token_writer.cc)
   target_compile_features(schema_sanitizer_sanitized_ordered_executor
                           PRIVATE cxx_std_23)
+  target_compile_definitions(
+    schema_sanitizer_sanitized_ordered_executor
+    PRIVATE SCHEMA_SANITIZER_TEST_CPU_CAPACITY_OVERRIDE=1)
   set_target_properties(
     schema_sanitizer_sanitized_ordered_executor
     PROPERTIES CXX_EXTENSIONS OFF
@@ -323,14 +326,22 @@ if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
   # through the external process-tree watchdog; the repeated concurrency gate
   # remains a macOS ASan/UBSan and Linux TSan contract.
   if(NOT (MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan"))
-    add_test(NAME schema_sanitizer_sanitized_ordered_executor
-             COMMAND schema_sanitizer_sanitized_ordered_executor --rounds
-                     ${_schema_sanitizer_sanitized_executor_rounds})
+    add_test(
+      NAME schema_sanitizer_sanitized_ordered_executor
+      COMMAND schema_sanitizer_sanitized_ordered_executor --fixed-cpu-capacity
+              3 --rounds ${_schema_sanitizer_sanitized_executor_rounds})
+    add_test(NAME schema_sanitizer_sanitized_ordered_executor_fixed_four
+             COMMAND schema_sanitizer_sanitized_ordered_executor
+                     --fixed-cpu-capacity 4 --case lane_stealing)
   endif()
   if(SCHEMA_SANITIZER_SANITIZER STREQUAL "tsan")
-    add_test(NAME schema_sanitizer_tsan_ordered_executor
-             COMMAND schema_sanitizer_sanitized_ordered_executor --rounds
-                     ${_schema_sanitizer_sanitized_executor_rounds})
+    add_test(
+      NAME schema_sanitizer_tsan_ordered_executor
+      COMMAND schema_sanitizer_sanitized_ordered_executor --fixed-cpu-capacity
+              3 --rounds ${_schema_sanitizer_sanitized_executor_rounds})
+    add_test(NAME schema_sanitizer_tsan_ordered_executor_fixed_four
+             COMMAND schema_sanitizer_sanitized_ordered_executor
+                     --fixed-cpu-capacity 4 --case lane_stealing)
   endif()
 endif()
 

@@ -197,7 +197,7 @@ def test_uncertain_fd_duplicate_repairs_count_and_terminal_publication(
         "_UNCERTAIN_FD_CLOSE_DEBTS",
         [module._UncertainFdCloseDebtSlot() for _ in range(governor.capacity)],
     )
-    module._UNCERTAIN_FD_CLOSE_COUNT = 0
+    monkeypatch.setattr(module, "_UNCERTAIN_FD_CLOSE_COUNT", 0)
     published: list[tuple[str, int]] = []
     monkeypatch.setattr(
         module,
@@ -208,7 +208,7 @@ def test_uncertain_fd_duplicate_repairs_count_and_terminal_publication(
 
     assert module.retain_uncertain_fd_close(lease, label="physical-claim-cleanup-repairs-stale-low")
     # Inject loss of the derived counter after exact slot publication.
-    module._UNCERTAIN_FD_CLOSE_COUNT = 0
+    monkeypatch.setattr(module, "_UNCERTAIN_FD_CLOSE_COUNT", 0)
     assert module.retain_uncertain_fd_close(lease, label="physical-claim-cleanup-repairs-stale-low")
     assert module._UNCERTAIN_FD_CLOSE_COUNT == 1
     assert published[-1] == ("uncertain_fd_close", id(lease))

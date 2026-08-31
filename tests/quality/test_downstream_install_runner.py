@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import os
-import shlex
 import shutil
 import subprocess
 import tomllib
@@ -62,10 +61,20 @@ def test_every_extra_is_installed_and_imported_in_isolation(
     assert plan.count("[downstream-extra]") == len(module.EXTRA_IMPORTS)
     for extra, imports in module.EXTRA_IMPORTS.items():
         assert f"[downstream-extra] {extra}" in plan
-        requirement = wheel.as_posix() if extra == "core" else f"{wheel.as_posix()}[{extra}]"
-        assert requirement in plan
+        requirement_file = tmp_path / f"requirements-extra-{extra}.txt"
+        requirement = requirement_file.read_text(encoding="utf-8")
+        project = "schema-sanitizer" if extra == "core" else f"schema-sanitizer[{extra}]"
+        assert requirement.startswith(f"{project} @ {wheel.as_uri()}")
+        assert "--hash=sha256:" in requirement
+        assert requirement_file.as_posix() in plan
         for imported in imports:
             assert f"import {imported}" in plan
+    assert plan.count("--require-hashes") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("--only-binary=:all:") == len(module.EXTRA_IMPORTS) + 1
+    consumer = (tmp_path / "requirements-consumer.txt").read_text(encoding="utf-8")
+    assert "mypy==1.19.1 \\" in consumer
+    assert "pyarrow==25.0.1 \\" in consumer
+    assert consumer.count("--hash=sha256:") > 2
     assert plan.index("downstream_typecheck.py") < plan.index("[downstream-extra] core")
 
 
@@ -81,7 +90,8 @@ def test_downstream_plan_quotes_paths_and_owns_cleanup(tmp_path: Path) -> None:
 
     plan = module.shell_plan(wheel, tmp_path / "work root", SCRIPT.parent, constraints, seed_wheels)
 
-    assert shlex.quote(wheel.as_posix()) in plan
+    requirement = (tmp_path / "work root" / "requirements-consumer.txt").read_text(encoding="utf-8")
+    assert wheel.as_uri() in requirement
     assert "trap cleanup_downstream EXIT" in plan
     assert 'rm -rf -- "${isolated_root}"' in plan
     assert plan == module.shell_plan(
@@ -206,7 +216,14 @@ def test_downstream_plan_allows_read_only_inputs_to_share_a_tree(tmp_path: Path)
     scripts = tmp_path / "support"
     scripts.mkdir()
     constraints = scripts / "constraints.txt"
-    constraints.write_text("dependency==1\n", encoding="utf-8")
+    constraints.write_text("dependency==1\nmypy==1\npyarrow==1\n", encoding="utf-8")
+    artifact_lock = scripts / "artifacts.lock"
+    artifact_lock.write_text(
+        f"dependency==1 sha256:{'a' * 64}\n"
+        f"mypy==1 sha256:{'b' * 64}\n"
+        f"pyarrow==1 sha256:{'c' * 64}\n",
+        encoding="utf-8",
+    )
     wheel = tmp_path / "package.whl"
     wheel.write_bytes(b"wheel")
     seed_wheels = _seed_wheels(module, tmp_path)
@@ -217,10 +234,13 @@ def test_downstream_plan_allows_read_only_inputs_to_share_a_tree(tmp_path: Path)
         scripts,
         constraints,
         seed_wheels,
+        artifact_lock=artifact_lock,
         command_output=tmp_path / "commands.sh",
     )
 
-    assert constraints.as_posix() in plan
+    hashed = tmp_path / "work" / "hashed-downstream-constraints.txt"
+    assert hashed.as_posix() in plan
+    assert "dependency==1" in hashed.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(("primary_status", "expected_status"), ((0, 23), (7, 7)))

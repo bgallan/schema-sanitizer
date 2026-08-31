@@ -19,6 +19,7 @@ import pytest
 from _support.synchronization import (
     SCHEDULER_TIMEOUT_SECONDS,
     join_thread_or_fail,
+    run_isolated_python_probe,
     wait_for_process_exit,
 )
 
@@ -202,9 +203,8 @@ def test_provider_key_gate_cleanup_survives_repeated_cancellation() -> None:
     asyncio.run(run())
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
-def test_fork_child_drops_inherited_resource_contextvars() -> None:
-    """The surviving fork thread must not retain parent resource ownership graphs."""
+def _probe_fork_child_drops_inherited_resource_contextvars() -> None:
+    """Exercise inherited context cleanup in a disposable process."""
     from schema_sanitizer.api_impl import partition_resources
     from schema_sanitizer.core_impl import cancellation
     from schema_sanitizer.remote_impl import provider_session_pool
@@ -238,6 +238,12 @@ def test_fork_child_drops_inherited_resource_contextvars() -> None:
         cancellation._CURRENT_TOKEN.reset(cancellation_token)
         partition_resources._CURRENT_PARTITION_RESOURCES.reset(partition_token)
         provider_session_pool._CURRENT_POOL.reset(pool_token)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_fork_child_drops_inherited_resource_contextvars() -> None:
+    """The surviving fork thread must not retain parent resource ownership graphs."""
+    run_isolated_python_probe(__file__, "_probe_fork_child_drops_inherited_resource_contextvars")
 
 
 @pytest.mark.parametrize(

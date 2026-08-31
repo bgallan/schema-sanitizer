@@ -43,6 +43,7 @@ runs:
         cache-dependency-path: |-
           pyproject.toml
           meta/ci/requirements/build-tools.txt
+          meta/ci/requirements/python-artifact-sha256.lock
     - name: Install wheel tooling
       env:
         PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
@@ -51,8 +52,66 @@ runs:
       run: |-
         set -euo pipefail
         python meta/ci/quality/ensure_pinned_pip.py
-        python -m pip install --only-binary=:all: \
-          abi3audit==0.0.26 cibuildwheel==4.2.0 pytest==9.1.1
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --packages abi3audit cibuildwheel pytest
+    - name: Prepare the authenticated offline cibuildwheel package source
+      env:
+        PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- .work/python-artifacts
+        packages=(
+          abi3audit auditwheel build cibuildwheel cmake ninja packaging pip
+          pyarrow pytest scikit-build-core setuptools virtualenv wheel
+        )
+        case "${PLATFORM_ARTIFACT}" in
+          linux) ;;
+          macos-arm64 | macos-x86_64) packages+=(delocate) ;;
+          windows) packages+=(delvewheel) ;;
+          *)
+            echo "Unsupported package-source platform: ${PLATFORM_ARTIFACT}" >&2
+            exit 2
+            ;;
+        esac
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --download .work/python-artifacts \
+          --packages "${packages[@]}"
+        python - <<'PY'
+        import hashlib
+        import json
+        from pathlib import Path
+        root = Path(".work/python-artifacts")
+        if root.is_symlink() or not root.is_dir():
+            raise SystemExit("authenticated package source directory is missing or unsafe")
+        entries = sorted(root.iterdir())
+        if not entries or any(entry.is_symlink() or not entry.is_file() for entry in entries):
+            raise SystemExit("authenticated package source contains a missing or unsafe entry")
+        unexpected = [entry.name for entry in entries if entry.suffix != ".whl"]
+        if unexpected:
+            raise SystemExit(f"authenticated package source contains non-wheels: {unexpected}")
+        certificate = Path(".work/python-artifacts-certificate.json")
+        if certificate.is_symlink() or (certificate.exists() and not certificate.is_file()):
+            raise SystemExit("authenticated package source certificate path is unsafe")
+        inventory = {
+            entry.name: hashlib.sha256(entry.read_bytes()).hexdigest() for entry in entries
+        }
+        certificate.write_text(
+            json.dumps(
+                {
+                    "files": inventory,
+                    "format": "schema-sanitizer-python-artifact-source-v1",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"authenticated offline package source: {len(entries)} wheels")
+        PY
     - name: Assert the build environment has no PyArrow
       shell: bash
       run: >-
@@ -177,9 +236,13 @@ runs:
         # cibuildwheel's copied-project path inside its OCI container.
         PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_FIND_LINKS: ${{ github.workspace }}/.work/python-artifacts
+        PIP_NO_INDEX: '1'
         CIBW_ENVIRONMENT_LINUX: >-
           PIP_BUILD_CONSTRAINT=/project/meta/ci/requirements/build-tools.txt
           PIP_CONSTRAINT=/project/meta/ci/requirements/build-tools.txt
+          PIP_FIND_LINKS=/project/.work/python-artifacts
+          PIP_NO_INDEX=1
         # cibuildwheel Linux builds run in a container; explicitly propagate
         # the deterministic timestamp and non-interactive pip policy.
         CIBW_ENVIRONMENT_PASS_LINUX: >-
@@ -201,6 +264,11 @@ runs:
           echo 'cibuildwheel reported an unraisable exception' >&2
           exit 2
         fi
+        if grep -Eq -- 'Looking in indexes:|Collecting .*https?://' \
+          .work/cibuildwheel.log; then
+          echo 'cibuildwheel attempted a registry download outside the authenticated package source' >&2
+          exit 2
+        fi
         if grep -Fq -- 'win-x86-commandline/latest/nuget.exe' \
           .work/cibuildwheel.log; then
           echo 'cibuildwheel attempted a mutable NuGet download' >&2
@@ -211,6 +279,29 @@ runs:
           echo 'cibuildwheel ignored the verified local CPython installation' >&2
           exit 2
         fi
+        python - <<'PY'
+        import hashlib
+        import json
+        from pathlib import Path
+        root = Path(".work/python-artifacts")
+        certificate = Path(".work/python-artifacts-certificate.json")
+        if root.is_symlink() or not root.is_dir():
+            raise SystemExit("authenticated package source directory was replaced")
+        if certificate.is_symlink() or not certificate.is_file():
+            raise SystemExit("authenticated package source certificate is missing or unsafe")
+        payload = json.loads(certificate.read_text(encoding="utf-8"))
+        if payload.get("format") != "schema-sanitizer-python-artifact-source-v1":
+            raise SystemExit("authenticated package source certificate format is invalid")
+        entries = sorted(root.iterdir())
+        if any(entry.is_symlink() or not entry.is_file() for entry in entries):
+            raise SystemExit("authenticated package source was replaced during the build")
+        observed = {
+            entry.name: hashlib.sha256(entry.read_bytes()).hexdigest() for entry in entries
+        }
+        if observed != payload.get("files"):
+            raise SystemExit("authenticated package source changed during the build")
+        print(f"authenticated package source remained exact: {len(entries)} wheels")
+        PY
     - name: Certify the Windows release toolchain
       if: runner.os == 'Windows'
       shell: bash
@@ -250,7 +341,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python -m pip install --only-binary=:all: wheelhouse/*.whl
+        python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
         python - <<'PY'
         from pathlib import Path
         import schema_sanitizer as package
@@ -287,7 +378,9 @@ runs:
       run: |
         set -euo pipefail
         python meta/ci/quality/ensure_pinned_pip.py
-        python -m pip install --only-binary=:all: pyarrow==25.0.1 wheelhouse/*.whl
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt --packages pyarrow
+        python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
         python -I meta/ci/release/downstream_smoke.py
     - name: Set up CPython 3.13 for stable-ABI functional coverage
       if: inputs.artifact == 'linux'
@@ -302,7 +395,9 @@ runs:
       run: |
         set -euo pipefail
         python meta/ci/quality/ensure_pinned_pip.py
-        python -m pip install --only-binary=:all: pyarrow==25.0.1 wheelhouse/*.whl
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt --packages pyarrow
+        python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
         python -I meta/ci/release/downstream_smoke.py
     - name: Set up the newest supported Python
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -315,7 +410,9 @@ runs:
       run: |
         set -euo pipefail
         python meta/ci/quality/ensure_pinned_pip.py
-        python -m pip install --only-binary=:all: pyarrow==25.0.1 wheelhouse/*.whl
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt --packages pyarrow
+        python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
         python -c "import sys, schema_sanitizer as s, schema_sanitizer._core_abi3 as c; print(sys.version.split()[0], s.__version__, c.__file__)"
         python -I meta/ci/release/abi_public_smoke.py
     - name: Exercise the ABI3 wheel on CPython 3.14
@@ -325,22 +422,23 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python -m pip install --only-binary=:all: pyarrow==25.0.1
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt --packages pyarrow
         python -I meta/ci/release/downstream_smoke.py
-    - name: Set up the next CPython release candidate outside pull requests
-      if: inputs.artifact == 'linux' && github.event_name != 'pull_request'
+    - name: Set up the next CPython release candidate
+      if: inputs.artifact == 'linux'
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
         python-version: 3.15.0-rc.1
     - name: Probe the ABI3 wheel on CPython 3.15 RC
-      if: inputs.artifact == 'linux' && github.event_name != 'pull_request'
+      if: inputs.artifact == 'linux'
       env:
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: |-
         set -euo pipefail
         python meta/ci/quality/ensure_pinned_pip.py
-        python -m pip install --only-binary=:all: wheelhouse/*.whl
+        python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
         python -I -c \
           "import sys, schema_sanitizer as s, schema_sanitizer._core_abi3 as c; options=s.SanitizeOptions(); print(sys.version.split()[0], s.__version__, type(options).__name__, c.__file__)"
     - name: Upload the certified platform wheel

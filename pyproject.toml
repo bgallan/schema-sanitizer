@@ -106,9 +106,12 @@ Issues = "https://github.com/bgallan/schema-sanitizer/issues"
 # runner does not need cibuildwheel's auxiliary virtualenv.pyz download.
 audit-command = ""
 build = "cp311-*"
+build-frontend = {name = "build", args = ["--no-isolation"]}
 build-verbosity = 0
+before-build = 'python "{package}/meta/ci/quality/ensure_pinned_pip.py" && python -m pip --version && python "{package}/meta/ci/quality/install_locked_requirements.py" --lock "{package}/meta/ci/requirements/build-tools.txt" --artifact-lock "{package}/meta/ci/requirements/python-artifact-sha256.lock" --packages build auditwheel scikit-build-core cmake ninja'
+before-test = 'python "{project}/meta/ci/quality/ensure_pinned_pip.py" && python -m pip --version && python "{project}/meta/ci/quality/install_locked_requirements.py" --lock "{project}/meta/ci/requirements/build-tools.txt" --artifact-lock "{project}/meta/ci/requirements/python-artifact-sha256.lock" --packages pyarrow'
 dependency-versions = "meta/ci/requirements/build-tools.txt"
-test-requires = ["pyarrow==25.0.1"]
+test-requires = []
 test-command = "python {project}/meta/ci/parquet/check_parquet_compression_matrix.py"
 
 [tool.cibuildwheel.linux]
@@ -116,10 +119,10 @@ skip = "*-musllinux_*"
 manylinux-x86_64-image = "manylinux_2_28"
 
 [tool.cibuildwheel.macos]
-environment = {DEVELOPER_DIR = "/Applications/Xcode_16.4.app/Contents/Developer", MACOSX_DEPLOYMENT_TARGET = "11.0"}
+environment = {DEVELOPER_DIR = "/Applications/Xcode_16.4.app/Contents/Developer", MACOSX_DEPLOYMENT_TARGET = "11.0", PIP_FIND_LINKS = "$GITHUB_WORKSPACE/.work/python-artifacts", PIP_NO_INDEX = "1"}
 
 [tool.cibuildwheel.windows]
-environment = {CMAKE_BUILD_PARALLEL_LEVEL = "1", CMAKE_GENERATOR = "Visual Studio 17 2022", CMAKE_GENERATOR_INSTANCE = "C:/Program Files/Microsoft Visual Studio/2022/Enterprise", CMAKE_GENERATOR_PLATFORM = "x64", CMAKE_GENERATOR_TOOLSET = "v143,host=x64"}
+environment = {CMAKE_BUILD_PARALLEL_LEVEL = "1", CMAKE_GENERATOR = "Visual Studio 17 2022", CMAKE_GENERATOR_INSTANCE = "C:/Program Files/Microsoft Visual Studio/2022/Enterprise", CMAKE_GENERATOR_PLATFORM = "x64", CMAKE_GENERATOR_TOOLSET = "v143,host=x64,version=14.44.35207", PIP_FIND_LINKS = "$GITHUB_WORKSPACE/.work/python-artifacts", PIP_NO_INDEX = "1"}
 repair-wheel-command = "python -W error -m delvewheel repair --extract-dir {project}/.work/delvewheel-extract --add-path {project}/.work/msvc-redist -w {dest_dir} -v {wheel}"
 
 [tool.coverage.html]

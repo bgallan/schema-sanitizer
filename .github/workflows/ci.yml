@@ -85,7 +85,6 @@ jobs:
         with:
           platform-name: linux-x86_64
           artifact: linux
-          minimum-cpu-capacity: 4
           shard: ${{ matrix.shard }}
   platform-tests-windows-amd64:
     if: ${{ !cancelled() }}
@@ -104,7 +103,6 @@ jobs:
         with:
           platform-name: windows-amd64
           artifact: windows
-          minimum-cpu-capacity: 4
           shard: ${{ matrix.shard }}
   platform-tests-macos-x86-64:
     if: ${{ !cancelled() }}
@@ -123,7 +121,6 @@ jobs:
         with:
           platform-name: macos-x86_64
           artifact: macos-x86_64
-          minimum-cpu-capacity: 4
           shard: ${{ matrix.shard }}
   platform-tests-macos-arm64:
     if: ${{ !cancelled() }}
@@ -142,7 +139,6 @@ jobs:
         with:
           platform-name: macos-arm64
           artifact: macos-arm64
-          minimum-cpu-capacity: 3
           shard: ${{ matrix.shard }}
 
   # Source, quality, coverage, and sanitizer workloads are one heterogeneous
@@ -220,6 +216,7 @@ jobs:
             meta/ci/requirements/build-tools.txt
             meta/ci/requirements/quality.txt
             meta/ci/requirements/pre-commit-hooks.txt
+            meta/ci/requirements/python-artifact-sha256.lock
       - if: matrix.task == 'source-distribution'
         uses: ./.github/actions/restore-pip-cache
         with:
@@ -229,6 +226,7 @@ jobs:
             pyproject.toml
             meta/ci/requirements/build-tools.txt
             meta/ci/requirements/downstream.txt
+            meta/ci/requirements/python-artifact-sha256.lock
       - if: matrix.task == 'native-llvm-coverage'
         uses: ./.github/actions/restore-pip-cache
         with:
@@ -238,12 +236,15 @@ jobs:
             pyproject.toml
             meta/ci/requirements/build-tools.txt
             meta/ci/requirements/platform-tests.txt
+            meta/ci/requirements/python-artifact-sha256.lock
       - if: matrix.task == 'thread-sanitizer'
         uses: ./.github/actions/restore-pip-cache
         with:
           owner: thread-sanitizer
           python-version: ${{ matrix.python }}
-          dependency-paths: meta/ci/requirements/build-tools.txt
+          dependency-paths: |-
+            meta/ci/requirements/build-tools.txt
+            meta/ci/requirements/python-artifact-sha256.lock
       - if: matrix.task == 'platform-sanitizer'
         uses: ./.github/actions/restore-pip-cache
         with:
@@ -252,6 +253,7 @@ jobs:
           dependency-paths: |-
             pyproject.toml
             meta/ci/requirements/build-tools.txt
+            meta/ci/requirements/python-artifact-sha256.lock
       - name: Require a known validation workload
         env:
           VALIDATION_TASK: ${{ matrix.task }}
@@ -331,7 +333,9 @@ jobs:
         with:
           owner: validation-gate
           python-version: 3.13.15
-          dependency-paths: meta/ci/requirements/build-tools.txt
+          dependency-paths: |-
+            meta/ci/requirements/build-tools.txt
+            meta/ci/requirements/python-artifact-sha256.lock
       - name: Reset release-assembly destinations
         shell: bash
         run: |-
@@ -535,7 +539,8 @@ jobs:
           [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
           export SOURCE_DATE_EPOCH
           python meta/ci/quality/ensure_pinned_pip.py
-          python -m pip install --only-binary=:all: twine==7.0.0 packaging==26.3
+          python -m meta.ci.quality.install_locked_requirements \
+            --lock meta/ci/requirements/build-tools.txt --packages twine packaging
           python -m twine check dist/*
           python meta/ci/release/check_distribution_contents.py --release-set dist/*
       - name: Assemble the auditable release artifact

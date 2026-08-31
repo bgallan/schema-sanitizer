@@ -161,8 +161,8 @@ rather than an import from `src/`, on:
 |---|---|---|
 | Ubuntu 24.04 / Linux x86-64 | `manylinux_2_27_x86_64.manylinux_2_28_x86_64` | Installed-wheel functional suite; ASan/UBSan extension and libFuzzer campaigns; enforceable LLVM coverage; and GCC TSan executor, extension-domain, and fuzz coverage. |
 | Windows Server 2022 / AMD64 | `win_amd64` | Installed-wheel functional suite; MSVC ASan extension smoke, bounded concurrency case, and deterministic standalone fuzz campaigns. |
-| macOS 15 / x86-64 | `macosx_11_0_x86_64` | Installed-wheel functional suite; ASan/UBSan extension smoke, 100-round concurrency probe, and deterministic standalone fuzz campaigns. |
-| macOS 15 / ARM64 | `macosx_11_0_arm64` | Installed-wheel functional suite; ASan/UBSan extension smoke, 100-round concurrency probe, and deterministic standalone fuzz campaigns. |
+| macOS 15 / x86-64 | `macosx_11_0_x86_64` | Installed-wheel functional suite; ASan/UBSan extension smoke, fixed three-credit 100-round concurrency and four-credit lane-stealing probes, and deterministic standalone fuzz campaigns. |
+| macOS 15 / ARM64 | `macosx_11_0_arm64` | Installed-wheel functional suite; ASan/UBSan extension smoke, fixed three-credit 100-round concurrency and four-credit lane-stealing probes, and deterministic standalone fuzz campaigns. |
 
 Each wheel is built for CPython 3.11 with the stable ABI (`cp311-abi3`). The
 complete functional suite runs on the same CPython 3.11 patch and the same fully locked
@@ -172,17 +172,26 @@ live in `meta/ci/requirements/platform-tests.txt`, which is also the setup-Pytho
 cache key, so changing the environment invalidates the cache deterministically.
 Build, release, sanitizer, and cibuildwheel build/test isolation share the exact
 `build-tools.txt` owner lock; Linux containers receive its `/project` path while
-host builds receive an absolute workspace path. Pre-commit's independently
-created hook environments use the separate exact `pre-commit-hooks.txt` lock.
-The dependency audit scans each executable lock independently and statically
+host builds receive an absolute workspace path. Every Python artifact is also
+bound to the reviewed SHA-256 allowlist in
+`python-artifact-sha256.lock`. Pre-commit uses one local `language: system` hook
+set owned by the separate exact `pre-commit-hooks.txt` lock. Its repository
+dispatcher reuses CI's exact installation or bootstraps one content-addressed
+developer environment below `.work`, so it neither mutates the active environment
+nor creates independently resolved hook environments.
+The dependency audit scans each executable lock independently, statically
 requires every declared project, build, and CI-tool dependency to have a
-compatible owner pin. Validation cells use exact interpreter patches as well.
-Pip and apt receive bounded transport retries and timeouts. Linux additionally
+compatible owner pin, and verifies a reviewed snapshot bound to those locks and
+`pyproject.toml`. A scheduled or manually requested maintenance workflow queries
+live advisory data and uploads a reviewable candidate without making ordinary
+snapshot drift a random CI failure. Validation cells use exact interpreter
+patches as well. Registry-facing pip subprocesses have bounded process-tree
+timeouts. Linux additionally
 executes the installed public conversion smoke on
 exact 3.12, 3.13, and 3.14 patches, and every platform loads it on the exact
-3.14 patch. Outside pull requests, Linux also probes the wheel and native module
-on the exact CPython 3.15 release candidate; this forward-compatibility signal
-does not extend pull-request latency. `platform-wheel-builds` defines the runner,
+3.14 patch. Linux also probes the wheel and native module on the exact CPython
+3.15 release candidate for pull requests, pushes, and release validation, keeping
+the topology identical across entry points. `platform-wheel-builds` defines the runner,
 release platform, cibuildwheel architecture, and wheel artifact identifier once
 for each of the four targets. Four `platform-tests-PLATFORM` jobs list the exact
 12-entry product of those platforms and the `concurrency`, `memory-parquet`,
@@ -203,8 +212,9 @@ contracts, and all 12 test entries become runnable together after the barrier.
 
 Each test job uses `if: ${{ !cancelled() }}`. A failed wheel cell therefore
 does not prevent matrix expansion: the three shards for platforms with a valid
-artifact still execute, while the failed platform's shards fail closed when
-their exact artifact remains unavailable after the bounded clean retry. A
+artifact still execute, while a failed platform's shards emit a clear notice and
+finish as clean no-ops. The failed `platform-wheel-builds` aggregate and terminal
+gate retain the single root-cause failure, without three derivative red jobs. A
 cancelled workflow starts no new test work. The four jobs deliberately omit a
 dynamic job-level `name`; GitHub can append the shard to their static job IDs
 for expanded cells, and a pre-expansion cancellation still displays a static
@@ -332,10 +342,13 @@ timing changes remain comparable evidence instead of a flaky release gate.
 
 The shared build action pins cibuildwheel and abi3audit. The PEP 517 build
 requirements and scikit-build configuration also require exactly CMake 4.3.4,
-Ninja 1.13.0, and scikit-build-core 0.11.6, with Make fallback disabled. After
-cibuildwheel emits each repaired wheel, CI runs `abi3audit --strict` explicitly
-as a blocking gate. This preserves the upstream stable-ABI check while avoiding
-its hidden cold-runner download of `virtualenv.pyz` from release hosting.
+Ninja 1.13.0, and scikit-build-core 0.11.6, with Make fallback disabled.
+Every platform also replaces cibuildwheel's bundled build frontend and Linux
+repair tool with the hash-reviewed `build` 1.5.0 and `auditwheel` 6.7.0 from the
+repository wheelhouse. After cibuildwheel emits each repaired wheel, CI runs
+`abi3audit --strict` explicitly as a blocking gate. This preserves the upstream
+stable-ABI check while avoiding its hidden cold-runner download of
+`virtualenv.pyz` from release hosting.
 
 Each wheel artifact also carries a provenance-bound native certificate over the
 wheel and extension digests. The verifier parses the binary rather than trusting
@@ -424,8 +437,9 @@ distribution, and manifest destinations. Native linkage certification also
 fails when neither `otool` nor `ldd` is available; the absence of an inspection
 tool can never print a successful no-Arrow result.
 
-Linux sanitizer setup installs exact Clang/LLVM 18.1.3 and GCC/G++ 14.2.0 apt
-revisions, then verifies both package and compiler identities. macOS builds
+Linux sanitizer setup admits only the runner's exact Clang/LLVM 18.1.3 and
+GCC/G++ 14.2.0 executable paths and versions; it does not mutate the runner
+package inventory. macOS builds
 select Xcode 16.4, SDK 15.5, and its exact AppleClang release; Windows release
 builds select VS 2022/v143 and verify its persisted generator cache fields,
 generated C and C++ compiler metadata, pinned CMake producer, and sole reviewed
@@ -436,7 +450,7 @@ Every sanitizer workload finishes by serializing its exact runtime options,
 suppression policy, platform identity, and watchdog evidence into a canonical
 run certificate bound to the GitHub commit, run, and attempt. Across the four
 platform sanitizer entries and the TSan entry, the gate requires exactly five
-run certificates and 12 raw watchdog certificates: no missing tuple, duplicate,
+run certificates and 14 raw watchdog certificates: no missing tuple, duplicate,
 renamed file, or unreviewed extra is accepted. The TSan policy has no broad
 non-instrumented-module suppression, and sanitizer subprocesses are terminated
 as process trees when an anti-hang deadline expires.
@@ -450,10 +464,11 @@ the complete regular-file dependency inputs for that workload. There are no
 partial restore prefixes. Cache access is allowed to fail, while the normal
 locked installation and `pip check` remain mandatory, so a cache hit can reduce
 downloads but can never establish correctness or select dependency versions.
-Quality's pre-commit environments use the same principle: an exact
-OS/architecture/Python/configuration key is only an accelerator, every hook is
-still installed and executed, and a failed bootstrap removes the owned cache
-before its bounded retry.
+Quality installs the complete hook tool lock once through hash-checking mode,
+certifies it, and explicitly enables the dispatcher's current-environment fast
+path. Local runs use the same dispatcher and automatically create a hash-verified
+cache instead of trusting ambient matching versions. No pre-commit repository
+clone or independently resolved hook environment participates in correctness.
 
 Windows wheel builds provision CPython 3.11.9 from a pinned NuGet package before
 cibuildwheel starts. An exact-key cache may supply the `.nupkg`, but the action
@@ -579,20 +594,23 @@ authority:
 | `release-gate` | Runs unconditionally and accepts only successful reconciliation and verification. It requires `publish=success` when `publish_required=true`, or `publish=skipped` when it is false. | No repository or package-index authority. |
 
 Every external action used by workflows or repository-owned composite actions,
-and every remote pre-commit hook, including GitHub-maintained actions, is pinned
-to a full 40-character commit SHA. A nearby version comment
+including GitHub-maintained actions, is pinned to a full 40-character commit SHA.
+Pre-commit has no remote hooks. A nearby version comment
 preserves readability. The Dependabot configuration in
 `.github/dependabot.yml` checks the `github-actions` ecosystem weekly so an
 update arrives as a reviewable commit-pin change. Review upstream release notes
-and the pin diff before merging; update pre-commit hook pins deliberately, and
-never replace a full SHA with a mutable branch or tag.
+and the pin diff before merging, and never replace a full SHA with a mutable
+branch or tag.
 
 ShellCheck and shfmt are local pre-commit hooks with exact `shellcheck-py` and
 `shfmt-py` dependency pins. Their supported-platform wheels contain the
-executables, so a clean quality runner neither depends on a system installation
-nor builds a wrapper that downloads a second binary from release hosting. The
-dependency-audit input lists both wrapper packages explicitly even though
-pre-commit installs them in isolated environments.
+executables, so a clean quality runner does not depend on a system installation.
+All hook tools share the hash-installed owner lock. The sole source-only wrapper,
+`actionlint-py`, is installed without build isolation or cache behind a bounded
+retry; its source artifact is hash-locked, its embedded download verifies the
+actionlint release digest, and CI checks the resulting binary reports version
+1.7.12 before any hook runs. A developer's first plain pre-commit invocation uses
+that same bounded installation sequence in the isolated `.work` cache.
 
 PyPI publication uses
 [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) instead of a
@@ -782,16 +800,23 @@ auditable.
 Run the normal source, typing, security-helper, and complete Python gates with:
 
 ```bash
-python -m pip install -U pip '.[dev]' \
-  coverage pip-audit bandit detect-secrets tomli
+python meta/ci/quality/ensure_pinned_pip.py
+python -m meta.ci.quality.install_locked_requirements \
+  --lock meta/ci/requirements/quality.txt --all
+python -m meta.ci.quality.install_locked_requirements \
+  --lock meta/ci/requirements/build-tools.txt \
+  --packages build auditwheel scikit-build-core cmake ninja
+python -m pip install --no-build-isolation --no-deps '.[dev]'
 pre-commit run --all-files
 pytest -q
 ```
 
-When changing either shell-tool pin, also prove that its isolated environment
-can bootstrap without a warm pre-commit cache:
+When changing a hook-tool pin or its bootstrap logic, remove only the disposable
+owned cache and prove that a plain cold invocation recreates it without a remote
+hook repository or active-environment mutation:
 
 ```bash
+rm -rf -- .work/pre-commit-tools
 PRE_COMMIT_HOME="$(mktemp -d)" pre-commit run --all-files
 ```
 
@@ -811,13 +836,16 @@ Build and inspect the source distribution and the wheel for the local platform
 with:
 
 ```bash
-python -m pip install -U build abi3audit==0.0.26 \
-  cibuildwheel==4.2.0 packaging twine
+python meta/ci/quality/ensure_pinned_pip.py
+python -m meta.ci.quality.install_locked_requirements \
+  --lock meta/ci/requirements/build-tools.txt \
+  --packages build abi3audit cibuildwheel packaging twine \
+    scikit-build-core cmake ninja
 mkdir -p .work
 SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
 export SOURCE_DATE_EPOCH
 git ls-files -z > .work/sdist-source-manifest
-python -m build --sdist --outdir dist
+python -m build --no-isolation --sdist --outdir dist
 python -m cibuildwheel --output-dir wheelhouse
 python -m abi3audit --strict --report wheelhouse/*.whl
 python -m twine check dist/* wheelhouse/*

@@ -510,12 +510,24 @@ def test_bandit_suppressions_are_an_exact_reviewed_allowlist() -> None:
             "process_table = subprocess.run(  # nosec B603",
         ),
         (
-            "meta/ci/quality/ensure_pinned_pip.py",
-            "status = os.spawnv(os.P_WAIT, sys.executable, command)  # nosec B606",
+            "meta/ci/quality/refresh_python_artifact_hashes.py",
+            "with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310",
+        ),
+        (
+            "meta/ci/quality/run_bounded_command.py",
+            "status = os.spawnv(os.P_WAIT, sys.executable, watchdog_command)  # nosec B606",
         ),
         (
             "meta/ci/quality/run_coverage_suite.py",
             "os.execv(command[0], command)  # nosec B606",
+        ),
+        (
+            "meta/ci/quality/run_pre_commit_tool.py",
+            "return os.spawnve(  # nosec B606",
+        ),
+        (
+            "meta/ci/release/check_publish_environment.py",
+            "with opener.open(request, timeout=15) as response:  # nosec B310",
         ),
         (
             "src/schema_sanitizer/core_impl/process_identity.py",

@@ -6,9 +6,11 @@ directories and rejects obsolete flat-script locations.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
+import re
 import struct
 import sys
 import zipfile
@@ -65,7 +67,7 @@ def _windows_toolchain_tree(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
                 "CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022",
                 "CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files/Microsoft Visual Studio/2022/Enterprise",
                 "CMAKE_GENERATOR_PLATFORM:INTERNAL=x64",
-                "CMAKE_GENERATOR_TOOLSET:INTERNAL=v143,host=x64",
+                "CMAKE_GENERATOR_TOOLSET:INTERNAL=v143,host=x64,version=14.44.35207",
                 "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES:STRING=auto",
                 "",
             )
@@ -113,6 +115,227 @@ def test_ci_helpers_are_grouped_by_owner() -> None:
     assert all(len(path.parts) >= 2 for path in helpers)
     assert {path.parts[0] for path in helpers} <= OWNER_DIRECTORIES
     assert all(path.suffix == ".md" for path in CI_ROOT.iterdir() if path.is_file())
+
+
+def test_pre_commit_dispatcher_and_configuration_have_one_exact_allowlist() -> None:
+    """Every local hook routes through exactly one repository-owned dispatch key."""
+    helper = _load_ci_helper("quality/run_pre_commit_tool.py")
+    config = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+    hook_ids = set(re.findall(r"^      - id: ([a-z0-9-]+)$", config, re.MULTILINE))
+
+    assert hook_ids == set(helper._TOOL_COMMANDS)
+    assert config.count("entry: python meta/ci/quality/run_pre_commit_tool.py ") == len(hook_ids)
+
+
+def test_pre_commit_dispatcher_reuses_an_exact_active_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exact CI environment dispatches directly without touching the local cache."""
+    helper = _load_ci_helper("quality/run_pre_commit_tool.py")
+    observed: list[tuple[Path, str, tuple[str, ...]]] = []
+    monkeypatch.setattr(helper, "_current_environment_is_exact", lambda: True)
+    monkeypatch.setenv(helper.CERTIFIED_CURRENT_ENVIRONMENT, "1")
+
+    def unexpected_fingerprint() -> str:
+        """Fail if the exact-environment fast path consults the bootstrap cache."""
+        raise AssertionError("exact active environment unexpectedly consulted the cache")
+
+    def execute(python: Path, hook_id: str, arguments: tuple[str, ...]) -> int:
+        """Record the selected interpreter and preserve a representative hook status."""
+        observed.append((python, hook_id, arguments))
+        return 17
+
+    monkeypatch.setattr(helper, "_environment_fingerprint", unexpected_fingerprint)
+    monkeypatch.setattr(helper, "_execute_hook", execute)
+
+    assert helper.run_hook("ruff-check", ("file with spaces.py",)) == 17
+    assert observed == [(Path(sys.executable).absolute(), "ruff-check", ("file with spaces.py",))]
+
+
+def test_pre_commit_dispatcher_bootstraps_once_then_reuses_the_owned_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing tool selects one isolated environment and warm runs reuse it."""
+    helper = _load_ci_helper("quality/run_pre_commit_tool.py")
+    fingerprint = "a" * 64
+    environment = tmp_path / "pre-commit-tools" / "owned"
+    bootstraps: list[tuple[Path, str]] = []
+    executions: list[Path] = []
+    monkeypatch.setattr(helper, "_current_environment_is_exact", lambda: True)
+    monkeypatch.delenv(helper.CERTIFIED_CURRENT_ENVIRONMENT, raising=False)
+    monkeypatch.setattr(helper, "_environment_fingerprint", lambda: fingerprint)
+    monkeypatch.setattr(helper, "_environment_path", lambda _fingerprint: environment)
+    monkeypatch.setattr(helper, "_environment_lock", lambda _fingerprint: contextlib.nullcontext())
+    monkeypatch.setattr(
+        helper,
+        "_external_environment_is_exact",
+        lambda _environment, _fingerprint: bool(bootstraps),
+    )
+
+    def bootstrap(path: Path, observed_fingerprint: str) -> None:
+        """Record the sole cold bootstrap without changing the active environment."""
+        bootstraps.append((path, observed_fingerprint))
+
+    def execute(python: Path, _hook_id: str, _arguments: tuple[str, ...]) -> int:
+        """Record the interpreter selected for each cold or warm dispatch."""
+        executions.append(python)
+        return 0
+
+    monkeypatch.setattr(helper, "_bootstrap_environment", bootstrap)
+    monkeypatch.setattr(helper, "_execute_hook", execute)
+
+    assert helper.run_hook("mypy", ()) == 0
+    assert helper.run_hook("mypy", ()) == 0
+    assert bootstraps == [(environment, fingerprint)]
+    assert executions == [helper._environment_python(environment)] * 2
+    assert all(python != Path(sys.executable).absolute() for python in executions)
+
+
+def test_pre_commit_bootstrap_uses_the_exact_hash_locked_sequence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cold setup pins pip, installs prerequisites and the full lock, then certifies."""
+    helper = _load_ci_helper("quality/run_pre_commit_tool.py")
+    monkeypatch.setattr(helper, "ROOT", tmp_path)
+    environment = tmp_path / ".work/pre-commit-tools/owned"
+    bounded: list[tuple[tuple[str, ...], str]] = []
+    helpers: list[tuple[str, tuple[str, ...]]] = []
+    finalization: list[str] = []
+    monkeypatch.setattr(helper, "_reset_environment", lambda _environment: None)
+    monkeypatch.setattr(
+        helper,
+        "_isolated_install_environment",
+        lambda _environment: contextlib.nullcontext(),
+    )
+
+    def bounded_run(command: tuple[str, ...], *, timeout_seconds: int, label: str) -> None:
+        """Record bounded local setup commands without creating a real environment."""
+        assert timeout_seconds > 0
+        bounded.append((tuple(command), label))
+
+    def run_helper(python: Path, script: Path, arguments: tuple[str, ...]) -> None:
+        """Record each target-interpreter bootstrap helper invocation."""
+        assert python == helper._environment_python(environment)
+        helpers.append((script.name, tuple(arguments)))
+
+    def write_ready(_environment: Path, _fingerprint: str) -> None:
+        """Record that readiness is published only after every installer check."""
+        finalization.append("write")
+
+    def validate(_environment: Path, _fingerprint: str) -> bool:
+        """Record the post-publication independent environment certification."""
+        finalization.append("validate")
+        return True
+
+    monkeypatch.setattr(helper, "run_bounded", bounded_run)
+    monkeypatch.setattr(helper, "_run_helper", run_helper)
+    monkeypatch.setattr(helper, "_write_ready", write_ready)
+    monkeypatch.setattr(helper, "_external_environment_is_exact", validate)
+
+    helper._bootstrap_environment(environment, "b" * 64)
+
+    assert bounded[0][0] == (
+        sys.executable,
+        "-I",
+        "-m",
+        "venv",
+        os.fspath(environment),
+    )
+    assert bounded[-1][0] == (
+        os.fspath(helper._environment_python(environment)),
+        "-m",
+        "pip",
+        "check",
+    )
+    assert helpers[0][0] == "ensure_pinned_pip.py"
+    assert helpers[1][1][-5:] == (
+        "--packages",
+        "setuptools",
+        "wheel",
+        "requests",
+        "semver",
+    )
+    assert helpers[2][1][-3:] == ("--all", "--allow-sdist", "actionlint-py")
+    assert finalization == ["write", "validate"]
+
+
+def test_pre_commit_tool_lookup_never_falls_back_to_ambient_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Console-script resolution is confined to the selected venv on every platform."""
+    helper = _load_ci_helper("quality/run_pre_commit_tool.py")
+    environment = tmp_path / "environment"
+    python = helper._environment_python(environment, windows=False)
+    ambient = tmp_path / "ambient" / "fixture-tool"
+    ambient.parent.mkdir(parents=True)
+    ambient.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    ambient.chmod(0o700)
+    monkeypatch.setenv("PATH", os.fspath(ambient.parent))
+
+    assert helper._environment_python(environment, windows=True) == (
+        environment / "Scripts/python.exe"
+    )
+    assert helper._executable_path(python, "fixture-tool") is None
+
+    selected = python.parent / "fixture-tool"
+    selected.parent.mkdir(parents=True)
+    selected.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    selected.chmod(0o700)
+    assert helper._executable_path(python, "fixture-tool") == selected.resolve()
+
+
+def test_pre_commit_lock_retries_contention_only_until_its_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Genuine lock contention retries briefly and then reports one bounded timeout."""
+    helper = _load_ci_helper("quality/run_pre_commit_tool.py")
+    attempts = 0
+    sleeps: list[float] = []
+    times = iter((0.0, 0.0, 2.0))
+    monkeypatch.setattr(helper, "LOCK_TIMEOUT_SECONDS", 1)
+    monkeypatch.setattr(helper.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(helper.time, "sleep", sleeps.append)
+
+    def contend(_handle: object) -> None:
+        """Model a lock held beyond the configured acquisition deadline."""
+        nonlocal attempts
+        attempts += 1
+        raise OSError(helper.errno.EAGAIN, "lock is held")
+
+    monkeypatch.setattr(helper, "_try_platform_lock", contend)
+    with (tmp_path / "lock").open("w+b") as handle:
+        with pytest.raises(TimeoutError, match="tool-cache lock"):
+            helper._acquire_lock(handle)
+
+    assert attempts == 2
+    assert sleeps == [0.1]
+
+
+def test_pre_commit_lock_rejects_noncontention_errors_immediately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unsupported or invalid lock operations never look like hour-long contention."""
+    helper = _load_ci_helper("quality/run_pre_commit_tool.py")
+    attempts = 0
+
+    def unsupported(_handle: object) -> None:
+        """Model a filesystem that cannot provide the requested lock operation."""
+        nonlocal attempts
+        attempts += 1
+        raise OSError(helper.errno.ENOLCK, "locks are unsupported")
+
+    def unexpected_sleep(_seconds: float) -> None:
+        """Fail if a noncontention error enters the retry loop."""
+        raise AssertionError("noncontention lock error unexpectedly retried")
+
+    monkeypatch.setattr(helper, "_try_platform_lock", unsupported)
+    monkeypatch.setattr(helper.time, "sleep", unexpected_sleep)
+    with (tmp_path / "lock").open("w+b") as handle:
+        with pytest.raises(OSError) as raised:
+            helper._acquire_lock(handle)
+
+    assert raised.value.errno == helper.errno.ENOLCK
+    assert attempts == 1
 
 
 def test_ci_shell_entry_points_remain_executable() -> None:
@@ -287,6 +510,35 @@ def test_windows_toolchain_certificate_accepts_visual_studio_generated_metadata(
     assert helper.certify_windows_toolchain(build_root, paths["log"]) == paths["cache"].parent
 
 
+def test_windows_toolchain_certificate_supports_direct_sanitizer_builds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The direct ASan tree emits the canonical toolchain record bound into evidence."""
+    helper = _load_ci_helper("native/certify_windows_toolchain.py")
+    _build_root, paths = _windows_toolchain_tree(tmp_path)
+    direct_root = paths["cache"].parent
+    certificate = tmp_path / "windows-toolchain-Windows-X64.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "certify_windows_toolchain.py",
+            str(direct_root),
+            str(paths["log"]),
+            "--direct-build",
+            "--certificate",
+            str(certificate),
+        ],
+    )
+
+    assert helper.main() == 0
+    assert json.loads(certificate.read_text(encoding="utf-8")) == helper._certificate_payload(
+        helper._load_policy(helper.WINDOWS_TOOLCHAIN),
+        "4.3.4",
+        direct_root,
+    )
+
+
 @pytest.mark.parametrize(
     ("entry", "replacement"),
     (
@@ -301,7 +553,7 @@ def test_windows_toolchain_certificate_accepts_visual_studio_generated_metadata(
         ),
         ("CMAKE_GENERATOR_PLATFORM:INTERNAL=x64", "CMAKE_GENERATOR_PLATFORM:INTERNAL=ARM64"),
         (
-            "CMAKE_GENERATOR_TOOLSET:INTERNAL=v143,host=x64",
+            "CMAKE_GENERATOR_TOOLSET:INTERNAL=v143,host=x64,version=14.44.35207",
             "CMAKE_GENERATOR_TOOLSET:INTERNAL=ClangCL",
         ),
         (
@@ -695,6 +947,11 @@ def test_sanitizer_certificates_require_exact_matrix_and_watchdog_bytes(tmp_path
     """The gate consumes five run certificates and authenticates native watchdogs."""
     helper = _load_ci_helper("sanitizers/certify_sanitizer_run.py")
     for sanitizer, mode, runner_os, runner_arch in sorted(helper.EXPECTED_RUNS):
+        if runner_os == "Windows":
+            (tmp_path / helper.WINDOWS_TOOLCHAIN_FILENAME).write_text(
+                helper._canonical_json(helper._windows_toolchain_payload()),
+                encoding="utf-8",
+            )
         for filename, raw in helper._watchdog_specs(
             sanitizer, mode, runner_os, runner_arch
         ).items():

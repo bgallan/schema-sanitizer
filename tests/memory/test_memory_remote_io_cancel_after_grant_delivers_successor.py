@@ -208,17 +208,21 @@ def test_direct_cross_process_memory_uses_authoritative_local_amount(
     from schema_sanitizer.core_impl import cross_process_memory as module
 
     monkeypatch.setattr(module, "_enabled", lambda: False)
+    unknown_before = module._direct_lease_snapshot()[2]
     first = module.CrossProcessMemoryLease(100, 0)
     second = module.CrossProcessMemoryLease(100, 0)
-    module._update_direct_lease_reserved(first, first._lease_id, first._capability, 10)
-    module._update_direct_lease_reserved(second, second._lease_id, second._capability, 10)
-    first._reserved = 20
-    first.release()
-    live, reserved, unknown = module._direct_lease_snapshot()
-    assert live >= 1
-    assert reserved >= 10
-    assert unknown == 0
-    second.release()
+    try:
+        module._update_direct_lease_reserved(first, first._lease_id, first._capability, 10)
+        module._update_direct_lease_reserved(second, second._lease_id, second._capability, 10)
+        first._reserved = 20
+        first.release()
+        live, reserved, unknown = module._direct_lease_snapshot()
+        assert live >= 1
+        assert reserved >= 10
+        assert unknown == unknown_before
+    finally:
+        first.release()
+        second.release()
 
 
 def test_cleanup_rejects_closure_and_rich_argument_hidden_owners(

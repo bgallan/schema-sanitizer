@@ -17,9 +17,44 @@ from pathlib import Path
 from typing import Any, Sequence
 
 _FORMAT = "schema-sanitizer-platform-job-evidence-v1"
-_INTEGRITY_FORMAT = "schema-sanitizer-platform-integrity-v1"
+_INTEGRITY_FORMAT = "schema-sanitizer-platform-integrity-v2"
 _SHARDS = frozenset({"concurrency", "memory-parquet", "io-pipeline"})
 _PLATFORMS = frozenset({"linux", "macos-arm64", "macos-x86_64", "windows"})
+
+# The gate owns the reviewed collection identities independently from the pytest
+# process that reports them. Canonical node IDs are sorted and newline-terminated.
+EXPECTED_TEST_INVENTORY = {
+    "concurrency": {
+        "count": 511,
+        "sha256": "22730c892d95e474773bbbc9b8c28afc46cff05348795bbe3a5485ffc50484a5",
+    },
+    "memory-parquet": {
+        "count": 1704,
+        "sha256": "f05c4444a34906fd021d401e8850e06ccc261a2a14d5c14e9da8683b118b1f2c",
+    },
+    "io-pipeline": {
+        "count": 1025,
+        "sha256": "d4f5d7d9f8b149f1436f02ea2b35502f2ab1d9632ed6270071c2fee22cfbd79d",
+    },
+    "native-stress": {
+        "count": 1,
+        "sha256": "1d9f359012a9a69d9b9918e5b6d211258951ca5980f2c9fb06f22eab9e68b812",
+    },
+    "release-matrix": {
+        "count": 3,
+        "sha256": "8ecfcc11d5478d971ea5b5766ca91b37d70ae2ff1ba3446dcf575797c2da3a5a",
+    },
+}
+
+# Other platform skips are exact node/reason allowlists and may shrink when a
+# runner gains capabilities. Windows' module-level POSIX policy is instead bound
+# to this complete reviewed set.
+EXPECTED_EXACT_SKIP_INVENTORY_SHA256 = {
+    (
+        "windows",
+        "memory-parquet",
+    ): "a184dfafb6894585a7eaf20b6e99bf1b9ddeefc82df0c886a43bba554246e973",
+}
 
 
 def _github_binding(sha: str, run_id: str | int, run_attempt: str | int) -> dict[str, int | str]:
@@ -57,6 +92,17 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _skip_inventory_sha256(skips: list[dict[str, str]]) -> str:
+    """Hash validated skip identities and reasons using canonical compact JSON."""
+    canonical = json.dumps(
+        sorted(skips, key=lambda item: (item["nodeid"], item["reason"])),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(f"{canonical}\n".encode()).hexdigest()
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -140,22 +186,58 @@ def _validate_integrity(
     maximum_skips = payload.get("maximum_skip_count")
     selected_tests = payload.get("selected_test_count")
     expected_tests = payload.get("expected_test_count")
+    selected_inventory = payload.get("selected_test_inventory_sha256")
+    expected_inventory = payload.get("expected_test_inventory_sha256")
+    skip_inventory = payload.get("skip_inventory_sha256")
+    expected_skip_inventory = payload.get("expected_skip_inventory_sha256")
     if not isinstance(skips, list) or type(maximum_skips) is not int:
         raise ValueError(f"platform integrity skip evidence is malformed: {path}")
+    if any(
+        not isinstance(skip, dict)
+        or set(skip) != {"nodeid", "reason"}
+        or not isinstance(skip.get("nodeid"), str)
+        or not skip["nodeid"]
+        or not isinstance(skip.get("reason"), str)
+        or not skip["reason"]
+        for skip in skips
+    ):
+        raise ValueError(f"platform integrity skip entries are malformed: {path}")
     if maximum_skips < 0 or len(skips) > maximum_skips:
         raise ValueError(f"platform integrity skip ceiling is inconsistent: {path}")
+    policy = EXPECTED_TEST_INVENTORY[component]
     if (
         type(selected_tests) is not int
         or type(expected_tests) is not int
         or selected_tests != expected_tests
+        or selected_tests != policy["count"]
         or selected_tests < 1
     ):
         raise ValueError(f"platform integrity test inventory is inconsistent: {path}")
+    if (
+        not isinstance(selected_inventory, str)
+        or re.fullmatch(r"[0-9a-f]{64}", selected_inventory) is None
+        or selected_inventory != expected_inventory
+        or selected_inventory != policy["sha256"]
+    ):
+        raise ValueError(f"platform integrity test identities are inconsistent: {path}")
+    if (
+        not isinstance(skip_inventory, str)
+        or re.fullmatch(r"[0-9a-f]{64}", skip_inventory) is None
+        or skip_inventory != _skip_inventory_sha256(skips)
+    ):
+        raise ValueError(f"platform integrity skip identities are malformed: {path}")
+    reviewed_skip_inventory = EXPECTED_EXACT_SKIP_INVENTORY_SHA256.get((platform, component))
+    if expected_skip_inventory != reviewed_skip_inventory or (
+        reviewed_skip_inventory is not None and skip_inventory != reviewed_skip_inventory
+    ):
+        raise ValueError(f"platform integrity skip identities are inconsistent: {path}")
     return {
         "filename": path.name,
         "sha256": _sha256(path),
         "skip_count": len(skips),
+        "skip_inventory_sha256": skip_inventory,
         "test_count": selected_tests,
+        "test_inventory_sha256": selected_inventory,
     }
 
 

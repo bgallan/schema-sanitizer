@@ -53,10 +53,15 @@ SUITES = {
     "native": {
         "regular": (
             "tests/io/test_api.py",
+            "tests/io/test_input_python_and_local.py",
             "tests/io/test_input_xml_and_public_api.py",
             "tests/sinks/test_sinks_csv_jsonl.py",
             "tests/pipeline/test_csv_header_modes.py",
             "tests/pipeline/test_csv_union_projection.py",
+            "tests/concurrency/test_operation_arena_telemetry_contracts.py",
+            "tests/concurrency/test_threading_native_executor.py",
+            "tests/memory/test_memory_budget_contract.py",
+            "tests/memory/test_operation_memory_ledger.py",
         ),
         "adversarial": SHARED["adversarial"],
         "integration": SHARED["integration"]

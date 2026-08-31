@@ -10,6 +10,7 @@ import gc
 import os
 
 import pytest
+from _support.synchronization import run_isolated_python_probe
 
 
 def test_runtime_admission_cancels_reserved_activation() -> None:
@@ -242,8 +243,8 @@ def test_cleanup_publication_can_be_finalizer_safe_without_starting_worker(
     assert snapshot.owned_calls == 1
 
 
-def test_cross_process_memory_fork_reset_rebinds_inherited_locks() -> None:
-    """Verify cross process memory fork reset rebinds inherited locks."""
+def _probe_cross_process_memory_fork_reset() -> None:
+    """Exercise the cross-process reset in a disposable process."""
     from schema_sanitizer.core_impl import cross_process_memory as module
 
     old_process_lock = module._PROCESS_COORDINATOR_LOCK
@@ -255,8 +256,13 @@ def test_cross_process_memory_fork_reset_rebinds_inherited_locks() -> None:
         old_process_lock.release()
 
 
-def test_operation_memory_fork_reset_rebinds_abandoned_owner_lock() -> None:
-    """Verify operation memory fork reset rebinds abandoned owner lock."""
+def test_cross_process_memory_fork_reset_rebinds_inherited_locks() -> None:
+    """Verify cross process memory fork reset rebinds inherited locks."""
+    run_isolated_python_probe(__file__, "_probe_cross_process_memory_fork_reset")
+
+
+def _probe_operation_memory_fork_reset() -> None:
+    """Exercise the operation-memory reset in a disposable process."""
     from schema_sanitizer.core_impl import memory_budget as module
 
     old_lock = module._ABANDONED_MEMORY_LOCK
@@ -266,6 +272,11 @@ def test_operation_memory_fork_reset_rebinds_abandoned_owner_lock() -> None:
         assert module._ABANDONED_MEMORY_LOCK is not old_lock
     finally:
         old_lock.release()
+
+
+def test_operation_memory_fork_reset_rebinds_abandoned_owner_lock() -> None:
+    """Verify operation memory fork reset rebinds abandoned owner lock."""
+    run_isolated_python_probe(__file__, "_probe_operation_memory_fork_reset")
 
 
 def test_operation_memory_stage_rejects_coercive_objects() -> None:

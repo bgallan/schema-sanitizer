@@ -16,6 +16,7 @@ import pytest
 from _support.synchronization import (
     SCHEDULER_TIMEOUT_SECONDS,
     join_thread_or_fail,
+    run_isolated_python_probe,
     wait_event_or_fail,
     wait_for_process_exit,
 )
@@ -172,9 +173,8 @@ def test_claim_publication_fsyncs_alias_removal(
     module.release_path_identity(identity)
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
-def test_after_fork_path_reset_never_acquires_inherited_owner_lock(tmp_path: Path) -> None:
-    """Verify after fork path reset never acquires inherited owner lock."""
+def _probe_after_fork_path_reset_never_acquires_inherited_owner_lock() -> None:
+    """Exercise the inherited-owner lock reset in a disposable process."""
     import schema_sanitizer.core_impl.path_identity as module
 
     owner = module.PathClaimOwner(None, None, None)
@@ -214,6 +214,14 @@ def test_after_fork_path_reset_never_acquires_inherited_owner_lock(tmp_path: Pat
     os.close(read_fd)
     wait_for_process_exit(pid)
     assert data == b"ok"
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_after_fork_path_reset_never_acquires_inherited_owner_lock() -> None:
+    """Verify after fork path reset never acquires inherited owner lock."""
+    run_isolated_python_probe(
+        __file__, "_probe_after_fork_path_reset_never_acquires_inherited_owner_lock"
+    )
 
 
 def test_guardian_parks_overflow_without_destroying_owner_under_lock(

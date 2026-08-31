@@ -97,7 +97,10 @@ def test_cgroup_integer_parser_distinguishes_unbounded_from_unknown() -> None:
     )
 
     assert _parse_cgroup_integer("max", path=None).state is CgroupValueState.UNBOUNDED
+    assert _parse_cgroup_integer("-1", path=None).state is CgroupValueState.UNBOUNDED
     assert _parse_cgroup_integer(None, path=None).state is CgroupValueState.UNKNOWN
+    for malformed in ("-2", "-01", "-0", "+1", "1_000", str(1 << 63)):
+        assert _parse_cgroup_integer(malformed, path=None).state is CgroupValueState.UNKNOWN
     sample = _parse_cgroup_integer("4096", path=None)
     assert sample.state is CgroupValueState.VALUE
     assert sample.value == 4096

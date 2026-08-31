@@ -152,6 +152,9 @@ pytest -q
 pre-commit run --all-files
 ```
 
+The first pre-commit run provisions its exact hash-verified tools below
+`.work/pre-commit-tools`; it does not install them into the active environment.
+
 See the [development guide](docs/project/development.md) for native builds, focused
 tests, benchmarks, and CI.
 

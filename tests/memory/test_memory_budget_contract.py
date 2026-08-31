@@ -241,6 +241,7 @@ def test_repository_environment_access_is_strictly_reviewed() -> None:
         "tests/memory/test_memory_process_resource_governor_repairs_from_exact_leases_and_quarantines.py",
         "tests/quality/test_ci_helper_layout.py",
         "tests/quality/test_ci_workflow_topology.py",
+        "tests/quality/test_dependency_audit_inputs.py",
         "tests/quality/test_distribution_archive_cleanliness.py",
         "cpp/tests/ordered_executor_tsan.cc",
     }
