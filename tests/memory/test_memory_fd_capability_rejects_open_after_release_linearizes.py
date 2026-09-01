@@ -17,11 +17,6 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
 
 
-def _source(relative: str) -> str:
-    """Return the production source text inspected by this module."""
-    return (SRC / relative).read_text(encoding="utf-8")
-
-
 def test_physical_file_owner_close_commits_once_under_two_closers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

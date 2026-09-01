@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import source_paths, source_text
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 
@@ -333,12 +334,11 @@ def test_runtime_registry_reopens_circuit_after_capacity_drains() -> None:
 
 def test_all_post_fork_owners_use_single_capsule() -> None:
     """Verify all post fork owners use single capsule."""
-    root = Path("src/schema_sanitizer")
     offenders: list[str] = []
-    for path in root.rglob("*.py"):
-        text = path.read_text()
+    for relative_path in source_paths("src/schema_sanitizer"):
+        text = source_text(relative_path)
         if "_FORKED_" in text and "KEEPALIVE.append" in text:
-            offenders.append(str(path))
+            offenders.append(relative_path)
     assert offenders == []
 
 

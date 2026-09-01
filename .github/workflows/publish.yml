@@ -99,25 +99,7 @@ jobs:
           set -euo pipefail
           rm -rf -- release pypi-publish
           rm -f -- pypi-recovery-state.json
-      - id: download-release-for-reconciliation
-        continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: release-distributions
-          path: release
-      - name: Reset a partial reconciliation download
-        id: reset-release-for-reconciliation
-        if: ${{ always() && steps.download-release-for-reconciliation.outcome == 'failure' }}
-        shell: bash
-        run: |-
-          set -euo pipefail
-          rm -rf -- release
-      - name: Retry the exact release-set reconciliation download
-        if: ${{ always() && steps.download-release-for-reconciliation.outcome == 'failure' && steps.reset-release-for-reconciliation.outcome == 'success' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: release-distributions
-          path: release
+      - uses: ./.github/actions/restore-release-distributions
       - name: Verify PyPI state and stage only missing packages
         id: reconcile_pypi_state
         env:
@@ -132,7 +114,9 @@ jobs:
             --packages-dir release/packages \
             --publish-dir pypi-publish \
             --state-output pypi-recovery-state.json \
-            --github-output "${GITHUB_OUTPUT}"
+            --github-output "${GITHUB_OUTPUT}" \
+            --github-run-id "${GITHUB_RUN_ID}" \
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
       - name: Upload the exact missing-package set
         id: upload-missing-packages
         if: ${{ steps.reconcile_pypi_state.outputs['publish-required'] == 'true' }}
@@ -230,30 +214,7 @@ jobs:
           if pypi_attestations.__version__ != "0.0.30":
               raise SystemExit("unexpected pypi-attestations version")
           PY
-      - name: Reset PyPI verification paths
-        shell: bash
-        run: |-
-          set -euo pipefail
-          rm -rf -- release
-      - id: download-release-for-verification
-        continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: release-distributions
-          path: release
-      - name: Reset a partial verification download
-        id: reset-release-for-verification
-        if: ${{ always() && steps.download-release-for-verification.outcome == 'failure' }}
-        shell: bash
-        run: |-
-          set -euo pipefail
-          rm -rf -- release
-      - name: Retry the exact release-set verification download
-        if: ${{ always() && steps.download-release-for-verification.outcome == 'failure' && steps.reset-release-for-verification.outcome == 'success' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: release-distributions
-          path: release
+      - uses: ./.github/actions/restore-release-distributions
       - name: Require the complete manifest-matched PyPI release
         shell: bash
         run: |-
@@ -261,6 +222,8 @@ jobs:
           python meta/ci/release/check_pypi_version.py \
             --manifest release/release-manifest.json \
             --packages-dir release/packages \
+            --github-run-id "${GITHUB_RUN_ID}" \
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}" \
             --require-complete
 
   # Always produce one unambiguous terminal status. Publication is required to

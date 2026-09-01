@@ -6,6 +6,7 @@ ordering constraints.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +18,33 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 def source_text(relative_path: str) -> str:
     """Return cached UTF-8 text for one repository-relative source file."""
     return (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+
+
+@lru_cache(maxsize=None)
+def source_tree(relative_path: str) -> ast.Module:
+    """Return a cached read-only AST for one repository-relative Python file."""
+    return ast.parse(source_text(relative_path), filename=relative_path)
+
+
+@lru_cache(maxsize=None)
+def source_paths(relative_directory: str, pattern: str = "*.py") -> tuple[str, ...]:
+    """Return cached sorted paths matching a repository-relative source directory."""
+    directory = REPOSITORY_ROOT / relative_directory
+    return tuple(
+        path.relative_to(REPOSITORY_ROOT).as_posix()
+        for path in sorted(directory.rglob(pattern))
+        if path.is_file()
+    )
+
+
+def package_source_text(relative_path: str) -> str:
+    """Return cached text for one path below the Python package source root."""
+    return source_text(f"src/schema_sanitizer/{relative_path}")
+
+
+def cpp_source_text(relative_path: str) -> str:
+    """Return cached text for one path below the production C++ source root."""
+    return source_text(f"cpp/src/{relative_path}")
 
 
 @dataclass(frozen=True, slots=True)

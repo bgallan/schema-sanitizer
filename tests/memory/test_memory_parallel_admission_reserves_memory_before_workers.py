@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import package_source_text
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -25,11 +26,6 @@ _CPP_TOKEN = re.compile(
     r"[A-Za-z_]\w*|\d+(?:'\d+)*(?:[A-Za-z_]\w*)?|::|->|&&|\|\||"
     r"==|!=|<=|>=|\+\+|--|[{}()\[\],;.&*!=<>+\-/]"
 )
-
-
-def _source(relative: str) -> str:
-    """Return the production source text inspected by this module."""
-    return (SRC / relative).read_text(encoding="utf-8")
 
 
 def _cpp_scope(source: str, signature: str) -> str:
@@ -200,7 +196,7 @@ def test_ordered_async_pending_storage_is_fixed_ring_and_handles_out_of_order(
     """Verify ordered async pending storage is fixed ring and handles out of order."""
     from schema_sanitizer.core_impl import async_scheduler as scheduler
 
-    source = _source("core_impl/async_scheduler.py")
+    source = package_source_text("core_impl/async_scheduler.py")
     ordered = source[
         source.index("async def ordered_indexed_results") : source.index(
             "async def unordered_indexed_results"
@@ -247,7 +243,7 @@ def test_ordered_async_pending_storage_is_fixed_ring_and_handles_out_of_order(
 
 def test_async_task_domain_release_commits_exactly_once_under_one_lock() -> None:
     """Verify async task domain release commits exactly once under one lock."""
-    source = _source("core_impl/async_scheduler.py")
+    source = package_source_text("core_impl/async_scheduler.py")
     block = source[
         source.index("class _AsyncTaskDomainLease") : source.index(
             "@dataclass(slots=True)\nclass _AsyncSchedulerAdmission"
@@ -373,7 +369,7 @@ def test_native_cgroup_limits_are_tristate_and_effective_across_ancestors() -> N
 
 def test_stage_domain_order_publishes_memory_before_workers() -> None:
     """Verify stage domain order publishes memory before workers."""
-    source = _source("core_impl/memory_budget.py")
+    source = package_source_text("core_impl/memory_budget.py")
     mapping = source[
         source.index("_STAGE_DOMAIN_ORDER") : source.index("def _stage_domain_order_key")
     ]

@@ -10,16 +10,12 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import package_source_text
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
 CPP = ROOT / "cpp/src"
 CPP_TESTS = ROOT / "cpp/tests"
-
-
-def _source(relative: str) -> str:
-    """Return the production source text inspected by this module."""
-    return (SRC / relative).read_text(encoding="utf-8")
 
 
 def test_provider_pool_failed_close_keeps_physical_and_descriptor_owner_for_retry(
@@ -121,7 +117,7 @@ def test_provider_pool_does_not_repeat_physical_close_if_only_logical_release_fa
 
 def test_provider_pool_has_memory_charge_and_hard_entry_ceiling() -> None:
     """Verify provider pool has memory charge and hard entry ceiling."""
-    source = _source("remote_impl/provider_session_pool.py")
+    source = package_source_text("remote_impl/provider_session_pool.py")
     assert "_MAX_POOL_ENTRIES = 1024" in source
     assert "_MAX_PENDING_KEY_GATES = 1024" in source
     assert 'acquire_operation_memory(control_bytes, stage="remote_provider_pool_entry")' in source
@@ -162,7 +158,7 @@ def test_runtime_pair_close_retries_failed_admission_instead_of_false_commit() -
 
 def test_directory_session_and_azure_owner_use_commit_after_cleanup() -> None:
     """Verify directory session and azure owner use commit after cleanup."""
-    directory = _source("remote_impl/directory_downloads.py")
+    directory = package_source_text("remote_impl/directory_downloads.py")
     close_pos = directory.index("await close_provider_client(context)")
     clear_pos = directory.index("self._context = None", close_pos)
     assert close_pos < clear_pos
@@ -170,7 +166,7 @@ def test_directory_session_and_azure_owner_use_commit_after_cleanup() -> None:
     provider_pos = directory.index("context = await provider_client_for_downloads", sem_pos)
     assert sem_pos < provider_pos
 
-    azure = _source("remote_impl/providers/azure.py")
+    azure = package_source_text("remote_impl/providers/azure.py")
     block = azure[
         azure.index("class _AzureServiceOwner") : azure.index(
             "@dataclass", azure.index("class _AzureServiceOwner")
@@ -184,7 +180,7 @@ def test_directory_session_and_azure_owner_use_commit_after_cleanup() -> None:
 
 def test_io_shutdown_uses_hard_task_boundary_not_wait_for() -> None:
     """Verify I/O shutdown uses hard task boundary not wait for."""
-    source = _source("remote_impl/io_shutdown.py")
+    source = package_source_text("remote_impl/io_shutdown.py")
     assert "loop.create_task(manager.__aexit__" in source
     assert "await asyncio.wait({task}, timeout=remaining)" in source
     assert "RemoteIoCleanupOwner" in source
@@ -193,7 +189,7 @@ def test_io_shutdown_uses_hard_task_boundary_not_wait_for() -> None:
 
 def test_azure_sdk_fanout_is_disabled_for_async_blob_transfers() -> None:
     """Verify azure sdk fanout is disabled for async blob transfers."""
-    source = _source("remote_impl/providers/azure.py")
+    source = package_source_text("remote_impl/providers/azure.py")
     assert "max_concurrency=policy.async_concurrency" not in source
     assert "max_concurrency=tuning.concurrency" not in source
     assert source.count("max_concurrency=1") >= 3
@@ -228,7 +224,7 @@ def test_async_external_ownership_requires_runtime_issued_capability() -> None:
 
 def test_source_discovery_proves_metadata_owner_before_scheduler_bridge_release() -> None:
     """Verify source discovery proves metadata owner before scheduler bridge release."""
-    source = _source("pipeline/source_discovery.py")
+    source = package_source_text("pipeline/source_discovery.py")
     assert "external_ownership_capability=_discovery_result_external_ownership_capability" in source
     assert "operation_memory_ownership_capability(live_lease())" in source
     assert "no_retained_result_ownership_capability()" in source
@@ -297,16 +293,16 @@ def test_procfs_cgroup_parser_is_streaming_and_hard_bounded(tmp_path: Path) -> N
                 path, max_line_bytes=4, max_total_bytes=32, max_records=4
             )
         )
-    source = _source("core_impl/cgroup_view.py")
+    source = package_source_text("core_impl/cgroup_view.py")
     assert 'Path("/proc/self/mountinfo").read_text()' not in source
     assert 'Path("/proc/self/cgroup").read_text()' not in source
 
 
 def test_full_object_byte_helpers_require_explicit_materialization_ceiling() -> None:
     """Verify full object byte helpers require explicit materialization ceiling."""
-    s3 = _source("remote_impl/providers/s3.py")
-    azure = _source("remote_impl/providers/azure.py")
-    gcs = _source("remote_impl/providers/gcs.py")
+    s3 = package_source_text("remote_impl/providers/s3.py")
+    azure = package_source_text("remote_impl/providers/azure.py")
+    gcs = package_source_text("remote_impl/providers/gcs.py")
     assert "file: RemoteFile, *, maximum_bytes: int" in s3
     assert "async def download_bytes(uri: str, *, maximum_bytes: int)" in azure
     assert "file: RemoteFile, *, maximum_bytes: int" in gcs

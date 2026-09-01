@@ -11,14 +11,10 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import package_source_text, source_paths, source_tree
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def _source(relative: str) -> str:
-    """Return the production source text inspected by this module."""
-    return (ROOT / "src/schema_sanitizer" / relative).read_text(encoding="utf-8")
 
 
 def test_deferred_operation_ledger_close_retires_finalizer_ticket_on_last_release() -> None:
@@ -68,7 +64,7 @@ def test_directory_metadata_retention_lease_survives_budget_scope_until_owner_re
 
 def test_directory_metadata_reserves_before_retaining_python_containers() -> None:
     """Verify directory metadata reserves before retaining Python containers."""
-    source = _source("input_impl/directory_metadata_budget.py")
+    source = package_source_text("input_impl/directory_metadata_budget.py")
     uris = source[source.index("    def charge_uris") : source.index("    def charge_references")]
     refs = source[source.index("    def charge_references") : source.index("    def charge_file")]
     assert uris.index("self._charge(item_charge") < uris.index("values.append(uri)")
@@ -92,8 +88,8 @@ def test_fork_quarantine_is_marker_only_and_production_has_no_child_safe_allocat
         )
 
     offenders: list[str] = []
-    for path in (ROOT / "src/schema_sanitizer").rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for relative_path in source_paths("src/schema_sanitizer"):
+        tree = source_tree(relative_path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -104,11 +100,11 @@ def test_fork_quarantine_is_marker_only_and_production_has_no_child_safe_allocat
             keywords = {keyword.arg: keyword.value for keyword in node.keywords}
             opted_in = keywords.get("child_safe_without_prepare")
             if isinstance(opted_in, ast.Constant) and opted_in.value is True:
-                offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+                offenders.append(f"{relative_path}:{node.lineno}")
             mode = keywords.get("mode")
             if isinstance(mode, ast.Constant) and mode.value == "quarantine_only":
                 if any(key in keywords for key in ("before", "after_in_parent", "after_in_child")):
-                    offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}:quarantine-callback")
+                    offenders.append(f"{relative_path}:{node.lineno}:quarantine-callback")
     assert offenders == []
 
 
@@ -365,9 +361,9 @@ def test_native_registry_has_dynamic_global_budget_and_two_choice_sharding() -> 
 
 def test_single_file_source_discovery_is_inside_shared_metadata_envelope() -> None:
     """Verify single file source discovery is inside shared metadata envelope."""
-    async_source = _source("pipeline/source_discovery.py")
-    sync_source = _source("pipeline/source_discovery_sync.py")
-    memory_source = _source("pipeline/source_discovery_memory.py")
+    async_source = package_source_text("pipeline/source_discovery.py")
+    sync_source = package_source_text("pipeline/source_discovery_sync.py")
+    memory_source = package_source_text("pipeline/source_discovery_memory.py")
     assert "budget.charge_uris(plan.source_uri for plan in plans)" in memory_source
     assert "budget.charge_associations(len(locations) * 12 + len(plans) * 2)" in memory_source
     assert "budget.charge_references(values, references_per_item=2)" in memory_source
@@ -413,7 +409,7 @@ def test_stage_concurrency_admission_is_distinct_and_rolls_back_extra_domains(
 
 def test_release_concurrency_gate_requires_payload_evidence_not_structural_only() -> None:
     """Verify release concurrency gate requires payload evidence not structural only."""
-    source = _source("core_impl/concurrency_coverage.py")
+    source = package_source_text("core_impl/concurrency_coverage.py")
     gate = source[source.index("def validate_release_concurrency_pair_contracts") :]
     assert "validate_format_pair_release_contracts()" in gate
 
@@ -429,7 +425,7 @@ def test_release_concurrency_gate_requires_payload_evidence_not_structural_only(
 
 def test_partition_result_history_supports_full_compact_and_streaming_modes() -> None:
     """Verify partition result history supports full compact and streaming modes."""
-    source = _source("pipeline/partition_execution.py")
+    source = package_source_text("pipeline/partition_execution.py")
     assert '{"full", "metadata_only", "streaming"}' in source
     assert 'if retention_mode == "full"' in source
     assert 'elif retention_mode == "metadata_only"' in source
@@ -445,7 +441,7 @@ def test_partition_result_history_supports_full_compact_and_streaming_modes() ->
 
 def test_directory_metadata_close_has_a_bounded_deadline() -> None:
     """Verify directory metadata close has a bounded deadline."""
-    source = _source("input_impl/directory_metadata_budget.py")
+    source = package_source_text("input_impl/directory_metadata_budget.py")
     close = source[
         source.index(
             "    def close(self) -> None:", source.index("class DirectoryMetadataBudget")
@@ -458,8 +454,8 @@ def test_directory_metadata_close_has_a_bounded_deadline() -> None:
 
 def test_source_summary_is_streaming_and_partition_summary_is_identity_cached() -> None:
     """Verify source summary is streaming and partition summary is identity cached."""
-    source = _source("pipeline/source_discovery.py")
-    memory_source = _source("pipeline/source_discovery_memory.py")
+    source = package_source_text("pipeline/source_discovery.py")
+    memory_source = package_source_text("pipeline/source_discovery_memory.py")
     summary = memory_source[
         memory_source.index("def source_summary") : memory_source.index("def cached_source_summary")
     ]

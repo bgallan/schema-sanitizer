@@ -112,7 +112,14 @@ def build_release_manifest(
     """Validate a release set and return its deterministic audit manifest."""
     if _GIT_SHA_PATTERN.fullmatch(github_sha) is None:
         raise ValueError("github_sha must be a lowercase 40- or 64-character Git object ID")
-    if github_run_id < 1 or github_run_attempt < 1:
+    if (
+        isinstance(github_run_id, bool)
+        or not isinstance(github_run_id, int)
+        or isinstance(github_run_attempt, bool)
+        or not isinstance(github_run_attempt, int)
+        or github_run_id < 1
+        or github_run_attempt < 1
+    ):
         raise ValueError("GitHub run ID and attempt must be positive integers")
 
     if version_file.is_symlink() or not version_file.is_file():

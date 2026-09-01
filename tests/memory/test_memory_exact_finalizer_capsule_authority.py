@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _support.source_contracts import source_paths, source_tree
 
 SRC = Path(__file__).resolve().parents[2] / "src" / "schema_sanitizer"
 CPP = Path(__file__).resolve().parents[2] / "cpp" / "src"
@@ -22,8 +23,8 @@ CPP = Path(__file__).resolve().parents[2] / "cpp" / "src"
 def test_production_finalizer_callsites_use_capsule_as_single_authority() -> None:
     """Verify production finalizer callsites use capsule as single authority."""
     violations: list[str] = []
-    for path in SRC.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for relative_path in source_paths("src/schema_sanitizer"):
+        tree = source_tree(relative_path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -37,7 +38,8 @@ def test_production_finalizer_callsites_use_capsule_as_single_authority() -> Non
                 name in {"cancel_prepared_finalizer_cleanup", "defer_prepared_finalizer_cleanup"}
                 and len(node.args) > 1
             ):
-                violations.append(f"{path.relative_to(SRC)}:{node.lineno}:{name}")
+                package_path = relative_path.removeprefix("src/schema_sanitizer/")
+                violations.append(f"{package_path}:{node.lineno}:{name}")
     assert violations == []
 
 

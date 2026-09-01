@@ -15,7 +15,11 @@ from time import monotonic, sleep
 from types import SimpleNamespace
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    wait_event_or_fail,
+)
 
 from schema_sanitizer.api_impl.source_plan.remote import RemoteChunkPrefetchIterator
 from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
@@ -481,7 +485,8 @@ def test_remote_io_coordinator_abandons_a_late_startup_cleanly() -> None:
 
 
 def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
-    """Closing multi prefetch drains tasks and removes unconsumed staging."""
+    """Close unconsumed staging after parallel prefetch or serial CPU fallback."""
+    from schema_sanitizer.core_impl.execution_policy import execution_policy
 
     class FakeStaged:
         """Track staged-resource cleanup."""
@@ -513,14 +518,16 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
         threading_mode = "multi"
         operation_context = None
 
-        def __init__(self) -> None:
+        def __init__(self, *, parallel_prefetch: bool) -> None:
             """Initialize manifest state for entered, exited, and thread ids."""
+            self.parallel_prefetch = parallel_prefetch
             self.entered = 0
             self.exited = 0
             self.thread_ids: set[int] = set()
             self.staged: dict[int, FakeStaged] = {}
             self.zero_started = asyncio.Event()
             self.later_completed = asyncio.Event()
+            self.serial_unconsumed_staged = threading.Event()
             self.completion_order: list[int] = []
 
         @asynccontextmanager
@@ -558,27 +565,45 @@ def test_multi_remote_prefetch_cleans_unconsumed_staged_chunks() -> None:
             self.thread_ids.add(threading.get_ident())
             if start == 0:
                 self.zero_started.set()
-                await asyncio.wait_for(
-                    self.later_completed.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
-                )
-            else:
+                if self.parallel_prefetch:
+                    await asyncio.wait_for(
+                        self.later_completed.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
+                    )
+            elif self.parallel_prefetch:
                 await asyncio.wait_for(self.zero_started.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS)
                 self.later_completed.set()
             self.completion_order.append(start)
             staged = FakeStaged(start, storage_lease)
             self.staged[start] = staged
+            if not self.parallel_prefetch and start > 0:
+                self.serial_unconsumed_staged.set()
             return staged
 
-    manifest = Manifest()
+    policy = execution_policy("multi", Manifest.memory_limit_bytes)
+    if policy.available_cpus == 1:
+        assert policy.fallback_to_one_worker_reason == "cpu_limited"
+        assert policy.effective_workers == policy.remote_chunk_prefetch == 1
+        parallel_prefetch = False
+    else:
+        assert policy.effective_workers >= 2
+        assert policy.remote_chunk_prefetch >= 2
+        parallel_prefetch = True
+
+    manifest = Manifest(parallel_prefetch=parallel_prefetch)
     iterator = RemoteChunkPrefetchIterator(manifest)
     first = next(iterator)
     assert first.start == 0
+    if not parallel_prefetch:
+        wait_event_or_fail(manifest.serial_unconsumed_staged)
     iterator.close()
 
     assert manifest.entered == 1
     assert manifest.exited == 1
     assert len(manifest.thread_ids) == 1
-    assert manifest.completion_order.index(0) > 0
+    if parallel_prefetch:
+        assert manifest.completion_order.index(0) > 0
+    else:
+        assert manifest.completion_order[:2] == [0, 1]
     assert first.closed is False
     assert all(staged.closed for start, staged in manifest.staged.items() if start != 0)
 

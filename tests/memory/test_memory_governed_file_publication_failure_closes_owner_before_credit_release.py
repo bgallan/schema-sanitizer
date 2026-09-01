@@ -9,15 +9,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import package_source_text
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
 CPP = ROOT / "cpp/src"
-
-
-def _source(relative: str) -> str:
-    """Return the production source text inspected by this module."""
-    return (SRC / relative).read_text(encoding="utf-8")
 
 
 def test_governed_file_publication_failure_closes_owner_before_credit_release(
@@ -151,12 +147,12 @@ def test_external_runtime_parallelism_requires_exact_thread_envelope(
 
 def test_parquet_external_path_and_thread_routes_are_governed() -> None:
     """Verify Parquet external path and thread routes are governed."""
-    factory = _source("adapters/parquet/record_batch_factory.py")
-    results = _source("api_impl/results.py")
-    duckdb_relation = _source("api_impl/duckdb_relation.py")
-    sink = _source("adapters/parquet/sink.py")
-    diagnostics = _source("api_impl/output_diagnostics.py")
-    schemas = _source("pipeline/schemas.py")
+    factory = package_source_text("adapters/parquet/record_batch_factory.py")
+    results = package_source_text("api_impl/results.py")
+    duckdb_relation = package_source_text("api_impl/duckdb_relation.py")
+    sink = package_source_text("adapters/parquet/sink.py")
+    diagnostics = package_source_text("api_impl/output_diagnostics.py")
+    schemas = package_source_text("pipeline/schemas.py")
 
     assert 'open_governed_file(local_path, "rb")' in factory
     assert "acquire_external_file_capability(" in factory
@@ -174,7 +170,7 @@ def test_parquet_external_path_and_thread_routes_are_governed() -> None:
 
 def test_replay_spool_reserves_inode_bytes_and_fds_before_writes() -> None:
     """Verify replay spool reserves inode bytes and FDs before writes."""
-    replay = _source("api_impl/parquet/replay_stream.py")
+    replay = package_source_text("api_impl/parquet/replay_stream.py")
     assert "TemporaryStoragePermitPool(memory_limit_bytes)" in replay
     assert "artifact_count=1" in replay
     assert "acquire_file_descriptor_capability(" in replay
@@ -210,15 +206,15 @@ def test_native_fd_reset_is_fail_closed_and_transcoding_eof_commits_close() -> N
 
 def test_remote_and_local_grouping_graphs_share_directory_metadata_budget() -> None:
     """Verify remote and local grouping graphs share directory metadata budget."""
-    budget = _source("input_impl/directory_metadata_budget.py")
+    budget = package_source_text("input_impl/directory_metadata_budget.py")
     assert "_DIRECTORY_METADATA_GROUP_ASSOCIATION_BYTES" in budget
     assert "def charge_group_associations" in budget
-    providers = _source("remote_impl/providers/__init__.py")
+    providers = package_source_text("remote_impl/providers/__init__.py")
     assert "discovery.publish_group_association(" in providers
     assert providers.index("discovery.publish_group_association(") < providers.index(
         "groups.setdefault", providers.index("discovery.publish_group_association(")
     )
-    local = _source("pipeline/source_discovery.py")
+    local = package_source_text("pipeline/source_discovery.py")
     assert "discovery.publish_group_association(" in local
 
 

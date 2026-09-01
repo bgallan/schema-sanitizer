@@ -20,6 +20,7 @@ def _compact_noop(_value: str) -> None:
 
 
 import pytest
+from _support.source_contracts import source_paths, source_text
 from _support.synchronization import (
     SCHEDULER_TIMEOUT_SECONDS,
     join_thread_or_fail,
@@ -452,13 +453,12 @@ def test_provider_registry_limit_rejects_coercible_non_integer() -> None:
 
 def test_production_finalizers_do_not_publish_rich_self_owners() -> None:
     """Verify production finalizers do not publish rich self owners."""
-    root = Path("src/schema_sanitizer")
     offenders: list[str] = []
-    for path in root.rglob("*.py"):
-        text = path.read_text()
+    for relative_path in source_paths("src/schema_sanitizer"):
+        text = source_text(relative_path)
         if "defer_finalizer_cleanup(self)" not in text:
             continue
-        offenders.append(path.as_posix())
+        offenders.append(relative_path)
     assert offenders == []
 
 

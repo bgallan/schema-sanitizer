@@ -13,6 +13,7 @@ import weakref
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import source_paths, source_text
 from _support.synchronization import (
     SCHEDULER_TIMEOUT_SECONDS,
     WaitObservedCondition,
@@ -276,14 +277,13 @@ def test_quarantine_rejects_replaced_root_without_targeting_replacement(
 
 def test_cleanup_exception_notes_use_only_no_throw_helper() -> None:
     """Verify cleanup exception notes use only no throw helper."""
-    root = Path("src/schema_sanitizer")
     offenders: list[str] = []
-    for path in root.rglob("*.py"):
-        if path.name == "safe_errors.py":
+    for relative_path in source_paths("src/schema_sanitizer"):
+        if relative_path.endswith("/safe_errors.py"):
             continue
-        source = path.read_text()
+        source = source_text(relative_path)
         if ".add_note(" in source or "cleanup_error!r" in source or "cleanup_error!s" in source:
-            offenders.append(str(path))
+            offenders.append(relative_path)
     assert offenders == []
 
 

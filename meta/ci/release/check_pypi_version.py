@@ -89,6 +89,14 @@ class _VerifiedAttestation:
         self.claims = claims
 
 
+def _positive_integer(value: str) -> int:
+    """Parse one positive GitHub workflow identifier."""
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def _pypi_https_json(
     hostname: str, target: str, headers: Mapping[str, str]
 ) -> tuple[int, dict[str, str], object]:
@@ -479,8 +487,19 @@ def _local_manifest_artifacts(
     *,
     project: str,
     version: str,
+    expected_github_run_id: int,
+    current_github_run_attempt: int,
 ) -> tuple[dict[str, tuple[Path, str]], str]:
-    """Validate local release evidence and return files plus the source commit."""
+    """Validate same-run release evidence and return files plus the source commit."""
+    if (
+        isinstance(expected_github_run_id, bool)
+        or not isinstance(expected_github_run_id, int)
+        or isinstance(current_github_run_attempt, bool)
+        or not isinstance(current_github_run_attempt, int)
+        or expected_github_run_id < 1
+        or current_github_run_attempt < 1
+    ):
+        raise RuntimeError("expected GitHub run ID and current attempt must be positive integers")
     if manifest_file.is_symlink() or not manifest_file.is_file():
         raise RuntimeError(f"release manifest must be a regular file: {manifest_file}")
     serialized = manifest_file.read_text(encoding="utf-8")
@@ -515,6 +534,10 @@ def _local_manifest_artifacts(
         or provenance["github_run_id"] < 1
     ):
         raise RuntimeError("release manifest contains malformed provenance")
+    if provenance["github_run_id"] != expected_github_run_id:
+        raise RuntimeError("release manifest does not belong to the current GitHub workflow run")
+    if provenance["github_run_attempt"] > current_github_run_attempt:
+        raise RuntimeError("release manifest claims a future GitHub workflow run attempt")
     if packages_dir.is_symlink() or not packages_dir.is_dir():
         raise RuntimeError(f"packages directory must be a regular directory: {packages_dir}")
 
@@ -675,6 +698,8 @@ def prepare_pypi_publish_recovery(
     *,
     project: str,
     version: str,
+    github_run_id: int,
+    github_run_attempt: int,
     index_url: str = "https://pypi.org/pypi",
 ) -> dict[str, object]:
     """Verify partial PyPI state and stage only manifest-matched missing files."""
@@ -695,6 +720,8 @@ def prepare_pypi_publish_recovery(
         packages_dir,
         project=project,
         version=version,
+        expected_github_run_id=github_run_id,
+        current_github_run_attempt=github_run_attempt,
     )
     payload = _pypi_release_payload(project, version, index_url=index_url)
     published, missing = _reconcile_remote_artifacts(artifacts, payload)
@@ -723,6 +750,8 @@ def verify_pypi_release_complete(
     *,
     project: str,
     version: str,
+    github_run_id: int,
+    github_run_attempt: int,
     index_url: str = "https://pypi.org/pypi",
     sleeper: Callable[[float], object] = time.sleep,
 ) -> None:
@@ -732,6 +761,8 @@ def verify_pypi_release_complete(
         packages_dir,
         project=project,
         version=version,
+        expected_github_run_id=github_run_id,
+        current_github_run_attempt=github_run_attempt,
     )
     pending_reason = "release state was not checked"
     for attempt in range(len(_COMPLETE_VISIBILITY_DELAYS_SECONDS) + 1):
@@ -824,6 +855,8 @@ def main() -> None:
     parser.add_argument("--publish-dir", type=Path)
     parser.add_argument("--state-output", type=Path)
     parser.add_argument("--github-output", type=Path)
+    parser.add_argument("--github-run-id", type=_positive_integer)
+    parser.add_argument("--github-run-attempt", type=_positive_integer)
     parser.add_argument("--allow-existing-for-recovery", action="store_true")
     parser.add_argument("--require-complete", action="store_true")
     args = parser.parse_args()
@@ -843,6 +876,11 @@ def main() -> None:
         )
     if args.github_output is not None and args.manifest is None:
         parser.error("github-output requires recovery mode")
+    provenance_identity = (args.github_run_id, args.github_run_attempt)
+    if args.manifest is not None and any(value is None for value in provenance_identity):
+        parser.error("manifest verification needs github-run-id and github-run-attempt")
+    if args.manifest is None and any(value is not None for value in provenance_identity):
+        parser.error("github-run-id and github-run-attempt require manifest verification")
     if args.allow_existing_for_recovery and args.manifest is not None:
         parser.error("allow-existing-for-recovery is only valid in initial preflight mode")
     try:
@@ -853,6 +891,8 @@ def main() -> None:
                 args.packages_dir,
                 project=args.project,
                 version=version,
+                github_run_id=args.github_run_id,
+                github_run_attempt=args.github_run_attempt,
                 index_url=args.index_url,
             )
             print(f"PyPI release is complete and manifest-matched: {args.project} {version}")
@@ -865,6 +905,8 @@ def main() -> None:
                 args.state_output,
                 project=args.project,
                 version=version,
+                github_run_id=args.github_run_id,
+                github_run_attempt=args.github_run_attempt,
                 index_url=args.index_url,
             )
             if args.github_output is not None:

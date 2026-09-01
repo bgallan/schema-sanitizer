@@ -24,7 +24,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       # This sole job needs deletion authority for consumed source-run artifacts.
       actions: write  # zizmor: ignore[excessive-permissions]
@@ -160,15 +160,14 @@ jobs:
               }
               return selected;
             };
-            const inventoryDelaysMs = [0, 2000, 4000, 8000];
+            const consistencyTimeoutMs = 120000;
+            const consistencyPollMs = 2000;
             let artifacts = [];
             let selected;
             let stableInventory;
             let inventoryStable = false;
-            for (const delay of inventoryDelaysMs) {
-              if (delay !== 0) {
-                await sleep(delay);
-              }
+            const inventoryDeadline = Date.now() + consistencyTimeoutMs;
+            while (true) {
               artifacts = await listArtifacts();
               validateArtifacts(artifacts);
               const newerArtifacts = artifacts.filter(
@@ -196,6 +195,12 @@ jobs:
                 stableInventory = undefined;
                 core.info(`waiting for retained artifact inventory: ${missing.join(', ')}`);
               }
+              if (Date.now() >= inventoryDeadline) {
+                break;
+              }
+              await sleep(
+                Math.max(0, Math.min(consistencyPollMs, inventoryDeadline - Date.now())),
+              );
             }
             if (!inventoryStable || !selected || selected.size !== retainedNames.length) {
               const counts = Object.fromEntries(
@@ -242,14 +247,11 @@ jobs:
                 core.info(`artifact already absent: ${artifact.name} (${artifact.id})`);
               }
             }
-            const postDeleteDelaysMs = [0, 2000, 4000, 8000];
             let finalArtifacts = [];
             let postconditionSatisfied = false;
             let stablePostcondition;
-            for (const delay of postDeleteDelaysMs) {
-              if (delay !== 0) {
-                await sleep(delay);
-              }
+            const postDeleteDeadline = Date.now() + consistencyTimeoutMs;
+            while (true) {
               if (!(await sourceRunIsCurrent())) {
                 core.notice('source run began another attempt; skipping stale postcondition');
                 return;
@@ -272,6 +274,12 @@ jobs:
               }
               stablePostcondition = exactPostcondition ? postcondition : undefined;
               core.info('waiting for two stable exact post-delete inventory reads');
+              if (Date.now() >= postDeleteDeadline) {
+                break;
+              }
+              await sleep(
+                Math.max(0, Math.min(consistencyPollMs, postDeleteDeadline - Date.now())),
+              );
             }
             if (!postconditionSatisfied) {
               throw new Error(

@@ -390,6 +390,28 @@ def test_release_manifest_is_canonical_complete_and_verifiable(tmp_path: Path) -
     assert manifest.stat().st_mtime_ns == first_mtime
 
 
+@pytest.mark.parametrize(
+    ("github_run_id", "github_run_attempt"),
+    ((True, 1), (1, False), (1.0, 1), (1, 1.0), (0, 1), (1, 0)),
+)
+def test_release_manifest_requires_exact_positive_integer_run_identity(
+    tmp_path: Path,
+    github_run_id: object,
+    github_run_attempt: object,
+) -> None:
+    """Manifest creation rejects booleans, coercible numbers, and nonpositive values."""
+    helper = _load_validator("release_manifest")
+
+    with pytest.raises(ValueError, match="positive integers"):
+        helper.build_release_manifest(
+            (),
+            version_file=tmp_path / "VERSION",
+            github_sha=_GITHUB_SHA,
+            github_run_id=github_run_id,
+            github_run_attempt=github_run_attempt,
+        )
+
+
 def test_release_manifest_verification_rejects_tampering(tmp_path: Path) -> None:
     """Verify release manifest verification rejects tampering."""
     helper = _load_validator("release_manifest")

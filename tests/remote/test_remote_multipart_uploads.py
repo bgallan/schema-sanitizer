@@ -25,8 +25,22 @@ from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 pytestmark = pytest.mark.usefixtures("require_native")
 
 
+def _assert_expected_upload_capacity(concurrency: int, memory_limit_bytes: int) -> bool:
+    """Bind upload concurrency to the host CPU envelope without masking regressions."""
+    from schema_sanitizer.core_impl.execution_policy import execution_policy
+
+    policy = execution_policy("multi", memory_limit_bytes)
+    if policy.available_cpus == 1:
+        assert policy.fallback_to_one_worker_reason == "cpu_limited"
+        assert policy.effective_workers == concurrency == 1
+        return False
+    assert policy.effective_workers > 1
+    assert concurrency > 1
+    return True
+
+
 def test_remote_upload_policy_bounds_memory_and_preserves_single_worker(tmp_path: Path) -> None:
-    """Provider upload buffers derive only from memory and threading mode."""
+    """Upload buffers stay bounded and expose deterministic serial capacity."""
     from schema_sanitizer.remote_impl.upload_policy import remote_upload_policy
 
     source = tmp_path / "large.bin"
@@ -47,8 +61,10 @@ def test_remote_upload_policy_bounds_memory_and_preserves_single_worker(tmp_path
     assert single.multipart is True
     assert single.concurrency == 1
     assert multi.multipart is True
-    assert 1 < multi.concurrency <= 8
+    assert multi.concurrency <= 8
+    _assert_expected_upload_capacity(multi.concurrency, 256 << 20)
     assert multi.buffered_bytes <= (256 << 20) // 8
+    assert multi.buffered_bytes == multi.part_bytes * multi.concurrency
     assert single.part_count == multi.part_count
 
 
@@ -56,11 +72,20 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Out-of-order part completion still publishes an ordered S3 manifest."""
+    """S3 commits ordinal parts under concurrent reordering or serial capacity."""
     from schema_sanitizer.remote_impl.providers import s3
+    from schema_sanitizer.remote_impl.upload_policy import remote_upload_policy
 
     source = tmp_path / "s3-large.bin"
     _sparse_file(source, 40 << 20)
+    tuning = remote_upload_policy(
+        "s3",
+        str(source),
+        memory_limit_bytes=256 << 20,
+        threading_mode="multi",
+    )
+    assert tuning.multipart is True
+    parallel_capacity = _assert_expected_upload_capacity(tuning.concurrency, 256 << 20)
 
     class Client:
         def __init__(self) -> None:
@@ -83,17 +108,17 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
             self.active += 1
             self.peak_active = max(self.peak_active, self.active)
             try:
-                if part == 1:
+                if parallel_capacity and part == 1:
                     self.part_one_started.set()
                     await asyncio.wait_for(
                         self.part_two_completed.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
                     )
-                elif part == 2:
+                elif parallel_capacity and part == 2:
                     await asyncio.wait_for(
                         self.part_one_started.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
                     )
                 self.completion_order.append(part)
-                if part == 2:
+                if parallel_capacity and part == 2:
                     self.part_two_completed.set()
                 return {"ETag": f'"etag-{part}"'}
             finally:
@@ -123,9 +148,14 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
         )
     )
 
-    assert client.peak_active > 1
+    if parallel_capacity:
+        assert client.peak_active > 1
+        assert client.completion_order.index(2) < client.completion_order.index(1)
+    else:
+        assert tuning.concurrency == 1
+        assert client.peak_active == 1
+        assert client.completion_order == [1, 2, 3, 4, 5]
     assert client.aborted is False
-    assert client.completion_order.index(2) < client.completion_order.index(1)
     assert client.completed_parts is not None
     assert [part["PartNumber"] for part in client.completed_parts] == [1, 2, 3, 4, 5]
 
@@ -449,11 +479,20 @@ def test_s3_multipart_reports_earliest_failing_part(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A fast later failure cannot overtake a slower earlier part failure."""
+    """S3 reports the earliest part failure under parallel or serial capacity."""
     from schema_sanitizer.remote_impl.providers import s3
+    from schema_sanitizer.remote_impl.upload_policy import remote_upload_policy
 
     source = tmp_path / "s3-ordered-failure.bin"
     _sparse_file(source, 40 << 20)
+    tuning = remote_upload_policy(
+        "s3",
+        str(source),
+        memory_limit_bytes=256 << 20,
+        threading_mode="multi",
+    )
+    assert tuning.multipart is True
+    parallel_capacity = _assert_expected_upload_capacity(tuning.concurrency, 256 << 20)
 
     class Client:
         def __init__(self) -> None:
@@ -461,6 +500,8 @@ def test_s3_multipart_reports_earliest_failing_part(
             self.aborted = False
             self.part_two_started = asyncio.Event()
             self.part_three_failed = asyncio.Event()
+            self.started_parts: list[int] = []
+            self.failure_order: list[int] = []
 
         async def create_multipart_upload(self, **_kwargs: object) -> dict[str, str]:
             """Create multipart state and return its fixed upload identifier."""
@@ -469,16 +510,22 @@ def test_s3_multipart_reports_earliest_failing_part(
         async def upload_part(self, **kwargs: object) -> dict[str, str]:
             """Record one uploaded multipart part and return its provider receipt."""
             part = int(kwargs["PartNumber"])
+            self.started_parts.append(part)
             if part == 2:
                 self.part_two_started.set()
-                await asyncio.wait_for(
-                    self.part_three_failed.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
-                )
+                if parallel_capacity:
+                    await asyncio.wait_for(
+                        self.part_three_failed.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
+                    )
+                self.failure_order.append(part)
                 raise ValueError("canonical part 2 failure")
             if part == 3:
+                if not parallel_capacity:
+                    raise AssertionError("serial capacity dispatched beyond the first failure")
                 await asyncio.wait_for(
                     self.part_two_started.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
                 )
+                self.failure_order.append(part)
                 self.part_three_failed.set()
                 raise ValueError("later part 3 failure")
             await asyncio.sleep(0)
@@ -509,6 +556,14 @@ def test_s3_multipart_reports_earliest_failing_part(
             )
         )
     assert client.aborted is True
+    if parallel_capacity:
+        assert client.failure_order == [3, 2]
+        assert client.part_three_failed.is_set()
+    else:
+        assert tuning.concurrency == 1
+        assert client.started_parts == [1, 2]
+        assert client.failure_order == [2]
+        assert not client.part_three_failed.is_set()
 
 
 def test_s3_multipart_cancellation_drains_parts_before_abort(

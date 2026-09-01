@@ -59,11 +59,11 @@ _MAX_SKIP_COUNT = {
     ("linux", "memory-parquet"): 0,
     ("macos-arm64", "memory-parquet"): 1,
     ("macos-x86_64", "memory-parquet"): 1,
-    ("windows", "memory-parquet"): 209,
+    ("windows", "memory-parquet"): 180,
     ("linux", "io-pipeline"): 0,
     ("macos-arm64", "io-pipeline"): 0,
     ("macos-x86_64", "io-pipeline"): 0,
-    ("windows", "io-pipeline"): 2,
+    ("windows", "io-pipeline"): 31,
     ("linux", "native-stress"): 0,
     ("macos-arm64", "native-stress"): 0,
     ("macos-x86_64", "native-stress"): 0,
@@ -84,7 +84,6 @@ _WINDOWS_POSIX_MEMORY_MODULES = frozenset(
         "test_memory_identity_descriptor_finalizer_closes_real_and_governed_fd.py",
         "test_memory_observation_cannot_release_another_path_claim.py",
         "test_memory_path_identity_charges_fd_and_removes_claim.py",
-        "test_memory_process_identity_includes_linux_boot_id.py",
         "test_memory_rejected_retry_replacement_keeps_previous_owner.py",
     }
 )
@@ -212,6 +211,12 @@ _CONCURRENCY_REASON_PLATFORMS = {
 _WINDOWS_MEMORY_MODULE_REASONS = {
     f"tests/memory/{filename}": "POSIX descriptor-relative filesystem hardening suite"
     for filename in _WINDOWS_POSIX_MEMORY_MODULES
+}
+
+_WINDOWS_IO_MODULE_REASONS = {
+    "tests/memory/test_memory_process_identity_includes_linux_boot_id.py": (
+        "POSIX descriptor-relative filesystem hardening suite"
+    )
 }
 
 _WINDOWS_MEMORY_NODEID_REASONS = {
@@ -597,6 +602,9 @@ def _skip_is_allowed(
             _WINDOWS_MEMORY_NODEID_REASONS,
         )
     if shard == "io-pipeline" and platform == "windows":
+        module = nodeid.split("::", 1)[0]
+        if _WINDOWS_IO_MODULE_REASONS.get(module) == reason:
+            return selected_inventory_sha256 == EXPECTED_TEST_INVENTORY["io-pipeline"]["sha256"]
         return _matches_reviewed_node_reason(
             nodeid,
             reason,

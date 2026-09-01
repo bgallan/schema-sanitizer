@@ -9,22 +9,13 @@ import threading
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import cpp_source_text, package_source_text
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
 CPP = ROOT / "cpp" / "src"
 CPP_TESTS = ROOT / "cpp" / "tests"
-
-
-def _source(relative: str) -> str:
-    """Return the production source text inspected by this module."""
-    return (SRC / relative).read_text(encoding="utf-8")
-
-
-def _cpp_source(relative: str) -> str:
-    """Return the production C++ source inspected by the test."""
-    return (CPP / relative).read_text(encoding="utf-8")
 
 
 def test_async_terminal_debt_has_exactly_one_concurrent_reaper() -> None:
@@ -274,7 +265,7 @@ def test_async_result_memory_contract_is_explicit_for_externally_governed_result
     assert postflight is None
     assert preflight == 512
 
-    discovery = _source("pipeline/source_discovery.py")
+    discovery = package_source_text("pipeline/source_discovery.py")
     assert "AsyncResultOwnershipMode.EXTERNALLY_GOVERNED" in discovery
     assert "memory_contract=_DISCOVERY_RESULT_MEMORY_CONTRACT" in discovery
 
@@ -285,7 +276,7 @@ def test_s3_multipart_manifest_keeps_memory_ownership_until_commit() -> None:
     import sys
     from typing import Any
 
-    source = _source("remote_impl/upload_policy.py")
+    source = package_source_text("remote_impl/upload_policy.py")
     tree = ast.parse(source)
     selected = [
         node
@@ -329,8 +320,8 @@ def test_s3_multipart_manifest_keeps_memory_ownership_until_commit() -> None:
     assert leases[0].closed
     assert manifest.reserved_bytes == 0
 
-    async_s3 = _source("remote_impl/providers/s3.py")
-    sync_s3 = _source("remote_impl/providers/s3_sync.py")
+    async_s3 = package_source_text("remote_impl/providers/s3.py")
+    sync_s3 = package_source_text("remote_impl/providers/s3_sync.py")
     for provider_source in (async_s3, sync_s3):
         assert "acquire_s3_multipart_manifest" in provider_source
         assert "manifest.append_part" in provider_source
@@ -338,7 +329,7 @@ def test_s3_multipart_manifest_keeps_memory_ownership_until_commit() -> None:
 
 def test_native_backpressure_has_dynamic_deadline_fairness_and_lost_wakeup_guards() -> None:
     """Verify native backpressure has dynamic deadline fairness and lost wakeup guards."""
-    source = _cpp_source("internal/runtime/operation_task_arena.cc")
+    source = cpp_source_text("internal/runtime/operation_task_arena.cc")
     assert "std::lock_guard retained_lock(retained_wait_mutex)" in source
     assert "retained_ready.notify_all()" in source
     assert "retained_ready.notify_one()" not in source
@@ -355,12 +346,12 @@ def test_native_backpressure_has_dynamic_deadline_fairness_and_lost_wakeup_guard
         "api/python_abi3/registry/arrow_source_sinks.cc",
         "api/python_abi3/registry/path_source_sinks.cc",
     ):
-        assert "SetBackpressureTimeoutMillis" in _cpp_source(relative)
+        assert "SetBackpressureTimeoutMillis" in cpp_source_text(relative)
 
 
 def test_native_cgroup_sample_is_revalidated_after_hierarchy_read() -> None:
     """Verify native cgroup sample is revalidated after hierarchy read."""
-    source = _cpp_source("internal/runtime/cgroup_view.hh")
+    source = cpp_source_text("internal/runtime/cgroup_view.hh")
     assert "membership_after" in source
     assert "hierarchy_complete" in source
     assert "std::strcmp(membership_after, membership) == 0" in source

@@ -12,15 +12,11 @@ import os
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import package_source_text
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
 CPP = ROOT / "cpp/src"
-
-
-def _source(relative: str) -> str:
-    """Return the production source text inspected by this module."""
-    return (SRC / relative).read_text(encoding="utf-8")
 
 
 def test_fd_capability_counts_physical_open_and_close(tmp_path: Path) -> None:
@@ -74,7 +70,7 @@ def test_fd_capability_accounts_scandir_descriptor_duplication(tmp_path: Path) -
 
 def test_path_identity_nested_claim_reads_use_preacquired_capability() -> None:
     """Verify path identity nested claim reads use preacquired capability."""
-    source = _source("core_impl/path_identity.py")
+    source = package_source_text("core_impl/path_identity.py")
     assert "acquire_file_descriptor_capability(" in source
     assert "temporary_claim_remove" in source and "temporary_claim_recovery" in source
     assert "capability=capability" in source
@@ -151,8 +147,8 @@ def test_windows_read_only_mapping_allows_staged_path_rename_without_write_shari
 
 def test_duckdb_stream_handoff_has_no_full_batch_list_barrier() -> None:
     """Verify duckdb stream handoff has no full batch list barrier."""
-    results = _source("api_impl/results.py")
-    coverage = _source("core_impl/concurrency_coverage.py")
+    results = package_source_text("api_impl/results.py")
+    coverage = package_source_text("core_impl/concurrency_coverage.py")
     duckdb = results[
         results.index('if target == "duckdb":') : results.index(
             "raise AssertionError", results.index('if target == "duckdb":')
@@ -166,7 +162,7 @@ def test_duckdb_stream_handoff_has_no_full_batch_list_barrier() -> None:
 
 def test_remote_success_reads_are_bounded_even_without_operation_ledger() -> None:
     """Verify remote success reads are bounded even without operation ledger."""
-    source = _source("remote_impl/transport.py")
+    source = package_source_text("remote_impl/transport.py")
     success = source[
         source.index("async def read_response_bytes") : source.index(
             "async def", source.index("async def read_response_bytes") + 10
@@ -178,18 +174,18 @@ def test_remote_success_reads_are_bounded_even_without_operation_ledger() -> Non
 
 def test_remote_directory_index_overhead_is_precharged_and_lists_are_not_recloned() -> None:
     """Verify remote directory index overhead is precharged and lists are not recloned."""
-    staging = _source("remote_impl/staging.py")
-    preparation = _source("api_impl/input/preparation.py")
+    staging = package_source_text("remote_impl/staging.py")
+    preparation = package_source_text("api_impl/input/preparation.py")
     assert "selected = list(files)" not in staging
     assert "list(discovered.remote_files)" not in preparation
     for provider in ("azure.py", "azure_sync.py", "gcs.py", "gcs_sync.py", "s3.py", "s3_sync.py"):
-        source = _source(f"remote_impl/providers/{provider}")
+        source = package_source_text(f"remote_impl/providers/{provider}")
         assert "charge_file(remote_file, associations=4)" in source
 
 
 def test_temporary_janitor_uses_atomic_root_bundle_and_governed_scandir() -> None:
     """Verify temporary janitor uses atomic root bundle and governed scandir."""
-    source = _source("core_impl/temporary_janitor.py")
+    source = package_source_text("core_impl/temporary_janitor.py")
     root = source[source.index("def _root_handle") : source.index("def _close_root_handle")]
     scan = source[source.index("def _iter_directory") : source.index("def _stale_scan_candidates")]
     assert "acquire_teardown_file_descriptors(2, timeout_seconds=0)" in root
@@ -203,7 +199,7 @@ def test_temporary_janitor_uses_atomic_root_bundle_and_governed_scandir() -> Non
 
 def test_staged_tree_pending_directory_metadata_is_hard_bounded() -> None:
     """Verify staged tree pending directory metadata is hard bounded."""
-    source = _source("remote_impl/staging_paths.py")
+    source = package_source_text("remote_impl/staging_paths.py")
     assert "_MAX_PENDING_TREE_DIRECTORIES = 4096" in source
     assert source.count("len(pending) >= _MAX_PENDING_TREE_DIRECTORIES") == 2
     assert "pending-directory metadata limit" in source
@@ -248,7 +244,7 @@ def test_remote_local_file_adopts_preacquired_descriptor_credit(tmp_path: Path) 
 
 def test_bounded_http_reader_handles_fragmented_aiohttp_without_third_full_copy() -> None:
     """Verify bounded HTTP reader handles fragmented aiohttp without third full copy."""
-    source = _source("remote_impl/transport.py")
+    source = package_source_text("remote_impl/transport.py")
     bounded = source[
         source.index("async def read_bounded_response_bytes") : source.index(
             "async def read_bounded_response_text"

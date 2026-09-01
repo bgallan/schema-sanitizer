@@ -617,6 +617,114 @@ def test_pypi_preflight_can_defer_existing_files_to_manifest_recovery(
     assert "requires manifest reconciliation" in capsys.readouterr().out
 
 
+def test_pypi_manifest_cli_requires_the_current_workflow_run_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Manifest-backed CLI modes fail before I/O when run provenance is omitted."""
+    checker = _module("check_pypi_version")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(RELEASE / "check_pypi_version.py"),
+            "--manifest",
+            str(tmp_path / "release-manifest.json"),
+            "--packages-dir",
+            str(tmp_path / "packages"),
+            "--publish-dir",
+            str(tmp_path / "publish"),
+            "--state-output",
+            str(tmp_path / "state.json"),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        checker.main()
+
+    assert exc_info.value.code == 2
+    assert "needs github-run-id and github-run-attempt" in capsys.readouterr().err
+
+
+def test_release_manifest_accepts_an_earlier_attempt_from_the_same_run(tmp_path: Path) -> None:
+    """A selective rerun may consume immutable evidence from an earlier run attempt."""
+    checker = _module("check_pypi_version")
+    manifest, packages, _digests = _recovery_fixture(tmp_path)
+
+    artifacts, git_sha = checker._local_manifest_artifacts(
+        manifest,
+        packages,
+        project="schema-sanitizer",
+        version="0.4.2",
+        expected_github_run_id=42,
+        current_github_run_attempt=2,
+    )
+
+    assert len(artifacts) == 5
+    assert git_sha == "a" * 40
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("github_run_id", 43, "current GitHub workflow run"),
+        ("github_run_attempt", 2, "future GitHub workflow run attempt"),
+        ("github_run_id", True, "malformed provenance"),
+        ("github_run_attempt", True, "malformed provenance"),
+    ),
+)
+def test_release_manifest_rejects_wrong_future_or_boolean_provenance(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    """Manifest evidence must originate in this run and no later than this attempt."""
+    checker = _module("check_pypi_version")
+    manifest, packages, _digests = _recovery_fixture(tmp_path)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["provenance"][field] = value
+    manifest.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        checker._local_manifest_artifacts(
+            manifest,
+            packages,
+            project="schema-sanitizer",
+            version="0.4.2",
+            expected_github_run_id=42,
+            current_github_run_attempt=1,
+        )
+
+
+@pytest.mark.parametrize(
+    ("run_id", "run_attempt"),
+    ((True, 1), (42, False), (42.0, 1), (42, 1.0), (0, 1), (42, 0)),
+)
+def test_release_manifest_rejects_invalid_current_run_identity(
+    tmp_path: Path,
+    run_id: object,
+    run_attempt: object,
+) -> None:
+    """Programmatic callers cannot supply boolean, coercible, or nonpositive identity."""
+    checker = _module("check_pypi_version")
+    manifest, packages, _digests = _recovery_fixture(tmp_path)
+
+    with pytest.raises(RuntimeError, match="must be positive integers"):
+        checker._local_manifest_artifacts(
+            manifest,
+            packages,
+            project="schema-sanitizer",
+            version="0.4.2",
+            expected_github_run_id=run_id,
+            current_github_run_attempt=run_attempt,
+        )
+
+
 def test_pypi_recovery_stages_only_manifest_matched_missing_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -643,6 +751,8 @@ def test_pypi_recovery_stages_only_manifest_matched_missing_files(
         state_output,
         project="schema-sanitizer",
         version="0.4.2",
+        github_run_id=42,
+        github_run_attempt=1,
     )
 
     missing_names = sorted(set(digests) - set(published_names))
@@ -669,6 +779,8 @@ def test_pypi_recovery_stages_only_manifest_matched_missing_files(
         state_output,
         project="schema-sanitizer",
         version="0.4.2",
+        github_run_id=42,
+        github_run_attempt=1,
     )
     assert repeated == state
     assert state_output.stat().st_mtime_ns == state_mtime
@@ -690,6 +802,8 @@ def test_pypi_recovery_keeps_state_outside_validated_package_evidence(
             packages / "recovery.json",
             project="schema-sanitizer",
             version="0.4.2",
+            github_run_id=42,
+            github_run_attempt=1,
         )
 
 
@@ -727,6 +841,8 @@ def test_pypi_recovery_rejects_remote_drift_before_replacing_outputs(
             state_output,
             project="schema-sanitizer",
             version="0.4.2",
+            github_run_id=42,
+            github_run_attempt=1,
         )
 
     assert sentinel.read_text(encoding="utf-8") == "old state\n"
@@ -757,6 +873,8 @@ def test_pypi_recovery_marks_a_complete_matching_release_without_files(
         tmp_path / "recovery.json",
         project="schema-sanitizer",
         version="0.4.2",
+        github_run_id=42,
+        github_run_attempt=1,
     )
 
     assert state["status"] == "already-complete"
@@ -789,6 +907,8 @@ def test_pypi_recovery_rejects_yanked_or_malformed_yank_state(
             tmp_path / "recovery.json",
             project="schema-sanitizer",
             version="0.4.2",
+            github_run_id=42,
+            github_run_attempt=1,
         )
 
 
@@ -993,6 +1113,8 @@ def test_pypi_completion_verification_retries_visibility_then_matches_exactly(
         packages,
         project="schema-sanitizer",
         version="0.4.2",
+        github_run_id=42,
+        github_run_attempt=1,
         sleeper=delays.append,
     )
 
@@ -1032,6 +1154,8 @@ def test_pypi_completion_verification_retries_missing_integrity_evidence(
         packages,
         project="schema-sanitizer",
         version="0.4.2",
+        github_run_id=42,
+        github_run_attempt=1,
         sleeper=delays.append,
     )
 
@@ -1073,6 +1197,8 @@ def test_pypi_completion_verification_retries_a_transient_snapshot_failure(
         packages,
         project="schema-sanitizer",
         version="0.4.2",
+        github_run_id=42,
+        github_run_attempt=1,
         sleeper=delays.append,
     )
 
@@ -1110,6 +1236,8 @@ def test_pypi_completion_verification_does_not_retry_semantic_provenance_conflic
             packages,
             project="schema-sanitizer",
             version="0.4.2",
+            github_run_id=42,
+            github_run_attempt=1,
             sleeper=delays.append,
         )
 
@@ -1132,6 +1260,8 @@ def test_pypi_completion_verification_has_a_fixed_visibility_deadline(
             packages,
             project="schema-sanitizer",
             version="0.4.2",
+            github_run_id=42,
+            github_run_attempt=1,
             sleeper=delays.append,
         )
 

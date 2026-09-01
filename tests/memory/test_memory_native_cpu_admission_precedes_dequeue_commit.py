@@ -10,16 +10,12 @@ import ast
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import package_source_text, source_paths, source_tree
 from _support.synchronization import join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
 CPP = ROOT / "cpp/src"
-
-
-def _source(relative: str) -> str:
-    """Return the production source text inspected by this module."""
-    return (SRC / relative).read_text(encoding="utf-8")
 
 
 def test_native_cpu_admission_precedes_dequeue_commit() -> None:
@@ -49,7 +45,7 @@ def test_native_submit_never_waits_for_retained_bytes_under_slot_mutex() -> None
 
 def test_async_results_support_pre_materialization_credit_and_reconcile_after_fetch() -> None:
     """Verify async results support pre materialization credit and reconcile after fetch."""
-    source = _source("core_impl/async_scheduler.py")
+    source = package_source_text("core_impl/async_scheduler.py")
     start = source.index("async def _fetch_with_result_admission")
     end = source.index("async def _indexed_worker", start)
     body = source[start:end]
@@ -71,7 +67,7 @@ def test_async_result_estimator_extrapolates_unvisited_items_conservatively() ->
 
 def test_async_terminal_debt_preallocates_exact_result_owners_without_unbounded_fallback() -> None:
     """Verify async terminal debt preallocates exact result owners without unbounded fallback."""
-    source = _source("core_impl/async_scheduler.py")
+    source = package_source_text("core_impl/async_scheduler.py")
     assert "_AsyncTerminalDebt() for _ in range(_ASYNC_TERMINAL_DEBT_CAPACITY)" in source
     assert "debt.result_slots = result_slots" in source
     assert "debt.pending_slots = pending_slots" in source
@@ -86,7 +82,7 @@ def test_async_terminal_debt_preallocates_exact_result_owners_without_unbounded_
 
 def test_async_scheduler_combines_fair_share_with_idle_capacity_borrowing() -> None:
     """Verify async scheduler combines fair share with idle capacity borrowing."""
-    source = _source("core_impl/async_scheduler.py")
+    source = package_source_text("core_impl/async_scheduler.py")
     fair = source[
         source.index("def _fair_async_candidate") : source.index(
             "def _acquire_async_task_domain_exact"
@@ -130,7 +126,7 @@ def test_stage_domains_have_one_published_global_order_and_reverse_release() -> 
     )
     admission.close()
     assert events == ["async", "remote", "thread", "memory"]
-    source = _source("core_impl/memory_budget.py")
+    source = package_source_text("core_impl/memory_budget.py")
     assert "_STAGE_DOMAIN_ORDER" in source
     assert "_stage_domain_order_key" in source
     assert "sorted(" in source[source.index("def acquire_stage_concurrency_admission") :]
@@ -138,7 +134,7 @@ def test_stage_domains_have_one_published_global_order_and_reverse_release() -> 
 
 def test_remote_io_is_attached_to_real_stage_admission() -> None:
     """Verify remote I/O is attached to real stage admission."""
-    source = _source("remote_impl/io_coordinator.py")
+    source = package_source_text("remote_impl/io_coordinator.py")
     submit = source[
         source.index("    def submit(") : source.index(
             "    def permit_snapshot", source.index("    def submit(")
@@ -152,15 +148,15 @@ def test_remote_io_is_attached_to_real_stage_admission() -> None:
 
 def test_pair_gate_requires_real_payload_window_and_native_core_observation() -> None:
     """Verify pair gate requires real payload window and native core observation."""
-    contracts = _source("core_impl/concurrency_contracts.py")
-    coverage = _source("core_impl/concurrency_coverage.py")
-    translation = _source("core_impl/error_translation.py")
+    contracts = package_source_text("core_impl/concurrency_contracts.py")
+    coverage = package_source_text("core_impl/concurrency_coverage.py")
+    translation = package_source_text("core_impl/error_translation.py")
     assert "payload_window_bytes" in contracts
     assert "per_slot_bytes=1" not in contracts
     assert ".resize(0)" not in contracts
     assert '"native_payload_core_call"' in coverage
     assert '"native_payload_core_call"' in translation
-    assert "memory_budget(memory_limit_bytes).io_chunk_bytes" in _source(
+    assert "memory_budget(memory_limit_bytes).io_chunk_bytes" in package_source_text(
         "api_impl/file_conversion/converters.py"
     )
 
@@ -194,7 +190,7 @@ def test_pair_payload_window_remains_charged_until_scope_close() -> None:
 
 def test_shutdown_async_drain_is_multiphase_and_final_snapshot_is_authoritative() -> None:
     """Verify shutdown async drain is multiphase and final snapshot is authoritative."""
-    source = _source("core_impl/runtime_shutdown.py")
+    source = package_source_text("core_impl/runtime_shutdown.py")
     close_admission = source.index("close_async_scheduler_admission()")
     first_drain = source.index("wait_async_scheduler_quiescent", close_admission)
     producer_close = source.index("RuntimeServicePhase.PRODUCER", first_drain)
@@ -209,8 +205,8 @@ def test_shutdown_async_drain_is_multiphase_and_final_snapshot_is_authoritative(
 def test_python_lifecycle_condition_waits_are_all_bounded() -> None:
     """Verify Python lifecycle condition waits are all bounded."""
     offenders: list[str] = []
-    for path in SRC.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for relative_path in source_paths("src/schema_sanitizer"):
+        tree = source_tree(relative_path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -218,7 +214,7 @@ def test_python_lifecycle_condition_waits_are_all_bounded() -> None:
             if not isinstance(func, ast.Attribute) or func.attr != "wait":
                 continue
             if not node.args and not any(keyword.arg == "timeout" for keyword in node.keywords):
-                offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+                offenders.append(f"{relative_path}:{node.lineno}")
     assert offenders == []
 
 
@@ -232,7 +228,7 @@ def test_cgroup_view_resolves_nested_membership_and_refreshes_after_short_ttl() 
     assert pod is not None
     assert nested.as_posix() == "/sys/fs/cgroup/user.slice/app.scope"
     assert pod.as_posix() == "/sys/fs/cgroup/pod/x"
-    source = _source("core_impl/cgroup_view.py")
+    source = package_source_text("core_impl/cgroup_view.py")
     assert "_CACHE_TTL_NS" in source
     assert "time.monotonic_ns()" in source
     assert 'Path("/proc/self/cgroup")' in source
@@ -287,7 +283,7 @@ def test_physical_thread_observation_is_cross_platform_and_fail_closed() -> None
 
 def test_thread_capacity_uses_live_memory_headroom_not_only_ceiling() -> None:
     """Verify thread capacity uses live memory headroom not only ceiling."""
-    source = _source("core_impl/process_resources.py")
+    source = package_source_text("core_impl/process_resources.py")
     hard = source[source.index("def _thread_hard_capacity") : source.index("def _fd_hard_capacity")]
     assert "_effective_memory_headroom_bytes" in hard
     assert "pids.current" in source
@@ -313,8 +309,8 @@ def test_default_thread_envelope_survives_reasonable_external_runtime_pools(
 
 def test_terminal_thread_and_fd_debts_are_fixed_slot_banks() -> None:
     """Verify terminal thread and FD debts are fixed slot banks."""
-    thread = _source("core_impl/governed_thread.py")
-    process = _source("core_impl/process_resources.py")
+    thread = package_source_text("core_impl/governed_thread.py")
+    process = package_source_text("core_impl/process_resources.py")
     assert "_RetirementDebtSlot() for _ in range(_MAX_RETIREMENT_DEBTS)" in thread
     reap = thread[
         thread.index("def reap_governed_thread_retirements") : thread.index(
@@ -398,7 +394,7 @@ def test_allocation_registry_uses_one_process_global_slab_with_shrink_only_admis
 
 def test_remote_sort_scratch_is_governed_before_sorting() -> None:
     """Verify remote sort scratch is governed before sorting."""
-    helper = _source("core_impl/governed_sort.py")
+    helper = package_source_text("core_impl/governed_sort.py")
     reserve = helper.index("reserve_sort_scratch")
     sort = helper.index("values.sort", reserve)
     assert reserve < sort
@@ -409,7 +405,7 @@ def test_remote_sort_scratch_is_governed_before_sorting() -> None:
         "remote_impl/providers/gcs.py",
         "remote_impl/providers/azure.py",
     ):
-        source = _source(relative)
+        source = package_source_text(relative)
         assert ".sort(" not in source
         assert "governed_sort" in source
 
@@ -423,7 +419,7 @@ def test_async_production_callers_supply_predictable_result_preflight_sizes() ->
         "remote_impl/providers/azure.py",
     ]
     for relative in expected:
-        assert "AsyncResultMemoryContract" in _source(relative), relative
+        assert "AsyncResultMemoryContract" in package_source_text(relative), relative
 
 
 def test_sources_keep_cmake43_and_compile() -> None:
@@ -445,7 +441,7 @@ def test_all_native_thread_creation_paths_share_physical_thread_domain() -> None
 
 def test_thread_stack_reservations_consume_live_headroom_on_python_and_cpp() -> None:
     """Verify thread stack reservations consume live headroom on Python and C++."""
-    process = _source("core_impl/process_resources.py")
+    process = package_source_text("core_impl/process_resources.py")
     hard = process[
         process.index("def _thread_hard_capacity") : process.index("def _fd_hard_capacity")
     ]

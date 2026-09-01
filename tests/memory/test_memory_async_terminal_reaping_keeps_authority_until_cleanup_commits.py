@@ -9,16 +9,12 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import package_source_text
 from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
 CPP = ROOT / "cpp" / "src"
-
-
-def _source(relative: str) -> str:
-    """Return the production source text inspected by this module."""
-    return (SRC / relative).read_text(encoding="utf-8")
 
 
 def test_async_terminal_reaping_keeps_authority_until_cleanup_commits() -> None:
@@ -163,7 +159,7 @@ def test_async_hard_bound_never_uses_sampled_tail_extrapolation() -> None:
 
 def test_async_terminal_publication_uses_preallocated_slots_not_result_queue_put() -> None:
     """Verify async terminal publication uses preallocated slots not result queue put."""
-    source = _source("core_impl/async_scheduler.py")
+    source = package_source_text("core_impl/async_scheduler.py")
     worker = source[
         source.index("async def _indexed_worker") : source.index("def _start_indexed_workers")
     ]
@@ -174,18 +170,19 @@ def test_async_terminal_publication_uses_preallocated_slots_not_result_queue_put
     assert "async_terminal_ownership_banks" in source
 
 
-def test_cross_process_finalizer_recycles_generation_repeatedly(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_cross_process_finalizer_recycles_generation_repeatedly() -> None:
     """Verify cross process finalizer recycles generation repeatedly."""
     from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
-    from schema_sanitizer.core_impl.cross_process_memory import _ProcessCrossMemoryCoordinator
+    from schema_sanitizer.core_impl.cross_process_memory import (
+        _MAX_FINALIZER_RELEASE_TOKENS,
+        _ProcessCrossMemoryCoordinator,
+    )
 
     coordinator = _ProcessCrossMemoryCoordinator(16 << 20)
     coordinator._generation_pool = BoundedGenerationPool(1)
     # Exceed the production generation-bank size to prove GC/finalizer-style
     # recycling cannot exhaust generations after long-running churn.
-    for _ in range(5000):
+    for _ in range(_MAX_FINALIZER_RELEASE_TOKENS + 1):
         reservation = coordinator.acquire(0)
         reservation._release_nonblocking()
         coordinator.reconcile_pending()

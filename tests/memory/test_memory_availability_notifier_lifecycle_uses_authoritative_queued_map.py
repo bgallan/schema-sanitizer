@@ -10,13 +10,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _support.source_contracts import package_source_text, source_paths, source_tree
 
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def _source(relative: str) -> str:
-    """Return the production source text inspected by this module."""
-    return (ROOT / "src/schema_sanitizer" / relative).read_text(encoding="utf-8")
 
 
 def test_availability_notifier_lifecycle_uses_authoritative_queued_map() -> None:
@@ -52,8 +48,8 @@ def test_all_unprepared_child_handlers_explicitly_opt_into_child_safe_contract()
     import ast
 
     offenders: list[str] = []
-    for path in (ROOT / "src/schema_sanitizer").rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+    for relative_path in source_paths("src/schema_sanitizer"):
+        tree = source_tree(relative_path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -66,7 +62,7 @@ def test_all_unprepared_child_handlers_explicitly_opt_into_child_safe_contract()
                 continue
             opted_in = keywords.get("child_safe_without_prepare")
             if not isinstance(opted_in, ast.Constant) or opted_in.value is not True:
-                offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+                offenders.append(f"{relative_path}:{node.lineno}")
     assert offenders == []
 
 
@@ -178,7 +174,7 @@ def test_ordered_executor_shutdown_is_notification_driven_not_busy_polled() -> N
 
 def test_cleanup_dispatcher_control_budget_calls_are_outside_dispatcher_lock() -> None:
     """Verify cleanup dispatcher control budget calls are outside dispatcher lock."""
-    source = _source("core_impl/cleanup_dispatcher.py")
+    source = package_source_text("core_impl/cleanup_dispatcher.py")
     uncharge = source[
         source.index("    def _uncharge_owner_locked") : source.index(
             "    def _enqueue_runnable_locked"
@@ -195,7 +191,7 @@ def test_cleanup_dispatcher_control_budget_calls_are_outside_dispatcher_lock() -
 
 def test_memory_emergency_finalizer_roots_are_physically_preallocated() -> None:
     """Verify memory emergency finalizer roots are physically preallocated."""
-    memory = _source("core_impl/memory_budget.py")
+    memory = package_source_text("core_impl/memory_budget.py")
     assert "[None] * _MAX_ABANDONED_MEMORY_OWNERS" in memory
     assert "_ABANDONED_MEMORY_EMERGENCY.append(" not in memory
 
@@ -208,7 +204,7 @@ def test_stage_concurrency_admission_composes_control_plane_with_slots_and_bytes
     assert module.StageConcurrencyAdmission is not module.CompositeParallelAdmission
     admission = module.StageConcurrencyAdmission(1, 1024)
     assert hasattr(admission, "control_ticket")
-    source = _source("core_impl/memory_budget.py")
+    source = package_source_text("core_impl/memory_budget.py")
     assert "stage_concurrency:" in source
     assert '"stage_concurrency_admission"' in source
 
@@ -220,7 +216,7 @@ def test_remote_group_scans_do_not_materialize_dict_item_pairs() -> None:
         "remote_impl/providers/gcs.py",
         "remote_impl/providers/azure.py",
     ):
-        source = _source(relative)
+        source = package_source_text(relative)
         assert "list(groups.items())" not in source
         assert "group_keys = tuple(groups)" not in source
         assert "drain_ordered_iterable_results" in source

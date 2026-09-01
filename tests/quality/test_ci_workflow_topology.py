@@ -330,6 +330,19 @@ def _with_value(step: str, key: str) -> str:
     return " ".join(" ".join(fragments).split()).strip("'\"")
 
 
+def _bash_literal_array(source: str, name: str) -> tuple[str, ...]:
+    """Read one multiline Bash array containing only literal CI identifiers."""
+    match = re.search(
+        rf"^[ ]*{re.escape(name)}=\(\n"
+        r"(?P<values>(?:[ ]+[A-Za-z0-9_.-]+\n)+)"
+        r"[ ]*\)$",
+        source,
+        re.MULTILINE,
+    )
+    assert match is not None, f"missing literal Bash array {name!r}"
+    return tuple(line.strip() for line in match["values"].splitlines())
+
+
 def _exact_lock_names(path: Path) -> set[str]:
     """Return canonical names after proving every nonempty lock entry is exact."""
     lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line]
@@ -456,14 +469,22 @@ def test_successful_runs_prune_every_consumed_artifact_from_a_trusted_boundary()
     assert "github.paginate(" in job
     assert "ids.has(artifact.id)" in job
     assert "Date.parse(artifact.created_at) > sourceCompletedAt" in job
-    assert "const inventoryDelaysMs = [0, 2000, 4000, 8000]" in job
+    assert "const consistencyTimeoutMs = 120000" in job
+    assert "const consistencyPollMs = 2000" in job
+    assert "const inventoryDeadline = Date.now() + consistencyTimeoutMs" in job
+    assert "Date.now() >= inventoryDeadline" in job
+    assert "Math.max(0, Math.min(consistencyPollMs, inventoryDeadline - Date.now()))" in job
+    assert "inventoryDelaysMs" not in job
     assert "inventory === stableInventory" in job
     assert "inventoryStable = true" in job
     assert "selected.get(artifact.name).id < artifact.id" in job
     assert ".filter((artifact) => !retainedIds.has(artifact.id))" in job
     assert "artifact_id: artifact.id" in job
     assert "error.status !== 404" in job
-    assert "const postDeleteDelaysMs = [0, 2000, 4000, 8000]" in job
+    assert "const postDeleteDeadline = Date.now() + consistencyTimeoutMs" in job
+    assert "Date.now() >= postDeleteDeadline" in job
+    assert "Math.max(0, Math.min(consistencyPollMs, postDeleteDeadline - Date.now()))" in job
+    assert "postDeleteDelaysMs" not in job
     assert "postcondition === stablePostcondition" in job
     assert "finalArtifacts.length === retainedNames.length" in job
     assert "selected.get(artifact.name)?.id === artifact.id" in job
@@ -622,7 +643,6 @@ def test_manual_publisher_retries_only_after_cleaning_its_exact_download_path() 
 
 def test_download_retries_require_their_exact_destination_reset_to_succeed() -> None:
     """A failed cleanup cannot let a retry consume partial artifact bytes."""
-    workflow = _workflow("publish.yml")
     owners = (
         (
             _action("test-platform-wheel"),
@@ -635,14 +655,19 @@ def test_download_retries_require_their_exact_destination_reset_to_succeed() -> 
             "reset-validation-artifact-download",
         ),
         (
-            _job_body(workflow, "reconcile"),
-            "download-release-for-reconciliation",
-            "reset-release-for-reconciliation",
+            _action("test-platform-wheel"),
+            "download-retained-platform-wheel",
+            "reset-retained-platform-wheel-download",
         ),
         (
-            _job_body(workflow, "verify"),
-            "download-release-for-verification",
-            "reset-release-for-verification",
+            _action("restore-release-distributions"),
+            "download-release-distributions",
+            "reset-release-distributions",
+        ),
+        (
+            _action("restore-release-distributions"),
+            "download-retained-release",
+            "reset-retained-release",
         ),
     )
 
@@ -666,8 +691,9 @@ def test_non_oidc_reconciliation_stages_only_manifest_verified_missing_packages(
     assert "contents: read" in reconcile
     assert "actions/checkout@" in reconcile
     assert "persist-credentials: false" in reconcile
-    assert reconcile.count("actions/download-artifact@") == 2
-    assert reconcile.count("name: release-distributions") == 2
+    assert reconcile.count("uses: ./.github/actions/restore-release-distributions") == 1
+    assert "actions/download-artifact@" not in reconcile
+    assert "name: release-distributions" not in reconcile
     assert "rm -rf -- release pypi-publish" in reconcile
     for argument in (
         "--manifest release/release-manifest.json",
@@ -675,6 +701,8 @@ def test_non_oidc_reconciliation_stages_only_manifest_verified_missing_packages(
         "--publish-dir pypi-publish",
         "--state-output pypi-recovery-state.json",
         '--github-output "${GITHUB_OUTPUT}"',
+        '--github-run-id "${GITHUB_RUN_ID}"',
+        '--github-run-attempt "${GITHUB_RUN_ATTEMPT}"',
     ):
         assert argument in reconcile
     for output in ("missing-count", "published-count", "publish-required", "status"):
@@ -708,12 +736,59 @@ def test_publish_postcondition_revalidates_every_original_manifest_digest() -> N
     assert "--lock meta/ci/requirements/release-verification.txt --all" in verifier
     assert "python -m pip check" in verifier
     assert "pypi_attestations.__version__" in verifier
-    assert verifier.count("actions/download-artifact@") == 2
-    assert verifier.count("name: release-distributions") == 2
-    assert "rm -rf -- release" in verifier
+    assert verifier.count("uses: ./.github/actions/restore-release-distributions") == 1
+    assert "actions/download-artifact@" not in verifier
+    assert "name: release-distributions" not in verifier
     assert "--manifest release/release-manifest.json" in verifier
     assert "--packages-dir release/packages" in verifier
+    assert '--github-run-id "${GITHUB_RUN_ID}"' in verifier
+    assert '--github-run-attempt "${GITHUB_RUN_ATTEMPT}"' in verifier
     assert "--require-complete" in verifier
+
+
+def test_release_restore_prefers_transient_data_then_verifies_the_retained_bundle() -> None:
+    """Publish reruns restore release data through two clean bounded transports."""
+    action = _action("restore-release-distributions")
+    publish = _workflow("publish.yml")
+    normalized = " ".join(action.split())
+
+    assert publish.count("uses: ./.github/actions/restore-release-distributions") == 2
+    assert action.count("actions/download-artifact@") == 4
+    assert action.count("name: release-distributions") == 2
+    assert action.count("name: dist-wheels-linux-x86_64") == 2
+    assert len(re.findall(r"^[ ]+path: release$", action, re.MULTILINE)) == 2
+    assert len(re.findall(r"^[ ]+path: release-bundle$", action, re.MULTILINE)) == 2
+    assert len(re.findall(r"^[ ]+rm -rf -- release release-bundle$", action, re.MULTILINE)) == 2
+    assert len(re.findall(r"^[ ]+rm -rf -- release$", action, re.MULTILINE)) == 1
+    assert len(re.findall(r"^[ ]+rm -rf -- release-bundle$", action, re.MULTILINE)) == 1
+    transient_failed = (
+        "steps.download-release-distributions.outcome == 'failure' && "
+        "steps.retry-release-distributions.outcome == 'failure'"
+    )
+    assert transient_failed in normalized
+    assert "id: reset-before-retained-release" in action
+    assert "steps.reset-before-retained-release.outcome == 'success'" in normalized
+    assert (
+        "steps.download-retained-release.outcome == 'success' || "
+        "steps.retry-retained-release.outcome == 'success'"
+    ) in normalized
+    assert "certified_wheel_bundle.py restore-release" in action
+    assert "--bundle release-bundle" in action
+    assert "--output-root release" in action
+    assert '--github-sha "${GITHUB_SHA}"' in action
+    assert '--github-run-id "${GITHUB_RUN_ID}"' in action
+    assert '--github-run-attempt "${GITHUB_RUN_ATTEMPT}"' in action
+    assert "Release distributions are unavailable from transient and retained artifacts" in action
+    assert "[[ ! -d release || -L release ]]" in action
+    assert "actions/upload-artifact@" not in action
+    assert (
+        action.index("id: download-release-distributions")
+        < action.index("id: retry-release-distributions")
+        < action.index("id: download-retained-release")
+        < action.index("id: retry-retained-release")
+        < action.index("certified_wheel_bundle.py restore-release")
+        < action.index("name: Require a restored release distribution")
+    )
 
 
 def test_release_terminal_gate_requires_the_exact_publish_transition() -> None:
@@ -760,7 +835,8 @@ def test_external_actions_are_pinned_to_immutable_commits() -> None:
     local_refs = [ref for ref in refs if ref.startswith("./")]
     assert local_refs.count("./.github/workflows/ci.yml") == 1
     assert local_refs.count("./.github/actions/build-platform-wheel") == 4
-    assert local_refs.count("./.github/actions/restore-pip-cache") == 7
+    assert local_refs.count("./.github/actions/restore-pip-cache") == 10
+    assert local_refs.count("./.github/actions/restore-release-distributions") == 2
     assert local_refs.count("./.github/actions/test-platform-wheel") == 4
     for name in VALIDATION_ACTIONS:
         assert local_refs.count(f"./.github/actions/{name}") == 1
@@ -768,6 +844,7 @@ def test_external_actions_are_pinned_to_immutable_commits() -> None:
         "./.github/workflows/ci.yml",
         "./.github/actions/build-platform-wheel",
         "./.github/actions/restore-pip-cache",
+        "./.github/actions/restore-release-distributions",
         "./.github/actions/test-platform-wheel",
         *(f"./.github/actions/{name}" for name in VALIDATION_ACTIONS),
     }
@@ -1127,10 +1204,17 @@ def test_platform_suite_exercises_the_installed_wheel() -> None:
     assert "certificates=(wheelhouse/platform-wheel-certificate-*.json)" in verification
     assert "shopt -s nullglob dotglob" in verification
     assert "entries=(wheelhouse/*)" in verification
+    assert "bundle_manifest='wheelhouse/certified-wheel-bundle.json'" in verification
+    assert '[[ -f "${bundle_manifest}" && ! -L "${bundle_manifest}" ]]' in verification
+    assert '"${#entries[@]}" -ne 4' in verification
+    assert "! -d wheelhouse/rerun-state" in verification
+    assert "-L wheelhouse/rerun-state" in verification
     assert '"${#entries[@]}" -ne 2' in verification
     assert '"${#wheels[@]}" -ne 1' in verification
     assert '"${#certificates[@]}" -ne 1' in verification
-    assert '"${entry}" != "${wheels[0]}"' in verification
+    assert "certified_wheel_bundle.py verify" in verification
+    assert "--bundle wheelhouse" in verification
+    assert '--platform "${PLATFORM_NAME}"' in verification
     assert "certify_platform_wheel.py verify" in verification
     assert "--wheel-directory wheelhouse" in verification
     assert '--github-run-attempt "${GITHUB_RUN_ATTEMPT}"' in verification
@@ -1158,24 +1242,61 @@ def test_platform_matrix_uses_one_pinned_python_and_exact_shard_dependencies() -
     )
 
     assert build_action.count("python-version: 3.11.9") == 1
-    assert test_action.count("python-version: 3.11.9") == 2
+    assert "python-version:" not in test_action
     assert build_action.count("python -m cibuildwheel") == 1
     assert build_action.count("cache: pip") == 1
     assert build_action.count("cache-dependency-path: |-") == 1
-    assert build_action.count("name: dist-wheels-${{ inputs.platform-name }}") == 2
-    assert test_action.count("actions/download-artifact@") == 2
+    assert build_action.count("name: candidate-wheels-${{ inputs.platform-name }}") == 2
+    assert "name: dist-wheels-${{ inputs.platform-name }}" not in build_action
+    assert test_action.count("actions/download-artifact@") == 4
     assert "cache: pip" not in test_action
-    assert test_action.count("uses: ./.github/actions/restore-pip-cache") == 1
-    assert "owner: platform-tests-${{ inputs.shard }}" in test_action
-    assert "dependency-paths: |-" in test_action
+    assert "uses: ./.github/actions/restore-pip-cache" not in test_action
+    assert "owner: platform-tests-${{ inputs.shard }}" not in test_action
+    assert test_action.count("name: candidate-wheels-${{ inputs.platform-name }}") == 2
     assert test_action.count("name: dist-wheels-${{ inputs.platform-name }}") == 2
     assert "id: download-platform-wheel" in test_action
+    assert "id: download-retained-platform-wheel" in test_action
     assert "continue-on-error: true" in test_action
     assert "rm -rf -- wheelhouse" in test_action
-    assert test_action.count("steps.download-platform-wheel.outcome == 'failure'") == 2
+    candidate_retry = (
+        "steps.download-platform-wheel.outcome == 'failure' && "
+        "steps.reset-platform-wheel-download.outcome == 'success'"
+    )
+    retained_fallback = (
+        "inputs.producer-result == 'success' && "
+        "steps.download-platform-wheel.outcome == 'failure' && "
+        "steps.retry-platform-wheel-download.outcome == 'failure'"
+    )
+    retained_retry = (
+        "steps.download-retained-platform-wheel.outcome == 'failure' && "
+        "steps.reset-retained-platform-wheel-download.outcome == 'success'"
+    )
+    normalized_test_action = " ".join(test_action.split())
+    assert candidate_retry in normalized_test_action
+    assert retained_fallback in normalized_test_action
+    assert retained_retry in normalized_test_action
+    assert "id: reset-before-retained-platform-wheel" in test_action
+    assert (
+        test_action.index("id: download-platform-wheel")
+        < test_action.index("id: retry-platform-wheel-download")
+        < test_action.index("id: download-retained-platform-wheel")
+        < test_action.index("id: retry-retained-platform-wheel-download")
+        < test_action.index("id: platform-wheel-availability")
+        < test_action.index("name: Verify the downloaded platform wheel before installation")
+    )
     assert "PRODUCER_RESULT: ${{ inputs.producer-result }}" in availability
+    for outcome in (
+        "FIRST_DOWNLOAD_OUTCOME",
+        "RETRY_DOWNLOAD_OUTCOME",
+        "RETAINED_DOWNLOAD_OUTCOME",
+        "RETRY_RETAINED_DOWNLOAD_OUTCOME",
+    ):
+        assert f"\"${{{outcome}}}\" != 'success'" in availability
     assert "if [[ \"${PRODUCER_RESULT}\" == 'success' ]]" in availability
-    assert "remained unavailable after two bounded downloads" in availability
+    assert (
+        "candidate and retained wheel artifacts remained unavailable after bounded downloads"
+        in availability
+    )
     assert "available=false" in availability
     assert "python -m cibuildwheel" not in test_action
     assert len(dependencies) == 1
@@ -1260,6 +1381,13 @@ def test_platform_matrix_uses_one_pinned_python_and_exact_shard_dependencies() -
     for platform in _TEST_PLATFORM_JOBS:
         job_id = platform["job-id"]
         tests = _job_body(ci, job_id)
+        steps = _step_bodies(tests)
+        test_step_index = next(
+            index
+            for index, step in enumerate(steps)
+            if "uses: ./.github/actions/test-platform-wheel" in step
+        )
+        checkout_step, setup_step, cache_step = steps[test_step_index - 3 : test_step_index]
         assert not re.search(r"^    name:", tests, re.MULTILINE)
         assert "if: ${{ !cancelled() }}" in tests
         assert _job_needs(ci, job_id) == (platform["wheel-job-id"],)
@@ -1273,7 +1401,31 @@ def test_platform_matrix_uses_one_pinned_python_and_exact_shard_dependencies() -
         assert "minimum-cpu-capacity:" not in tests
         assert "shard: ${{ matrix.shard }}" in tests
         assert "matrix['display-name']" not in tests
+        assert "actions/checkout@" in checkout_step
+        assert _with_value(checkout_step, "persist-credentials") == "false"
+        assert _with_value(checkout_step, "show-progress") == "false"
+        assert "actions/setup-python@" in setup_step
+        assert _with_value(setup_step, "python-version") == "3.11.9"
+        assert "uses: ./.github/actions/restore-pip-cache" in cache_step
+        assert _with_value(cache_step, "owner") == "platform-tests-${{ matrix.shard }}"
+        assert _with_value(cache_step, "python-version") == "3.11.9"
+        assert (
+            "dependency-paths: |-\n"
+            "            meta/ci/requirements/platform-tests.txt\n"
+            "            meta/ci/requirements/python-artifact-sha256.lock"
+        ) in cache_step
     assert ci.count("uses: ./.github/actions/test-platform-wheel") == 4
+
+
+def test_repository_composites_do_not_nest_the_persistent_pip_cache() -> None:
+    """Cache post steps stay in jobs so GitHub can save every platform cache."""
+    nested_cache_callers = {
+        path.parent.name
+        for path in ACTIONS.glob("*/action.yml")
+        if "uses: ./.github/actions/restore-pip-cache" in path.read_text(encoding="utf-8")
+    }
+
+    assert nested_cache_callers == set()
 
 
 def test_ci_bootstraps_pip_conditionally_from_the_exact_wheel() -> None:
@@ -1335,7 +1487,10 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
         "{project}/.work/delvewheel-extract --add-path "
         "{project}/.work/msvc-redist -w {dest_dir} -v {wheel}"
     )
-    assert "Microsoft.VCRedistVersion.default.txt" in build
+    assert "Microsoft.VCToolsVersion.default.txt" not in build
+    assert "Microsoft.VCRedistVersion.default.txt" not in build
+    assert "tools_version='14.44.35207'" in build
+    assert "redist_version='14.44.35112'" in build
     assert "Microsoft.VC143.CRT" in build
     assert "name: Install the verified Windows CPython package" in build
     python_cache = next(
@@ -1478,11 +1633,9 @@ def test_windows_action_pins_match_canonical_toolchain_policy() -> None:
 
     action_pins = {
         "generator_instance": exactly_one(r"vs_root='([^']+)'"),
-        "redistributable_version": exactly_one(
-            r"""\[\[ "\$\{redist_version\}" == '([^']+)' \]\]"""
-        ),
+        "redistributable_version": exactly_one(r"redist_version='([^']+)'"),
         "sdk_version": exactly_one(r"sdk_root='[^']+/Lib/([^']+)'"),
-        "vc_tools_version": exactly_one(r"""\[\[ "\$\{tools_version\}" == '([^']+)' \]\]"""),
+        "vc_tools_version": exactly_one(r"tools_version='([^']+)'"),
     }
     assert action_pins == {name: policy[name] for name in action_pins}
     assert environment == {
@@ -1817,7 +1970,7 @@ def test_runner_network_and_toolchain_inputs_are_bounded_and_exact() -> None:
     assert "cache-dependency-path:" not in ci
     assert "meta/ci/requirements/*.txt" not in ci
     assert ".github/actions/*/action.yml" not in ci
-    assert ci.count("uses: ./.github/actions/restore-pip-cache") == 6
+    assert ci.count("uses: ./.github/actions/restore-pip-cache") == 10
     assert "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9" in cache
     assert "continue-on-error: true" in cache
     assert "restore-keys:" not in cache
@@ -1851,7 +2004,7 @@ def test_runner_network_and_toolchain_inputs_are_bounded_and_exact() -> None:
         assert ci.count(f"owner: {owner}") == 1
     assert ci.count("meta/ci/requirements/quality.txt") == 1
     assert ci.count("meta/ci/requirements/downstream.txt") == 1
-    assert ci.count("meta/ci/requirements/platform-tests.txt") == 1
+    assert ci.count("meta/ci/requirements/platform-tests.txt") == 5
     for action in (build, native, sanitizer, tsan, quality):
         assert "python -m pip install -U" not in action
     assert "CIBW_CONFIG_SETTINGS: >-" in build
@@ -1985,7 +2138,7 @@ def test_native_stress_and_functional_suites_form_an_explicit_partition() -> Non
     assert "tests/concurrency/test_ordered_executor_completion_probe.py" in stress
     assert "-m 'not native_stress'" in functional
     assert "--ignore" not in stress
-    assert functional.count("--ignore=") == 2
+    assert functional.count("--ignore=") == 5
     assert "pytest-native-stress-${PLATFORM_ARTIFACT}.xml" in stress
     assert "pytest-native-stress-durations-${PLATFORM_ARTIFACT}.log" in stress
     assert "tests/concurrency/test_concurrency_route_release_gate.py" in release_matrix
@@ -2004,7 +2157,7 @@ def test_platform_smokes_have_stable_balanced_shard_ownership() -> None:
     test_action = _action("test-platform-wheel")
     ownership = {
         "Certify the Parquet runtime from functional evidence": "memory-parquet",
-        "Record a cross-platform reader scaling measurement": "memory-parquet",
+        "Record a cross-platform reader scaling measurement": "io-pipeline",
         "Cross-platform threading benchmark smoke": "concurrency",
         "Cross-platform native completion stress": "concurrency",
     }
@@ -2115,7 +2268,12 @@ def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive()
     )
     release_gate = "tests/concurrency/test_concurrency_route_release_gate.py"
     relocated_concurrency_tests = (
+        "tests/concurrency/test_concurrency_groups_only_sustained_fixed_cost_columns.py",
+        "tests/concurrency/test_concurrency_sources_define_bounded_immutable_token_handoff.py",
         "tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py",
+    )
+    relocated_memory_tests = (
+        "tests/memory/test_memory_process_identity_includes_linux_boot_id.py",
     )
     assert quality_action.index(inventory_contracts) < quality_action.index(quality_contracts)
     assert inventory_contracts.count("verify_collection ") == 5
@@ -2126,9 +2284,17 @@ def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive()
     assert 'SCHEMA_SANITIZER_VERIFY_TEST_INVENTORY="${component}"' in inventory_contracts
     assert inventory_contracts.count(f"--ignore={release_gate}") == 1
     assert inventory_contracts.count(release_gate) == 2
-    assert inventory_contracts.count(f"--ignore={relocated_concurrency_tests[0]}") == 1
-    assert inventory_contracts.count(relocated_concurrency_tests[0]) == 2
+    for test_path in (*relocated_concurrency_tests, *relocated_memory_tests):
+        assert inventory_contracts.count(f"--ignore={test_path}") == 1
+        assert inventory_contracts.count(test_path) == 2
     assert inventory_contracts.count(cross_toolchain_quality_test) == 1
+    inventory_concurrency, remaining_inventory = inventory_contracts.split(
+        "verify_collection memory-parquet", 1
+    )
+    inventory_memory, remaining_inventory = remaining_inventory.split(
+        "verify_collection io-pipeline", 1
+    )
+    inventory_io = remaining_inventory.split("verify_collection native-stress", 1)[0]
     for domains in shard_domains.values():
         for domain in domains:
             assert f"tests/{domain}" in inventory_contracts
@@ -2136,7 +2302,8 @@ def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive()
     assert cross_toolchain_quality_test in functional
     assert functional.count(cross_toolchain_quality_test) == 1
     assert "elif [[ \"${TEST_SHARD}\" == 'memory-parquet' ]]" in functional
-    assert "test_paths+=(" in functional
+    assert "elif [[ \"${TEST_SHARD}\" == 'io-pipeline' ]]" in functional
+    assert functional.count("test_paths+=(") == 1
     assert functional.count(release_gate) == 1
     release_matrix = next(
         step
@@ -2144,15 +2311,35 @@ def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive()
         if "name: Run the clean public 8-by-7 release matrix" in step
     )
     assert release_matrix.count(release_gate) == 1
-    concurrency_rebalance, memory_rebalance = functional.split(
+    concurrency_rebalance, remaining_rebalance = functional.split(
         "elif [[ \"${TEST_SHARD}\" == 'memory-parquet' ]]", 1
     )
-    memory_rebalance = memory_rebalance.split("        fi", 1)[0]
-    assert cross_toolchain_quality_test in memory_rebalance
+    memory_rebalance, io_rebalance = remaining_rebalance.split(
+        "elif [[ \"${TEST_SHARD}\" == 'io-pipeline' ]]", 1
+    )
+    io_rebalance = io_rebalance.split("        fi", 1)[0]
+    assert cross_toolchain_quality_test not in concurrency_rebalance
+    assert cross_toolchain_quality_test not in memory_rebalance
+    assert cross_toolchain_quality_test in io_rebalance
     for test_path in relocated_concurrency_tests:
         assert functional.count(test_path) == 2
         assert f"--ignore={test_path}" in concurrency_rebalance
-        assert test_path in memory_rebalance
+        assert test_path not in memory_rebalance
+        assert test_path in io_rebalance
+        assert f"--ignore={test_path}" in inventory_concurrency
+        assert test_path not in inventory_memory
+        assert test_path in inventory_io
+    for test_path in relocated_memory_tests:
+        assert functional.count(test_path) == 2
+        assert test_path not in concurrency_rebalance
+        assert f"--ignore={test_path}" in memory_rebalance
+        assert test_path in io_rebalance
+        assert test_path not in inventory_concurrency
+        assert f"--ignore={test_path}" in inventory_memory
+        assert test_path in inventory_io
+    assert cross_toolchain_quality_test not in inventory_concurrency
+    assert cross_toolchain_quality_test not in inventory_memory
+    assert cross_toolchain_quality_test in inventory_io
 
     for shard, domains in shard_domains.items():
         other_domains = set().union(
@@ -2347,27 +2534,58 @@ def test_validation_matrix_and_terminal_gate_have_exact_dependencies() -> None:
 
 
 def test_validation_gate_downloads_once_and_stages_an_exact_inventory() -> None:
-    """One retried transfer admits only the complete named validation inventory."""
+    """Fresh candidates and retained reruns restore one exact validation inventory."""
     gate = _job_body(_workflow("ci.yml"), "validation-gate")
+    bundle_helper = (ROOT / "meta/ci/release/certified_wheel_bundle.py").read_text(encoding="utf-8")
     downloads = gate[: gate.index("name: Validate the complete release artifact set")]
+    steps = _step_bodies(downloads)
+    initial_reset = next(
+        step for step in steps if "name: Reset release-assembly destinations" in step
+    )
+    retry_reset = next(
+        step
+        for step in steps
+        if "name: Remove partial validation artifacts before retrying" in step
+    )
+    staging = next(
+        step
+        for step in steps
+        if "name: Require and stage the exact validation-artifact inventory" in step
+    )
 
     assert downloads.count("actions/download-artifact@") == 2
     assert downloads.count("path: download/incoming") == 2
     assert downloads.count("continue-on-error: true") == 1
     assert downloads.count("steps.download-validation-artifacts.outcome == 'failure'") == 2
     assert downloads.count("steps.reset-validation-artifact-download.outcome == 'success'") == 1
-    assert downloads.count("rm -rf -- download/incoming") == 1
-    assert "name: Require and stage the exact validation-artifact inventory" in downloads
-    assert "mapfile -t expected" in downloads
-    assert "mapfile -t actual" in downloads
-    assert '[[ "${#actual[@]}" -ne "${#expected[@]}" ]]' in downloads
-    assert "release-distributions|pypi-publish-distributions" in downloads
-    wheel_artifacts = (
+    assert "rm -rf -- download dist release retained" in initial_reset
+    assert "rm -rf -- download/incoming" not in initial_reset
+    assert "rm -rf -- download/incoming" in retry_reset
+    assert "rm -rf -- download dist release retained" not in retry_reset
+    assert "mapfile -t expected" in staging
+    assert "mapfile -t actual" in staging
+    assert '[[ "${#actual[@]}" -ne "${#expected[@]}" ]]' in staging
+    candidate_artifacts = (
+        "candidate-wheels-linux-x86_64",
+        "candidate-wheels-macos-arm64",
+        "candidate-wheels-macos-x86_64",
+        "candidate-wheels-windows-amd64",
+    )
+    final_bundle_artifacts = (
         "dist-wheels-linux-x86_64",
         "dist-wheels-macos-arm64",
         "dist-wheels-macos-x86_64",
         "dist-wheels-windows-amd64",
     )
+    ignored_rerun_outputs = staging[
+        staging.index("# A rerun of the reusable CI") : staging.index(
+            "*) printf '%s\\n'", staging.index("# A rerun of the reusable CI")
+        )
+    ]
+    assert "release-distributions|pypi-publish-distributions" in ignored_rerun_outputs
+    assert "dist-wheels-*" not in ignored_rerun_outputs
+    for artifact in final_bundle_artifacts:
+        assert artifact in ignored_rerun_outputs
     sanitizer_artifacts = (
         "sanitizer-certificate-Linux-X64-asan-ubsan",
         "sanitizer-certificate-Linux-X64-tsan",
@@ -2377,14 +2595,17 @@ def test_validation_gate_downloads_once_and_stages_an_exact_inventory() -> None:
     )
     test_platforms = ("linux-x86_64", "macos-arm64", "macos-x86_64", "windows-amd64")
     test_shards = ("concurrency", "io-pipeline", "memory-parquet")
-    assert "\n".join(f"            {name}" for name in wheel_artifacts) in downloads
-    assert "\n".join(f"            {name}" for name in sanitizer_artifacts) in downloads
-    assert f"test_platforms=({' '.join(test_platforms)})" in downloads
-    assert f"test_shards=({' '.join(test_shards)})" in downloads
+    assert _bash_literal_array(staging, "wheel_artifacts") == candidate_artifacts
+    assert _bash_literal_array(staging, "final_bundle_artifacts") == final_bundle_artifacts
+    assert _bash_literal_array(staging, "sanitizer_artifacts") == sanitizer_artifacts
+    assert f"test_platforms=({' '.join(test_platforms)})" in staging
+    assert f"test_shards=({' '.join(test_shards)})" in staging
+    assert 'manifest="download/incoming/${artifact}/certified-wheel-bundle.json"' in staging
+    assert '[[ -f "${manifest}" && ! -L "${manifest}" ]]' in staging
     expected_artifacts = {
         "native-coverage-certificate",
         "source-distribution",
-        *wheel_artifacts,
+        *candidate_artifacts,
         *sanitizer_artifacts,
         *(
             f"platform-test-evidence-{platform}-{shard}"
@@ -2396,15 +2617,92 @@ def test_validation_gate_downloads_once_and_stages_an_exact_inventory() -> None:
     for artifact in (
         "native-coverage-certificate",
         "source-distribution",
-        *wheel_artifacts,
+        *candidate_artifacts,
         *sanitizer_artifacts,
     ):
-        assert artifact in downloads
-    assert 'expected+=("platform-test-evidence-${platform}-${shard}")' in downloads
-    assert 'cp -a -- "download/incoming/${artifact}/." download/wheels/' in downloads
-    assert 'cp -a -- "download/incoming/${artifact}/." download/sanitizers/' in downloads
-    assert 'mv -- "download/incoming/${artifact}" download/platform-tests/' in downloads
+        assert artifact in staging
+    assert 'expected+=("platform-test-evidence-${platform}-${shard}")' in staging
+    assert '[[ "${bundle_count}" -eq 4 ]]' in staging
+    assert '[[ "${candidate_count}" -eq 0 && "${bundle_count}" -eq 4 ]]' not in staging
+    assert "mkdir -p download/bundles" in staging
+    assert 'mv -- "download/incoming/${artifact}" download/bundles/' in staging
+    assert staging.count('mv -- "download/incoming/${artifact}"') == 1
+    assert '[[ "${candidate_count}" -ne 4 ]]' in staging
+    assert "Expected four candidate wheels or a complete retained-bundle baseline" in staging
+    assert "certified_wheel_bundle.py restore-validation" in staging
+    assert "--bundles-root download/bundles" in staging
+    assert "--output-root download/restored" in staging
+    assert "--overlays-root download/incoming" in staging
+    assert '--github-output "${GITHUB_OUTPUT}"' in staging
+    assert "echo 'reused=true'" not in staging
+    assert staging.count("echo 'reused=false' >> \"${GITHUB_OUTPUT}\"") == 1
+    for removed_shell_implementation in (
+        "overlay_count",
+        "for path in download/incoming/*",
+        "expected_artifact",
+        "for bundle_artifact in",
+        "Retained rerun inventory contains an unknown artifact",
+        'rm -rf -- "download/restored/${artifact}"',
+    ):
+        assert removed_shell_implementation not in staging
+    assert (
+        staging.index("mkdir -p download/bundles")
+        < staging.index('mv -- "download/incoming/${artifact}" download/bundles/')
+        < staging.index("certified_wheel_bundle.py restore-validation")
+        < staging.index("rm -rf -- download/incoming")
+        < staging.index("mv -- download/restored download/incoming")
+    )
+    assert "overlay_entries = tuple(overlays_root.iterdir())" in bundle_helper
+    assert "entry.name not in allowed_overlay_names or entry.is_symlink()" in bundle_helper
+    assert "if entry.name in candidate_names or entry.name in validation_names" in bundle_helper
+    assert "candidate overlay inventory is invalid" in bundle_helper
+    assert "source = overlay_sources.get(artifact.name, artifact)" in bundle_helper
+    assert "return not overlay_sources" in bundle_helper
+    assert "output.write(f\"reused={'true' if reused else 'false'}\\n\")" in bundle_helper
+    assert '--github-run-attempt "${GITHUB_RUN_ATTEMPT}"' in staging
+    assert 'cp -a -- "download/incoming/${artifact}/." download/wheels/' in staging
+    assert 'cp -a -- "download/incoming/${artifact}/." download/sanitizers/' in staging
+    assert 'cp -a -- "download/incoming/${artifact}" download/platform-tests/' in staging
+    assert 'mv -- "download/incoming/${artifact}" download/platform-tests/' not in staging
     assert "cp download/source/*.tar.gz download/wheels/*.whl dist/" in gate
+
+
+def test_validation_gate_rebuilds_four_durable_bundles_only_when_evidence_changes() -> None:
+    """Fresh or overlaid evidence rebuilds bundles; a baseline-only rerun preserves them."""
+    gate = _job_body(_workflow("ci.yml"), "validation-gate")
+    steps = _step_bodies(gate)
+    assembly = next(
+        step for step in steps if "name: Assemble four durable certified wheel bundles" in step
+    )
+    durable_names = {f"dist-wheels-{platform['platform-name']}" for platform in _BUILD_PLATFORMS}
+    durable_uploads = [
+        step
+        for step in steps
+        if "actions/upload-artifact@" in step and _with_value(step, "name") in durable_names
+    ]
+
+    assert "if: steps.stage-validation-artifacts.outputs.reused != 'true'" in assembly
+    assert "certified_wheel_bundle.py create" in assembly
+    for argument in (
+        "--wheels-root download/wheels",
+        "--validation-root download/incoming",
+        "--release-root release",
+        "--output-root retained",
+        '--github-sha "${GITHUB_SHA}"',
+        '--github-run-id "${GITHUB_RUN_ID}"',
+        '--github-run-attempt "${GITHUB_RUN_ATTEMPT}"',
+    ):
+        assert argument in assembly
+    assert len(durable_uploads) == 2 * len(durable_names)
+    assert {_with_value(step, "name") for step in durable_uploads} == durable_names
+    for step in durable_uploads:
+        assert "steps.stage-validation-artifacts.outputs.reused != 'true'" in step
+        assert _with_value(step, "overwrite") == "true"
+        assert _with_value(step, "if-no-files-found") == "error"
+        assert _with_value(step, "retention-days") == "7"
+        assert _with_value(step, "compression-level") == "0"
+    assert gate.index("name: Assemble the auditable release artifact") < gate.index(assembly)
+    assert gate.index(assembly) < min(gate.index(step) for step in durable_uploads)
 
 
 def test_platform_evidence_records_comparable_cpu_limits_without_job_summary() -> None:
@@ -3238,7 +3536,7 @@ def test_benchmark_matrix_runs_on_supported_platforms() -> None:
     assert "shell: bash" in reader_step
     assert (
         "if: steps.platform-wheel-availability.outputs.available == 'true' && "
-        "inputs.shard == 'memory-parquet'"
+        "inputs.shard == 'io-pipeline'"
     ) in " ".join(reader_step.split())
     assert "if python -I benchmarks/readers/linear_scaling.py \\" in reader_step
     assert 'report.get("failures")' in reader_step
@@ -3266,7 +3564,7 @@ def test_python_coverage_has_an_explicit_regression_floor() -> None:
 
 
 def test_ci_artifact_policies_are_explicit_and_bounded() -> None:
-    """Only contract-owned validation, release, and publication artifacts upload."""
+    """Transient evidence converges on exactly four durable certified bundles."""
     sources = (
         _workflow("ci.yml"),
         _workflow("publish.yml"),
@@ -3287,8 +3585,15 @@ def test_ci_artifact_policies_are_explicit_and_bounded() -> None:
     uploads: dict[str, list[str]] = {}
     for step in upload_steps:
         uploads.setdefault(_with_value(step, "name"), []).append(step)
+    durable_paths = {
+        "dist-wheels-linux-x86_64": "retained/linux-x86_64/",
+        "dist-wheels-macos-arm64": "retained/macos-arm64/",
+        "dist-wheels-macos-x86_64": "retained/macos-x86_64/",
+        "dist-wheels-windows-amd64": "retained/windows-amd64/",
+    }
     retention = {
-        "dist-wheels-${{ inputs.platform-name }}": "7",
+        "candidate-wheels-${{ inputs.platform-name }}": "7",
+        **dict.fromkeys(durable_paths, "7"),
         "native-coverage-certificate": "7",
         "sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-${{ inputs.sanitizer }}": "7",
         "sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-tsan": "7",
@@ -3308,24 +3613,38 @@ def test_ci_artifact_policies_are_explicit_and_bounded() -> None:
         _with_value(step, "path") == "pypi-publish/"
         for step in uploads["pypi-publish-distributions"]
     )
+    for name, path in durable_paths.items():
+        assert all(_with_value(step, "path") == path for step in uploads[name])
+        assert all(
+            "steps.stage-validation-artifacts.outputs.reused != 'true'" in step
+            for step in uploads[name]
+        )
+        assert all(_with_value(step, "compression-level") == "0" for step in uploads[name])
+    assert all(
+        _with_value(step, "compression-level") == "0"
+        for step in uploads["candidate-wheels-${{ inputs.platform-name }}"]
+    )
     assert "actions/upload-artifact@" not in _action("quality-validation")
 
-    retried = {
-        "dist-wheels-${{ inputs.platform-name }}",
-        "native-coverage-certificate",
-        "sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-${{ inputs.sanitizer }}",
-        "sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-tsan",
-        "platform-test-evidence-${{ inputs.platform-name }}-${{ inputs.shard }}",
-        "source-distribution",
-        "release-distributions",
-        "pypi-publish-distributions",
-    }
+    retried = set(retention)
     assert {name for name, steps in uploads.items() if len(steps) == 2} == retried
     for name in retried:
         first, retry = uploads[name]
         assert "continue-on-error: true" in first
         assert "outcome == 'failure'" in retry
         assert _with_value(retry, "overwrite") == "true"
+    build_upload_names = {
+        _with_value(step, "name")
+        for step in _step_bodies(_action("build-platform-wheel"))
+        if "actions/upload-artifact@" in step
+    }
+    gate_upload_names = {
+        _with_value(step, "name")
+        for step in _step_bodies(_job_body(_workflow("ci.yml"), "validation-gate"))
+        if "actions/upload-artifact@" in step
+    }
+    assert build_upload_names == {"candidate-wheels-${{ inputs.platform-name }}"}
+    assert gate_upload_names == {*durable_paths, "release-distributions"}
 
 
 def test_release_artifact_is_complete_exact_and_self_describing() -> None:
@@ -3383,7 +3702,7 @@ def test_release_artifact_is_complete_exact_and_self_describing() -> None:
     assert ci.index("Require every upstream validation job to succeed") < ci.index(
         "Assemble the auditable release artifact"
     )
-    assert "name: release-distributions" in reconcile
+    assert "uses: ./.github/actions/restore-release-distributions" in reconcile
     assert "--manifest release/release-manifest.json" in reconcile
     assert "--packages-dir release/packages" in reconcile
     assert "name: pypi-publish-distributions" in reconcile

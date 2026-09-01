@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import source_paths, source_text, source_tree
 
 pytestmark = pytest.mark.usefixtures("isolated_external_runtime_coordinator")
 
@@ -236,16 +237,16 @@ def test_production_finalizer_paths_use_single_capsule_api() -> None:
         "prepare_detached_resources_finalizer_cleanup",
         "prepare_reference_finalizer_cleanup",
     }
-    for path in SRC.rglob("*.py"):
-        if path.name == "finalizer_cleanup.py":
+    for relative_path in source_paths("src/schema_sanitizer"):
+        if relative_path.endswith("/finalizer_cleanup.py"):
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = source_tree(relative_path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
                 continue
-            assert node.func.id not in forbidden_calls, f"tuple finalizer call in {path}"
+            assert node.func.id not in forbidden_calls, f"tuple finalizer call in {relative_path}"
 
-    finalizers = (SRC / "core_impl/finalizer_cleanup.py").read_text(encoding="utf-8")
+    finalizers = source_text("src/schema_sanitizer/core_impl/finalizer_cleanup.py")
     reserve = finalizers[
         finalizers.index("def reserve_finalizer_cleanup") : finalizers.index(
             "def reserve_detached_resources_finalizer_cleanup"

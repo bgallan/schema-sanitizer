@@ -78,16 +78,16 @@ _PROCESS_ANOMALY_KEYS = frozenset(
 # process that reports them. Canonical node IDs are sorted and newline-terminated.
 EXPECTED_TEST_INVENTORY = {
     "concurrency": {
-        "count": 511,
-        "sha256": "22730c892d95e474773bbbc9b8c28afc46cff05348795bbe3a5485ffc50484a5",
+        "count": 502,
+        "sha256": "faa41818148030a36eb83bca69a95845ebbbb198198f410434183f3aec60bc2c",
     },
     "memory-parquet": {
-        "count": 1705,
-        "sha256": "3d2c659aca3f13fbfe4f3dec342bf0bae2c9f043742890e2906874f9452ba66c",
+        "count": 1665,
+        "sha256": "5817118d2063cada52dbfe9dce35978850661a52eeafae7ef1c6aa2d664d771d",
     },
     "io-pipeline": {
-        "count": 1025,
-        "sha256": "d4f5d7d9f8b149f1436f02ea2b35502f2ab1d9632ed6270071c2fee22cfbd79d",
+        "count": 1074,
+        "sha256": "8d4dd18c7a1f473df236be39154af58c448f2e6011e44faadbef7c22c48c4310",
     },
     "native-stress": {
         "count": 1,
@@ -106,7 +106,11 @@ EXPECTED_EXACT_SKIP_INVENTORY_SHA256 = {
     (
         "windows",
         "memory-parquet",
-    ): "a184dfafb6894585a7eaf20b6e99bf1b9ddeefc82df0c886a43bba554246e973",
+    ): "52f3111af895aed3517c771b7a323c1e4de96d750eefbabb1aa651084b5f80b2",
+    (
+        "windows",
+        "io-pipeline",
+    ): "04083befaabc216f25d572c65a544f305de597f7fc3c6203961df1f4d898cbe0",
 }
 
 
@@ -227,9 +231,10 @@ def _expected_files(platform: str, shard: str) -> tuple[str, ...]:
         common.update(
             {
                 f"parquet-contract-runtime-certificate-{platform}.json",
-                f"reader-linear-scaling-{platform}.json",
             }
         )
+    elif shard == "io-pipeline":
+        common.add(f"reader-linear-scaling-{platform}.json")
     return tuple(sorted(common))
 
 

@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import package_source_text
 from _support.synchronization import (
     SCHEDULER_TIMEOUT_SECONDS,
     join_thread_or_fail,
@@ -21,11 +22,6 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
 CPP = ROOT / "cpp/src"
 CPP_TESTS = ROOT / "cpp/tests"
-
-
-def _source(relative: str) -> str:
-    """Return the production source text inspected by this module."""
-    return (SRC / relative).read_text(encoding="utf-8")
 
 
 def test_retained_directory_metadata_retries_exact_failed_lease() -> None:
@@ -176,7 +172,7 @@ def test_provider_manager_partial_enter_stays_owned_until_exit_retry(
 
 def test_azure_credential_terminal_slot_is_reserved_before_constructor() -> None:
     """Verify azure credential terminal slot is reserved before constructor."""
-    source = _source("remote_impl/providers/azure.py")
+    source = package_source_text("remote_impl/providers/azure.py")
     start = source.index("async def _open_service_unpooled")
     body = source[start : source.index("\n\nasync def", start + 10)]
     reserve = body.index("reservation = _reserve_azure_rollback_slot()")
@@ -315,11 +311,11 @@ def test_remote_footprint_separates_logical_network_and_local_fd_weights(
 
 def test_async_provider_pool_charges_transport_capacity_once_not_per_operation() -> None:
     """Verify async provider pool charges transport capacity once not per operation."""
-    context = _source("api_impl/operation_context.py")
-    coordinator = _source("remote_impl/io_coordinator.py")
+    context = package_source_text("api_impl/operation_context.py")
+    coordinator = package_source_text("remote_impl/io_coordinator.py")
     assert "default_descriptor_weight=max(1, self.policy.async_concurrency)" in context
     assert "RemoteIoFootprint(remote_weight=permit_weight, network_fds=0)" in coordinator
-    transport = _source("remote_impl/transport.py")
+    transport = package_source_text("remote_impl/transport.py")
     assert "descriptor_weight=max" not in transport
 
 
@@ -336,7 +332,7 @@ def test_simple_remote_uploads_consume_pre_admitted_local_fd_credit() -> None:
         "remote_impl/sync_http.py",
     ]
     for relative in paths:
-        source = _source(relative)
+        source = package_source_text(relative)
         assert "open_remote_local_file" in source, relative
 
 
@@ -347,7 +343,7 @@ def test_python_local_user_file_streams_use_governed_open() -> None:
         "input_impl/directory_inputs.py",
         "api_impl/output_diagnostics.py",
     ):
-        source = _source(relative)
+        source = package_source_text(relative)
         assert "open_governed_file" in source, relative
 
 
@@ -502,7 +498,7 @@ def test_cgroup_small_value_reader_rejects_truncation(tmp_path: Path) -> None:
 
 def test_empty_cross_process_reconciliation_failure_rebases_without_losing_owner() -> None:
     """Verify empty cross process reconciliation failure rebases without losing owner."""
-    source = _source("core_impl/cross_process_memory.py")
+    source = package_source_text("core_impl/cross_process_memory.py")
     start = source.index("def _get_process_coordinator")
     body = source[start : source.index("\n\ndef acquire_cross_process_memory", start)]
     assert "coordinator.reconcile_pending()" in body
@@ -524,7 +520,7 @@ def test_native_backpressure_uses_independent_ticket_bank_and_bounded_bypass() -
 
 def test_provider_key_gates_are_bounded_and_memory_charged() -> None:
     """Verify provider key gates are bounded and memory charged."""
-    source = _source("remote_impl/provider_session_pool.py")
+    source = package_source_text("remote_impl/provider_session_pool.py")
     assert "_MAX_PENDING_KEY_GATES = 1024" in source
     assert "provider_pending_key_gates" in source
     assert 'acquire_operation_memory(512, stage="remote_provider_key_gate")' in source

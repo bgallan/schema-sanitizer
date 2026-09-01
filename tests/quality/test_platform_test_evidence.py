@@ -26,11 +26,8 @@ _SHA = "a" * 40
 _RUN_ID = 123
 _RUN_ATTEMPT = 2
 _TEST_COUNTS = {
-    "concurrency": 511,
-    "memory-parquet": 1705,
-    "io-pipeline": 1025,
-    "native-stress": 1,
-    "release-matrix": 3,
+    component: int(policy["count"])
+    for component, policy in evidence.EXPECTED_TEST_INVENTORY.items()
 }
 
 
@@ -141,11 +138,11 @@ def test_platform_job_certificate_round_trips_exact_concurrency_evidence(tmp_pat
 def test_platform_job_certificate_rejects_tampered_junit_evidence(tmp_path: Path) -> None:
     """A post-certification byte change invalidates the downloaded job artifact."""
     root = tmp_path / "artifacts"
-    certificate = root / "platform-test-certificate-windows-io-pipeline.json"
-    _complete_evidence(root, "windows", "io-pipeline")
-    options = _options("windows", "io-pipeline")
+    certificate = root / "platform-test-certificate-linux-io-pipeline.json"
+    _complete_evidence(root, "linux", "io-pipeline")
+    options = _options("linux", "io-pipeline")
     evidence.create_certificate(root, certificate, **options)
-    (root / "pytest-windows-io-pipeline.xml").write_text("tampered\n", encoding="utf-8")
+    (root / "pytest-linux-io-pipeline.xml").write_text("tampered\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="digest mismatch"):
         evidence.verify_certificate(root, certificate, **options)
@@ -479,18 +476,18 @@ def test_windows_module_skip_is_limited_to_its_reviewed_file() -> None:
         "test_process_identity_includes_linux_boot_id"
     )
     adjacent = "tests/memory/test_unreviewed.py::test_one"
-    inventory = str(evidence.EXPECTED_TEST_INVENTORY["memory-parquet"]["sha256"])
+    inventory = str(evidence.EXPECTED_TEST_INVENTORY["io-pipeline"]["sha256"])
 
-    assert not _skip_is_allowed("windows", "memory-parquet", _SkipRecord(reviewed, reason))
+    assert not _skip_is_allowed("windows", "io-pipeline", _SkipRecord(reviewed, reason))
     assert _skip_is_allowed(
         "windows",
-        "memory-parquet",
+        "io-pipeline",
         _SkipRecord(reviewed, reason),
         selected_inventory_sha256=inventory,
     )
     assert not _skip_is_allowed(
         "windows",
-        "memory-parquet",
+        "io-pipeline",
         _SkipRecord(adjacent, reason),
         selected_inventory_sha256=inventory,
     )

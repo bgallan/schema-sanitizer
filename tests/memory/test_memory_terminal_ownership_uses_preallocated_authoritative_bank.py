@@ -9,19 +9,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import package_source_text
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
 
 
-def _source(relative: str) -> str:
-    """Return the production source text inspected by this module."""
-    return (SRC / relative).read_text(encoding="utf-8")
-
-
 def test_terminal_ownership_uses_preallocated_authoritative_bank() -> None:
     """Verify terminal ownership uses preallocated authoritative bank."""
-    source = _source("core_impl/terminal_ownership.py")
+    source = package_source_text("core_impl/terminal_ownership.py")
     assert "self._slots = [_TerminalOwnerSlot() for _ in range(self._capacity)]" in source
     assert "_entries: dict" not in source
     assert "def _find_free_slot_locked" in source
@@ -71,14 +67,14 @@ def test_terminal_rejection_diagnostics_cannot_raise_under_counter_oom() -> None
 
 def test_runtime_shutdown_includes_terminal_metadata_bytes() -> None:
     """Verify runtime shutdown includes terminal metadata bytes."""
-    source = _source("core_impl/runtime_shutdown.py")
+    source = package_source_text("core_impl/runtime_shutdown.py")
     assert 'field(terminal_snapshot, "retained_bytes")' in source
     assert 'field(terminal_snapshot, "metadata_bytes")' in source
 
 
 def test_uncertain_fd_terminal_record_uses_byte_attribution_not_lease_units() -> None:
     """Verify uncertain FD terminal record uses byte attribution not lease units."""
-    source = _source("core_impl/process_resources.py")
+    source = package_source_text("core_impl/process_resources.py")
     assert "_UNCERTAIN_FD_TERMINAL_RETAINED_BYTES = 256" in source
     start = source.index("def _republish_uncertain_fd_terminal_owner_locked")
     end = source.index("\ndef ", start + 5)
@@ -138,7 +134,7 @@ def test_effective_cgroup_limit_walks_all_ancestors(
 
 def test_process_resource_consumers_fail_closed_on_unknown_cgroup_observation() -> None:
     """Verify process resource consumers fail closed on unknown cgroup observation."""
-    source = _source("core_impl/process_resources.py")
+    source = package_source_text("core_impl/process_resources.py")
     assert "read_effective_cgroup_integer" in source
     assert "read_effective_cgroup_headroom" in source
     assert "if cgroup.state is CgroupValueState.UNKNOWN:" in source
@@ -154,7 +150,7 @@ def test_process_resource_consumers_fail_closed_on_unknown_cgroup_observation() 
 
 def test_system_pressure_uses_effective_ancestor_ratio() -> None:
     """Verify system pressure uses effective ancestor ratio."""
-    source = _source("core_impl/system_pressure.py")
+    source = package_source_text("core_impl/system_pressure.py")
     assert "read_effective_cgroup_usage_ratio" in source
     assert '"memory.high", "memory.current"' in source
     assert '"memory.max", "memory.current"' in source

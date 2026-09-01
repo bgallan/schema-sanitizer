@@ -1918,10 +1918,22 @@ def test_remote_json_directory_preparation_allows_native_non_utf8_directory(
 
 
 def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> None:
-    """Verify remote directory staging respects download concurrency."""
+    """Verify bounded parallel downloads and the one-CPU serial fallback."""
+    from schema_sanitizer.core_impl.execution_policy import execution_policy
     from schema_sanitizer.remote_impl import directory_downloads as remote_downloads
     from schema_sanitizer.remote_impl import staging as remote_staging
     from schema_sanitizer.sources import RemoteFile
+
+    memory_limit_bytes = 32 * 1024 * 1024
+    policy = execution_policy("multi", memory_limit_bytes)
+    if policy.available_cpus == 1:
+        assert policy.fallback_to_one_worker_reason == "cpu_limited"
+        assert policy.effective_workers == policy.async_concurrency == 1
+        expected_concurrency = 1
+    else:
+        assert policy.effective_workers >= 2
+        assert policy.async_concurrency == 2
+        expected_concurrency = 2
 
     active_downloads = 0
     max_active_downloads = 0
@@ -1955,7 +1967,7 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
         assert client is not None
         active_downloads += 1
         max_active_downloads = max(max_active_downloads, active_downloads)
-        if active_downloads == 2:
+        if active_downloads == expected_concurrency:
             full_window.set()
         try:
             await asyncio.wait_for(full_window.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS)
@@ -1969,11 +1981,11 @@ def test_remote_directory_staging_respects_download_concurrency(monkeypatch) -> 
 
     staged = remote_staging.stage_remote_files_to_directory(
         files,
-        memory_limit_bytes=32 * 1024 * 1024,
+        memory_limit_bytes=memory_limit_bytes,
         threading_mode="multi",
     )
     try:
-        assert max_active_downloads == 2
+        assert max_active_downloads == expected_concurrency
         root = Path(staged.path)
         assert [
             (root / f"{index}.jsonl").read_text(encoding="utf-8").strip() for index in range(5)

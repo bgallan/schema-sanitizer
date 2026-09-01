@@ -11,11 +11,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from time import monotonic_ns
 
 import pytest
-from _support.synchronization import join_thread_or_fail
+from _support.synchronization import join_thread_or_fail, wait_event_or_fail
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.operation_context import operation_finalizer_snapshot
@@ -27,8 +27,8 @@ pytestmark = pytest.mark.usefixtures("require_native")
 
 
 @contextmanager
-def _payload_server(payload: bytes, suffix: str) -> Iterator[str]:
-    """Serve one deterministic hostile object through the public HTTP route."""
+def _payload_server(payload: bytes, suffix: str, phase_durations: dict[str, int]) -> Iterator[str]:
+    """Serve hostile bytes until an explicit, bounded test-owned stop handshake."""
 
     class Handler(BaseHTTPRequestHandler):
         """Serve deterministic hostile bytes without logging test traffic."""
@@ -37,12 +37,14 @@ def _payload_server(payload: bytes, suffix: str) -> Iterator[str]:
             """Handle HTTP HEAD requests for the local test server."""
             self.send_response(200)
             self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Connection", "close")
             self.end_headers()
 
         def do_GET(self) -> None:  # noqa: N802
             """Handle HTTP GET requests for the local test server."""
             self.send_response(200)
             self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(payload)
 
@@ -51,14 +53,43 @@ def _payload_server(payload: bytes, suffix: str) -> Iterator[str]:
             pass
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
-    thread = Thread(target=server.serve_forever, name="reader-rejection-http")
+    # ``BaseServer.shutdown()`` has an unbounded coordination wait. The old
+    # teardown region exhibited a 35-second macOS runner stall after otherwise
+    # subsecond rejections. A short ``handle_request`` timeout plus an explicit
+    # stop/join handshake keeps the owner non-daemon and turns a real leaked
+    # request handler into a deterministic test failure.
+    server.timeout = 0.05
+    ready = Event()
+    stop = Event()
+    server_errors: list[BaseException] = []
+
+    def serve_until_stopped() -> None:
+        """Handle complete requests until the controlling test signals stop."""
+        ready.set()
+        try:
+            while not stop.is_set():
+                server.handle_request()
+        except BaseException as exc:
+            server_errors.append(exc)
+
+    thread = Thread(
+        target=serve_until_stopped,
+        name="reader-rejection-http",
+        daemon=False,
+    )
     thread.start()
+    wait_event_or_fail(ready)
     try:
         yield f"http://127.0.0.1:{server.server_port}/hostile.{suffix}"
     finally:
-        server.shutdown()
-        join_thread_or_fail(thread)
-        server.server_close()
+        shutdown_started_ns = monotonic_ns()
+        stop.set()
+        try:
+            join_thread_or_fail(thread)
+        finally:
+            server.server_close()
+        phase_durations["server_shutdown_ns"] = monotonic_ns() - shutdown_started_ns
+        assert server_errors == []
 
 
 def _error_fingerprint(
@@ -157,6 +188,7 @@ def test_malformed_inputs_have_one_contract_across_local_directory_and_remote_mo
         assert output.read_bytes() == b"existing-output\n"
 
         if label == "remote" and multi_threading:
+            postconditions_started_ns = monotonic_ns()
             operation_finalizers_after = operation_finalizer_snapshot()
             prepared_finalizers_after = finalizer_cleanup_snapshot()
             assert all(
@@ -186,14 +218,22 @@ def test_malformed_inputs_have_one_contract_across_local_directory_and_remote_mo
                 if thread.name.startswith("schema-sanitizer-remote-io") and thread.is_alive()
             }
             assert remote_threads_after <= remote_threads_before
+            request.node.user_properties.append(
+                (
+                    "duration_ns_remote_multi_postconditions",
+                    monotonic_ns() - postconditions_started_ns,
+                )
+            )
 
     for multi_threading in (False, True):
         run(local, input_mode="single_file", multi_threading=multi_threading, label="local")
         run(directory, input_mode="directory", multi_threading=multi_threading, label="directory")
 
-    with _payload_server(payload, suffix) as remote:
+    server_phase_durations: dict[str, int] = {}
+    with _payload_server(payload, suffix, server_phase_durations) as remote:
         for multi_threading in (False, True):
             run(remote, input_mode="single_file", multi_threading=multi_threading, label="remote")
+    request.node.user_properties.extend(server_phase_durations.items())
 
     assert observed
     assert all(item == observed[0] for item in observed[1:])

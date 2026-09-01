@@ -12,6 +12,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from _support.source_contracts import source_paths, source_tree
 from _support.synchronization import (
     SCHEDULER_TIMEOUT_SECONDS,
     ContentionObservedLock,
@@ -274,7 +275,6 @@ def test_gc_finalizers_do_not_call_blocking_release_methods() -> None:
     """Keep the no-blocking-GC rule mechanically enforceable across Python owners."""
     import ast
 
-    root = Path(__file__).parents[2] / "src" / "schema_sanitizer"
     forbidden = {
         "self.release",
         "self.close",
@@ -285,8 +285,8 @@ def test_gc_finalizers_do_not_call_blocking_release_methods() -> None:
         "self._release_finalizer_ticket",
     }
     violations: list[str] = []
-    for source_path in root.rglob("*.py"):
-        tree = ast.parse(source_path.read_text())
+    for relative_path in source_paths("src/schema_sanitizer"):
+        tree = source_tree(relative_path)
         for node in ast.walk(tree):
             if (
                 not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -301,7 +301,7 @@ def test_gc_finalizers_do_not_call_blocking_release_methods() -> None:
                 except Exception:
                     continue
                 if name in forbidden:
-                    violations.append(f"{source_path}:{node.lineno}:{name}")
+                    violations.append(f"{relative_path}:{node.lineno}:{name}")
     assert violations == []
 
 

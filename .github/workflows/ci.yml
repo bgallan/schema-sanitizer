@@ -98,6 +98,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          show-progress: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.11.9
+      - uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: platform-tests-${{ matrix.shard }}
+          python-version: 3.11.9
+          dependency-paths: |-
+            meta/ci/requirements/platform-tests.txt
+            meta/ci/requirements/python-artifact-sha256.lock
       - uses: ./.github/actions/test-platform-wheel
         with:
           platform-name: linux-x86_64
@@ -117,6 +128,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          show-progress: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.11.9
+      - uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: platform-tests-${{ matrix.shard }}
+          python-version: 3.11.9
+          dependency-paths: |-
+            meta/ci/requirements/platform-tests.txt
+            meta/ci/requirements/python-artifact-sha256.lock
       - uses: ./.github/actions/test-platform-wheel
         with:
           platform-name: windows-amd64
@@ -136,6 +158,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          show-progress: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.11.9
+      - uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: platform-tests-${{ matrix.shard }}
+          python-version: 3.11.9
+          dependency-paths: |-
+            meta/ci/requirements/platform-tests.txt
+            meta/ci/requirements/python-artifact-sha256.lock
       - uses: ./.github/actions/test-platform-wheel
         with:
           platform-name: macos-x86_64
@@ -155,6 +188,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+          show-progress: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.11.9
+      - uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: platform-tests-${{ matrix.shard }}
+          python-version: 3.11.9
+          dependency-paths: |-
+            meta/ci/requirements/platform-tests.txt
+            meta/ci/requirements/python-artifact-sha256.lock
       - uses: ./.github/actions/test-platform-wheel
         with:
           platform-name: macos-arm64
@@ -370,7 +414,7 @@ jobs:
         shell: bash
         run: |-
           set -euo pipefail
-          rm -rf -- download dist release
+          rm -rf -- download dist release retained
       - id: download-validation-artifacts
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -389,10 +433,17 @@ jobs:
         with:
           path: download/incoming
       - name: Require and stage the exact validation-artifact inventory
+        id: stage-validation-artifacts
         shell: bash
         run: |-
           set -euo pipefail
           wheel_artifacts=(
+            candidate-wheels-linux-x86_64
+            candidate-wheels-macos-arm64
+            candidate-wheels-macos-x86_64
+            candidate-wheels-windows-amd64
+          )
+          final_bundle_artifacts=(
             dist-wheels-linux-x86_64
             dist-wheels-macos-arm64
             dist-wheels-macos-x86_64
@@ -426,6 +477,37 @@ jobs:
             echo "Validation-artifact download contains a non-directory entry" >&2
             exit 2
           fi
+          candidate_count=0
+          for artifact in "${wheel_artifacts[@]}"; do
+            [[ -d "download/incoming/${artifact}" ]] && ((candidate_count += 1))
+          done
+          bundle_count=0
+          for artifact in "${final_bundle_artifacts[@]}"; do
+            manifest="download/incoming/${artifact}/certified-wheel-bundle.json"
+            [[ -f "${manifest}" && ! -L "${manifest}" ]] && ((bundle_count += 1))
+          done
+          if [[ "${bundle_count}" -eq 4 ]]; then
+            mkdir -p download/bundles
+            for artifact in "${final_bundle_artifacts[@]}"; do
+              mv -- "download/incoming/${artifact}" download/bundles/
+            done
+            python meta/ci/release/certified_wheel_bundle.py restore-validation \
+              --bundles-root download/bundles \
+              --output-root download/restored \
+              --overlays-root download/incoming \
+              --github-output "${GITHUB_OUTPUT}" \
+              --github-sha "${GITHUB_SHA}" \
+              --github-run-id "${GITHUB_RUN_ID}" \
+              --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+            rm -rf -- download/incoming
+            mv -- download/restored download/incoming
+          else
+            if [[ "${candidate_count}" -ne 4 ]]; then
+              echo "Expected four candidate wheels or a complete retained-bundle baseline" >&2
+              exit 2
+            fi
+            echo 'reused=false' >> "${GITHUB_OUTPUT}"
+          fi
           mapfile -t expected < <(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)
           mapfile -t actual < <(
             find download/incoming -mindepth 1 -maxdepth 1 -type d -printf '%f\n' |
@@ -433,7 +515,11 @@ jobs:
                 # A rerun of the reusable CI may see trusted outputs produced
                 # later by an earlier attempt of this same outer workflow.
                 case "${artifact}" in
-                  release-distributions|pypi-publish-distributions) continue ;;
+                  release-distributions|pypi-publish-distributions | \
+                  dist-wheels-linux-x86_64 | \
+                  dist-wheels-macos-arm64 | \
+                  dist-wheels-macos-x86_64 | \
+                  dist-wheels-windows-amd64) continue ;;
                   *) printf '%s\n' "${artifact}" ;;
                 esac
               done | LC_ALL=C sort
@@ -454,8 +540,8 @@ jobs:
             download/platform-tests \
             download/sanitizers \
             download/wheels
-          mv -- download/incoming/native-coverage-certificate download/native-coverage
-          mv -- download/incoming/source-distribution download/source
+          cp -a -- download/incoming/native-coverage-certificate download/native-coverage
+          cp -a -- download/incoming/source-distribution download/source
           for artifact in "${wheel_artifacts[@]}"; do
             cp -a -- "download/incoming/${artifact}/." download/wheels/
           done
@@ -465,7 +551,7 @@ jobs:
           for platform in "${test_platforms[@]}"; do
             for shard in "${test_shards[@]}"; do
               artifact="platform-test-evidence-${platform}-${shard}"
-              mv -- "download/incoming/${artifact}" download/platform-tests/
+              cp -a -- "download/incoming/${artifact}" download/platform-tests/
             done
           done
       - name: Verify the native-coverage gate evidence
@@ -584,6 +670,107 @@ jobs:
             --github-run-attempt "${GITHUB_RUN_ATTEMPT}" \
             release/packages/*
           cat release/release-manifest.json
+      - name: Assemble four durable certified wheel bundles
+        if: steps.stage-validation-artifacts.outputs.reused != 'true'
+        shell: bash
+        run: |-
+          set -euo pipefail
+          python meta/ci/release/certified_wheel_bundle.py create \
+            --wheels-root download/wheels \
+            --validation-root download/incoming \
+            --release-root release \
+            --output-root retained \
+            --github-sha "${GITHUB_SHA}" \
+            --github-run-id "${GITHUB_RUN_ID}" \
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+      - name: Upload the durable Linux wheel bundle
+        id: upload-durable-linux-wheel
+        if: steps.stage-validation-artifacts.outputs.reused != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-linux-x86_64
+          path: retained/linux-x86_64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Retry the durable Linux wheel-bundle upload
+        if: ${{ steps.stage-validation-artifacts.outputs.reused != 'true' && steps.upload-durable-linux-wheel.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-linux-x86_64
+          path: retained/linux-x86_64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Upload the durable macOS ARM64 wheel bundle
+        id: upload-durable-macos-arm64-wheel
+        if: steps.stage-validation-artifacts.outputs.reused != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-macos-arm64
+          path: retained/macos-arm64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Retry the durable macOS ARM64 wheel-bundle upload
+        if: ${{ steps.stage-validation-artifacts.outputs.reused != 'true' && steps.upload-durable-macos-arm64-wheel.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-macos-arm64
+          path: retained/macos-arm64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Upload the durable macOS x86-64 wheel bundle
+        id: upload-durable-macos-x86-64-wheel
+        if: steps.stage-validation-artifacts.outputs.reused != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-macos-x86_64
+          path: retained/macos-x86_64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Retry the durable macOS x86-64 wheel-bundle upload
+        if: ${{ steps.stage-validation-artifacts.outputs.reused != 'true' && steps.upload-durable-macos-x86-64-wheel.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-macos-x86_64
+          path: retained/macos-x86_64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Upload the durable Windows wheel bundle
+        id: upload-durable-windows-wheel
+        if: steps.stage-validation-artifacts.outputs.reused != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-windows-amd64
+          path: retained/windows-amd64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Retry the durable Windows wheel-bundle upload
+        if: ${{ steps.stage-validation-artifacts.outputs.reused != 'true' && steps.upload-durable-windows-wheel.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-windows-amd64
+          path: retained/windows-amd64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
       - name: Upload the only publishable release set
         id: upload-release-distributions
         continue-on-error: true
