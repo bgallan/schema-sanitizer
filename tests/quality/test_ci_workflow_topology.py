@@ -805,13 +805,22 @@ def test_ci_shell_entry_points_are_executable() -> None:
 
 
 def test_secret_scan_uses_the_tested_report_checker() -> None:
-    """Secret exclusions stay narrow and outside the workflow YAML."""
+    """Secret exclusions stay narrow and the report directory is step-owned."""
     _assert_text_contract(
         _action("quality-validation"),
         required=(
+            "rm -rf -- .work/audit",
+            "mkdir -p -- .work/audit",
             "python meta/ci/quality/check_detect_secrets_report.py",
             ".work/audit/detect-secrets.json",
         ),
+    )
+    action = _action("quality-validation")
+    assert (
+        action.index("rm -rf -- .work/audit")
+        < action.index("mkdir -p -- .work/audit")
+        < action.index("> .work/audit/detect-secrets.json")
+        < action.index("python meta/ci/quality/check_detect_secrets_report.py")
     )
 
 
@@ -1157,7 +1166,7 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
         "CMAKE_BUILD_PARALLEL_LEVEL": "1",
         "CMAKE_GENERATOR": "Visual Studio 17 2022",
         "CMAKE_GENERATOR_INSTANCE": ("C:/Program Files/Microsoft Visual Studio/2022/Enterprise"),
-        "CMAKE_GENERATOR_PLATFORM": "x64",
+        "CMAKE_GENERATOR_PLATFORM": "x64,version=10.0.26100.0",
         "CMAKE_GENERATOR_TOOLSET": "v143,host=x64,version=14.44.35207",
         "PIP_FIND_LINKS": "$GITHUB_WORKSPACE/.work/python-artifacts",
         "PIP_NO_INDEX": "1",
@@ -1237,40 +1246,45 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
         < build.index("python -m abi3audit")
     )
     certifier = (ROOT / "meta/ci/native/certify_windows_toolchain.py").read_text(encoding="utf-8")
+    cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
     for cache_entry in (
         '"CMAKE_PROJECT_NAME": ("STATIC", "schema_sanitizer")',
         '"CMAKE_GENERATOR": ("INTERNAL", policy["generator"])',
         '"CMAKE_GENERATOR_INSTANCE": ("INTERNAL", policy["generator_instance"])',
-        '"CMAKE_GENERATOR_PLATFORM": ("INTERNAL", "x64")',
         '"CMAKE_GENERATOR_TOOLSET": ("INTERNAL", policy["toolset"])',
+        '"SCHEMA_SANITIZER_WINDOWS_SDK_VERSION": ("INTERNAL", policy["sdk_version"])',
     ):
         assert cache_entry in certifier
+    assert "f\"x64,version={policy['sdk_version']}\"" in certifier
     certification = build.split("- name: Certify the Windows release toolchain", 1)[1].split(
         "- name:", 1
     )[0]
     assert (
-        certification.count(
-            "python meta/ci/native/certify_windows_toolchain.py .work/build .work/cibuildwheel.log"
-        )
-        == 1
+        certification.count("python meta/ci/native/certify_windows_toolchain.py .work/build") == 1
     )
+    assert ".work/cibuildwheel.log" not in certification
     assert "grep -F -- '-- Selecting Windows SDK version" not in certification
     assert "compiler identification" not in certification
     assert "Check for working" not in certification
     assert "CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION" not in certification
+    assert cmake.index("project(") < cmake.index("CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION")
+    assert "SCHEMA_SANITIZER_WINDOWS_SDK_VERSION" in cmake
+    assert "CACHE INTERNAL" in cmake
+    assert "FORCE)" in cmake
+    assert "selected no Windows SDK" in cmake
     assert '-G "Visual Studio 17 2022"' in sanitizer
-    assert "-A x64" in sanitizer
+    assert '-A "x64,version=10.0.26100.0"' in sanitizer
     assert "-T v143,host=x64,version=14.44.35207" in sanitizer
     assert (
         "-DCMAKE_GENERATOR_INSTANCE='C:/Program Files/Microsoft Visual "
         "Studio/2022/Enterprise'" in sanitizer
     )
-    assert "-DCMAKE_SYSTEM_VERSION=10.0.26100.0" in sanitizer
-    assert "2>&1 | tee .work/windows-asan-cmake.log" in sanitizer
+    assert "CMAKE_SYSTEM_VERSION" not in sanitizer
+    assert "windows-asan-cmake.log" not in sanitizer
     assert "name: Certify the Windows ASan toolchain" in sanitizer
     assert "--direct-build" in sanitizer
     assert "--certificate .work/sanitizer-evidence/windows-toolchain-Windows-X64.json" in sanitizer
-    assert "expected exactly one Windows SDK selection record" in certifier
+    assert "Selecting Windows SDK version" not in certifier
     sanitizer_certificate = (ROOT / "meta/ci/sanitizers/certify_sanitizer_run.py").read_text(
         encoding="utf-8"
     )
@@ -1311,7 +1325,7 @@ def test_windows_action_pins_match_canonical_toolchain_policy() -> None:
         "CMAKE_BUILD_PARALLEL_LEVEL": "1",
         "CMAKE_GENERATOR": policy["generator"],
         "CMAKE_GENERATOR_INSTANCE": policy["generator_instance"],
-        "CMAKE_GENERATOR_PLATFORM": "x64",
+        "CMAKE_GENERATOR_PLATFORM": f"x64,version={policy['sdk_version']}",
         "CMAKE_GENERATOR_TOOLSET": policy["toolset"],
         "PIP_FIND_LINKS": "$GITHUB_WORKSPACE/.work/python-artifacts",
         "PIP_NO_INDEX": "1",
@@ -1830,10 +1844,19 @@ def test_platform_smokes_have_stable_balanced_shard_ownership() -> None:
 
     for name, shard in ownership.items():
         step = next(step for step in _step_bodies(test_action) if f"name: {name}" in step)
-        assert (
-            "if: steps.platform-wheel-availability.outputs.available == 'true' && "
-            f"inputs.shard == '{shard}'"
-        ) in " ".join(step.split())
+        normalized = " ".join(step.split())
+        if name == "Certify the Parquet runtime from functional evidence":
+            expected = (
+                "if: ${{ !cancelled() && "
+                "steps.platform-wheel-availability.outputs.available == 'true' && "
+                "inputs.shard == 'memory-parquet' }}"
+            )
+        else:
+            expected = (
+                "if: steps.platform-wheel-availability.outputs.available == 'true' && "
+                f"inputs.shard == '{shard}'"
+            )
+        assert expected in normalized
 
 
 def test_parquet_certificate_reuses_functional_junit_and_compilation_runs_once() -> None:

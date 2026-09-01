@@ -724,6 +724,47 @@ def test_parquet_contract_runtime_suite_certifies_full_suite_junit_without_rerun
     assert certificate["execution"]["passed_count"] == len(selected)
 
 
+def test_parquet_contract_runtime_suite_certifies_an_unrelated_junit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed full suite still emits durable unsatisfied Parquet evidence."""
+    from meta.ci.parquet import check_parquet_contract_runtime_suite as suite
+
+    junit_xml = tmp_path / "pytest-memory-parquet.xml"
+    certificate_output = tmp_path / "evidence/certificate.json"
+    selected = list(suite.PARQUET_CONTRACT_RUNTIME_TESTS)
+    unrelated = "tests/memory/test_unselected.py::test_unrelated_failure"
+    _write_junit_report(
+        junit_xml,
+        [*selected, unrelated],
+        outcomes={unrelated: "failure"},
+    )
+    monkeypatch.setattr(
+        suite,
+        "parquet_contract_runtime_readiness_status",
+        lambda **_: {"satisfied": True, "issues": []},
+    )
+
+    result = suite.main(
+        [
+            "--junit-xml",
+            str(junit_xml),
+            "--certificate-output",
+            str(certificate_output),
+        ]
+    )
+
+    assert result == 1
+    assert certificate_output.is_file()
+    certificate = json.loads(certificate_output.read_text(encoding="utf-8"))
+    assert certificate["satisfied"] is False
+    assert certificate["execution"]["evidence"]["failed_count"] == 1
+    assert certificate["execution"]["selected_test_count"] == len(selected)
+    assert certificate["execution"]["passed_count"] == len(selected)
+    assert any("1 failed testcases" in issue for issue in certificate["issues"])
+
+
 def test_parquet_contract_runtime_suite_rejects_a_selected_skip_in_junit(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

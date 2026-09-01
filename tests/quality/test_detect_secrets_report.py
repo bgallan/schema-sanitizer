@@ -16,6 +16,9 @@ from meta.ci.quality.check_detect_secrets_report import check_report, filter_fin
 
 PUBLIC_DIGEST = "ab" * 32
 WINDOWS_RUNTIME_POLICY = Path("meta/ci/native/windows-release-toolchain.json")
+PINNED_PIP_HELPER = Path("meta/ci/quality/ensure_pinned_pip.py")
+PLATFORM_EVIDENCE_HELPER = Path("meta/ci/quality/platform_test_evidence.py")
+ADVISORY_SNAPSHOT = Path("meta/ci/requirements/dependency-advisories.json")
 
 
 def _finding(line_number: int, kind: str = "Hex High Entropy String") -> dict[str, object]:
@@ -109,6 +112,172 @@ def test_checked_in_windows_runtime_sha256_values_are_public_evidence() -> None:
 
     assert len(findings) == len(runtimes)
     assert filter_findings(report, root) == {}
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (PINNED_PIP_HELPER, PLATFORM_EVIDENCE_HELPER, ADVISORY_SNAPSHOT),
+)
+def test_checked_in_ci_integrity_sha256_values_are_public_evidence(
+    relative_path: Path,
+) -> None:
+    """Every reported CI input or inventory fingerprint is non-secret evidence."""
+    root = Path(__file__).parents[2]
+    source = root / relative_path
+    digests = re.findall(
+        r"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])", source.read_text(encoding="utf-8")
+    )
+    assert digests
+    findings = [_finding(_line_number_containing(source, digest)) for digest in digests]
+    report = {"results": {relative_path.as_posix(): findings}}
+
+    assert filter_findings(report, root) == {}
+
+
+@pytest.mark.parametrize(
+    ("filename", "line", "kind"),
+    (
+        (
+            PINNED_PIP_HELPER.as_posix(),
+            f'PIP_TOKEN = "{PUBLIC_DIGEST}"',
+            "Hex High Entropy String",
+        ),
+        (
+            "meta/ci/quality/other.py",
+            f'PIP_SHA256 = "{PUBLIC_DIGEST}"',
+            "Hex High Entropy String",
+        ),
+        (
+            PLATFORM_EVIDENCE_HELPER.as_posix(),
+            f'        "token": "{PUBLIC_DIGEST}",',
+            "Hex High Entropy String",
+        ),
+        (
+            "meta/ci/quality/other.py",
+            f'        "sha256": "{PUBLIC_DIGEST}",',
+            "Hex High Entropy String",
+        ),
+        (
+            PLATFORM_EVIDENCE_HELPER.as_posix(),
+            f'        "sha256": "{PUBLIC_DIGEST}",',
+            "Secret Keyword",
+        ),
+    ),
+)
+def test_ci_integrity_digest_exclusions_reject_source_lookalikes(
+    tmp_path: Path, filename: str, line: str, kind: str
+) -> None:
+    """Wrong fields, files, and detector types remain actionable findings."""
+    source = tmp_path / filename
+    source.parent.mkdir(parents=True)
+    source.write_text(line + "\n", encoding="utf-8")
+    report = {"results": {filename: [_finding(1, kind)]}}
+
+    assert filter_findings(report, tmp_path) == report["results"]
+
+
+def test_pip_digest_exclusion_requires_the_matching_artifact_lock(tmp_path: Path) -> None:
+    """A helper constant is not trusted unless the same pip artifact is locked."""
+    helper = tmp_path / PINNED_PIP_HELPER
+    helper.parent.mkdir(parents=True)
+    helper.write_text(
+        f'PIP_VERSION = "1.2.3"\nPIP_SHA256 = "{PUBLIC_DIGEST}"\n',
+        encoding="utf-8",
+    )
+    report = {
+        "results": {
+            PINNED_PIP_HELPER.as_posix(): [_finding(_line_number_containing(helper, PUBLIC_DIGEST))]
+        }
+    }
+
+    assert filter_findings(report, tmp_path) == report["results"]
+
+
+def test_platform_digest_exclusion_rejects_unreviewed_sha256_field(tmp_path: Path) -> None:
+    """Only hashes referenced by the two reviewed inventory constants are public."""
+    helper = tmp_path / PLATFORM_EVIDENCE_HELPER
+    helper.parent.mkdir(parents=True)
+    reviewed_digest = "cd" * 32
+    helper.write_text(
+        "\n".join(
+            (
+                "EXPECTED_TEST_INVENTORY = {",
+                f'    "suite": {{"count": 1, "sha256": "{reviewed_digest}"}},',
+                "}",
+                "EXPECTED_EXACT_SKIP_INVENTORY_SHA256 = {}",
+                f'UNRELATED = {{"sha256": "{PUBLIC_DIGEST}"}}',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    report = {
+        "results": {
+            PLATFORM_EVIDENCE_HELPER.as_posix(): [
+                _finding(_line_number_containing(helper, PUBLIC_DIGEST))
+            ]
+        }
+    }
+
+    assert filter_findings(report, tmp_path) == report["results"]
+
+
+@pytest.mark.parametrize("canonical", (True, False))
+def test_advisory_digest_exclusion_rejects_secret_siblings_and_noncanonical_json(
+    tmp_path: Path, canonical: bool
+) -> None:
+    """Only canonical fingerprints nested under the reviewed inputs object are public."""
+    snapshot = tmp_path / ADVISORY_SNAPSHOT
+    snapshot.parent.mkdir(parents=True)
+    payload = {
+        "artifact_lock": "python-artifact-sha256.lock",
+        "auditor": "pip-audit==2.10.1",
+        "inputs": {"pyproject.toml": "cd" * 32},
+        "schema": 1,
+        "vulnerabilities": [],
+    }
+    if canonical:
+        payload["api_token"] = PUBLIC_DIGEST
+    snapshot.write_text(
+        json.dumps(payload, indent=2 if canonical else 4, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    target = PUBLIC_DIGEST if canonical else "cd" * 32
+    report = {
+        "results": {
+            ADVISORY_SNAPSHOT.as_posix(): [_finding(_line_number_containing(snapshot, target))]
+        }
+    }
+
+    assert filter_findings(report, tmp_path) == report["results"]
+
+
+def test_advisory_digest_exclusion_rejects_a_stale_input_fingerprint(tmp_path: Path) -> None:
+    """A canonical advisory digest must match the referenced repository bytes."""
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text("[project]\nname = 'example'\n", encoding="utf-8")
+    snapshot = tmp_path / ADVISORY_SNAPSHOT
+    snapshot.parent.mkdir(parents=True)
+    payload = {
+        "artifact_lock": "python-artifact-sha256.lock",
+        "auditor": "pip-audit==2.10.1",
+        "inputs": {"pyproject.toml": PUBLIC_DIGEST},
+        "schema": 1,
+        "vulnerabilities": [],
+    }
+    snapshot.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    report = {
+        "results": {
+            ADVISORY_SNAPSHOT.as_posix(): [
+                _finding(_line_number_containing(snapshot, PUBLIC_DIGEST))
+            ]
+        }
+    }
+
+    assert filter_findings(report, tmp_path) == report["results"]
 
 
 @pytest.mark.parametrize(

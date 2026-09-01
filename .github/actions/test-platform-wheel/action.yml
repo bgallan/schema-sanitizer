@@ -299,8 +299,7 @@ runs:
           "${test_paths[@]}" \
           2>&1 | tee "artifacts/pytest-durations-${PLATFORM_ARTIFACT}-${TEST_SHARD}.log"
     - name: Certify the Parquet runtime from functional evidence
-      if: steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard
-        == 'memory-parquet'
+      if: ${{ !cancelled() && steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard == 'memory-parquet' }}
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
       shell: bash

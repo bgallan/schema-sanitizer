@@ -16,12 +16,21 @@ import sys
 import tempfile
 from pathlib import Path
 
-from meta.ci.quality.locked_requirements import (
-    read_artifact_lock,
-    read_owner_lock,
-    render_hashed_requirements,
-    select_requirements,
-)
+if __package__:
+    from ..quality.locked_requirements import (
+        read_artifact_lock,
+        read_owner_lock,
+        render_hashed_requirements,
+        select_requirements,
+    )
+else:
+    sys.path.insert(0, os.fspath(Path(__file__).resolve().parents[3]))
+    from meta.ci.quality.locked_requirements import (
+        read_artifact_lock,
+        read_owner_lock,
+        render_hashed_requirements,
+        select_requirements,
+    )
 
 EXTRA_IMPORTS = {
     "core": (),

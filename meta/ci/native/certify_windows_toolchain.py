@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Certify the exact Windows compiler selected by CMake's Visual Studio generator.
+"""Certify the exact Windows toolchain selected by CMake's Visual Studio generator.
 
 Visual Studio computes its C and C++ compiler variables instead of reliably
 storing them in ``CMakeCache.txt``, so this gate validates the persisted cache
-fields and generated per-language metadata to prove both languages used the
-reviewed compiler, target, and ABI probes.  The certificate also binds that
-evidence to one unambiguous build tree, the exact CMake pin in
-``pyproject.toml``, and one well-formed, reviewed SDK selection record.
+fields and generated per-language metadata to prove the build used the reviewed
+compiler, SDK, target, and ABI probes. The project persists CMake's authoritative
+Visual Studio SDK selection, avoiding optional human-readable configure output.
 """
 
 from __future__ import annotations
@@ -37,12 +36,6 @@ _POLICY_KEYS = {
 _CACHE_LINE = re.compile(r"^(?P<key>[^:=#][^:=]*):(?P<type>[^=]+)=(?P<value>.*)$")
 _BARE_CMAKE_VALUE = re.compile(r"[A-Za-z0-9_.:+/\\-]+")
 _EXACT_CMAKE_PIN = re.compile(r"==(?P<version>[0-9]+(?:\.[0-9]+){2})")
-_SDK_SELECTION_MARKER = "Selecting Windows SDK version"
-_SDK_SELECTION_LINE = re.compile(
-    r"^-- Selecting Windows SDK version "
-    r"(?P<version>[0-9]+(?:\.[0-9]+){3}) "
-    r"to target Windows [0-9]+(?:\.[0-9]+){1,3}\.$"
-)
 _CERTIFICATE_FORMAT = "schema-sanitizer-windows-toolchain-certificate-v1"
 
 
@@ -108,27 +101,6 @@ def _cmake_version_pin(path: Path) -> str:
     if match is None:
         raise AssertionError(f"project CMake version is not an exact pin: {version_spec!r}")
     return match.group("version")
-
-
-def _selected_sdk_version(path: Path) -> str:
-    """Return the sole well-formed Windows SDK selection from a build log."""
-    _require_regular_file(path, "cibuildwheel log")
-    selections: list[str] = []
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if _SDK_SELECTION_MARKER not in line:
-            continue
-        match = _SDK_SELECTION_LINE.fullmatch(line)
-        if match is None:
-            raise AssertionError(
-                f"malformed Windows SDK selection at log line {line_number}: {line!r}"
-            )
-        selections.append(match.group("version"))
-    if len(selections) != 1:
-        raise AssertionError(
-            f"expected exactly one Windows SDK selection record, found {len(selections)}: "
-            f"{selections}"
-        )
-    return selections[0]
 
 
 def _require_directory(path: Path, label: str) -> None:
@@ -265,7 +237,6 @@ def _certificate_payload(
 
 def certify_windows_toolchain(
     build_root: Path,
-    build_log: Path,
     policy_path: Path = WINDOWS_TOOLCHAIN,
     project_configuration: Path = PROJECT_CONFIGURATION,
     *,
@@ -274,11 +245,6 @@ def certify_windows_toolchain(
     """Certify one Visual Studio build tree and return its binary directory."""
     policy = _load_policy(policy_path)
     cmake_version = _cmake_version_pin(project_configuration)
-    sdk_version = _selected_sdk_version(build_log)
-    if sdk_version != policy["sdk_version"]:
-        raise AssertionError(
-            f"Windows SDK selection mismatch: {sdk_version!r} != {policy['sdk_version']!r}"
-        )
     _require_directory(build_root, "Windows build root")
     cache = (
         build_root / "CMakeCache.txt"
@@ -292,10 +258,14 @@ def certify_windows_toolchain(
     expected_cache = {
         "CMAKE_GENERATOR": ("INTERNAL", policy["generator"]),
         "CMAKE_GENERATOR_INSTANCE": ("INTERNAL", policy["generator_instance"]),
-        "CMAKE_GENERATOR_PLATFORM": ("INTERNAL", "x64"),
+        "CMAKE_GENERATOR_PLATFORM": (
+            "INTERNAL",
+            f"x64,version={policy['sdk_version']}",
+        ),
         "CMAKE_GENERATOR_TOOLSET": ("INTERNAL", policy["toolset"]),
         "CMAKE_PROJECT_NAME": ("STATIC", "schema_sanitizer"),
         "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES": ("STRING", "auto"),
+        "SCHEMA_SANITIZER_WINDOWS_SDK_VERSION": ("INTERNAL", policy["sdk_version"]),
     }
     for key, expected_entry in expected_cache.items():
         if cache_values.get(key) != expected_entry:
@@ -338,7 +308,6 @@ def _parser() -> argparse.ArgumentParser:
     """Build the command-line parser for the Windows toolchain gate."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("build_root", type=Path)
-    parser.add_argument("build_log", type=Path)
     parser.add_argument("--policy", type=Path, default=WINDOWS_TOOLCHAIN)
     parser.add_argument("--certificate", type=Path)
     parser.add_argument(
@@ -354,7 +323,6 @@ def main() -> int:
     args = _parser().parse_args()
     build_directory = certify_windows_toolchain(
         args.build_root,
-        args.build_log,
         args.policy,
         direct_build=args.direct_build,
     )

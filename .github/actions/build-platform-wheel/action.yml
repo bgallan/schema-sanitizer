@@ -307,7 +307,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        python meta/ci/native/certify_windows_toolchain.py .work/build .work/cibuildwheel.log
+        python meta/ci/native/certify_windows_toolchain.py .work/build
     - name: Audit the CPython stable ABI
       shell: bash
       run: |

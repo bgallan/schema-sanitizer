@@ -76,6 +76,8 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        rm -rf -- .work/audit
+        mkdir -p -- .work/audit
         detect-secrets scan \
           --no-verify \
           --exclude-files '^(\.git/|\.work/|dist/|\.venv/|fuzz/(corpus|regressions)/parquet/|fuzz/regressions/(csv|json|parquet|xml)\.sha1\.zip$|fuzz/corpus/json/invalid-utf8\.json$)' \

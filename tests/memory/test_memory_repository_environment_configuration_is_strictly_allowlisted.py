@@ -70,6 +70,7 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         "meta/ci/release/abi_public_smoke.py",
         "meta/ci/release/check_distribution_contents.py",
         "meta/ci/release/check_github_release_state.py",
+        "meta/ci/quality/run_pre_commit_tool.py",
         "meta/ci/sanitizers/run_with_watchdog.py",
         "src/schema_sanitizer/core_impl/allocator_control.py",
         "src/schema_sanitizer/core_impl/cross_process_memory.py",

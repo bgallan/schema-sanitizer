@@ -2,7 +2,7 @@
   "artifact_lock": "python-artifact-sha256.lock",
   "auditor": "pip-audit==2.10.1",
   "inputs": {
-    "pyproject.toml": "8d8012160526d861aa8781a1726e3f7233021efe3ef2365d706d1833d59dcfae",
+    "pyproject.toml": "dd9f814d5723d67879ae01fee9f51ee16437a11a5546c731e2ddce01653a23d5",
     "python-artifact-sha256.lock": "4f4ae91634f10d3b562229e1889d03d5e516187100abc5027a87fe651da2b83f",
     "requirements/build-tools.txt": "66bea80c4bc5b0bcd0458c861a589f223e87b0526c2c97620d23bb8738336470",
     "requirements/downstream.txt": "e069483044c98ea881e343ba71b7ada13bf96d6cefda609bb2454279b2341145",

@@ -11,6 +11,7 @@ import importlib.util
 import os
 import shutil
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -39,6 +40,22 @@ def _seed_wheels(module, root: Path) -> Path:
     (seed_root / module._PIP_WHEEL_NAME).write_bytes(payload)
     module._PIP_WHEEL_SHA256 = hashlib.sha256(payload).hexdigest()
     return seed_root
+
+
+def test_downstream_planner_cli_imports_repository_helpers_from_any_directory(
+    tmp_path: Path,
+) -> None:
+    """The absolute-path entry point bootstraps its imports outside the checkout."""
+    completed = subprocess.run(
+        [sys.executable, "-I", os.fspath(SCRIPT), "--help"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "usage:" in completed.stdout
 
 
 def test_every_extra_is_installed_and_imported_in_isolation(

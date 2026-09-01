@@ -56,6 +56,19 @@ project(
   HOMEPAGE_URL "https://github.com/bgallan/schema-sanitizer"
   LANGUAGES C CXX)
 
+# Persist the SDK actually selected by CMake's Visual Studio generator. Release
+# and sanitizer certification reads this generated value instead of relying on
+# optional, human-readable configure output.
+if(CMAKE_GENERATOR MATCHES "^Visual Studio ")
+  if(NOT CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+    message(FATAL_ERROR "The Visual Studio generator selected no Windows SDK")
+  endif()
+  set(SCHEMA_SANITIZER_WINDOWS_SDK_VERSION
+      "${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}"
+      CACHE INTERNAL "Windows SDK selected by the Visual Studio generator"
+            FORCE)
+endif()
+
 find_package(Threads REQUIRED)
 
 option(SCHEMA_SANITIZER_ENABLE_LTO

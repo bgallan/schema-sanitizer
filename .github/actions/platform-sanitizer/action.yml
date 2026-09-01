@@ -228,10 +228,9 @@ runs:
         set -euo pipefail
         cmake -S . -B .work/build/platform-sanitizer \
           -G "Visual Studio 17 2022" \
-          -A x64 \
+          -A "x64,version=10.0.26100.0" \
           -T v143,host=x64,version=14.44.35207 \
           -DCMAKE_GENERATOR_INSTANCE='C:/Program Files/Microsoft Visual Studio/2022/Enterprise' \
-          -DCMAKE_SYSTEM_VERSION=10.0.26100.0 \
           -DSCHEMA_SANITIZER_ENABLE_LTO=OFF \
           -DSCHEMA_SANITIZER_ENABLE_PCH=OFF \
           -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}" \
@@ -239,14 +238,13 @@ runs:
           -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone \
           -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled \
           -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
-          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON \
-          2>&1 | tee .work/windows-asan-cmake.log
+          -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
     - name: Certify the Windows ASan toolchain
       if: runner.os == 'Windows'
       shell: bash
       run: >-
         python meta/ci/native/certify_windows_toolchain.py
-        .work/build/platform-sanitizer .work/windows-asan-cmake.log
+        .work/build/platform-sanitizer
         --direct-build
         --certificate .work/sanitizer-evidence/windows-toolchain-Windows-X64.json
     - name: Configure macOS ASan/UBSan
