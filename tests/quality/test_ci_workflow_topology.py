@@ -370,6 +370,7 @@ def test_only_publish_is_a_manual_release_and_only_advisories_are_scheduled() ->
     }
 
     assert set(contents) == {
+        "artifact-cleanup.yml",
         "ci.yml",
         "dependency-advisory-refresh.yml",
         "publish.yml",
@@ -378,6 +379,54 @@ def test_only_publish_is_a_manual_release_and_only_advisories_are_scheduled() ->
     assert scheduled == {"dependency-advisory-refresh.yml"}
     assert "    inputs:" not in _workflow_preamble(contents["dependency-advisory-refresh.yml"])
     assert "    inputs:" in _workflow_preamble(contents["publish.yml"])
+
+
+def test_successful_runs_prune_every_consumed_artifact_from_a_trusted_boundary() -> None:
+    """Post-run cleanup retains four wheels without executing triggering-run code."""
+    cleanup = _workflow("artifact-cleanup.yml")
+    preamble = _workflow_preamble(cleanup)
+    job = _job_body(cleanup, "prune-transient-artifacts")
+    retained = set(re.findall(r"^              '(dist-wheels-[a-z0-9_-]+)',$", job, re.MULTILINE))
+
+    assert _job_ids(cleanup) == {"prune-transient-artifacts"}
+    assert "  workflow_run:" in preamble
+    assert "    workflows: [CI, Publish to PyPI]" in preamble
+    assert "    types: [completed]" in preamble
+    assert "workflow_dispatch:" not in preamble
+    assert "pull_request_target:" not in preamble
+    assert re.search(r"^permissions: \{\}$", preamble, re.MULTILINE)
+    assert "contents:" not in preamble
+    assert "group: artifact-prune-${{ github.event.workflow_run.id }}" in preamble
+    assert "cancel-in-progress: false" in preamble
+    assert "github.event.workflow_run.conclusion == 'success'" in job
+    assert re.search(r"^    permissions:\n(?:      #.*\n)?      actions: write", job, re.MULTILINE)
+    assert "contents:" not in job
+    assert "actions/checkout@" not in job
+    assert "actions/setup-python@" not in job
+    assert "run:" not in job
+    assert job.count("actions/github-script@") == 1
+    assert "retries: 3" in job
+    assert "retry-exempt-status-codes: 400,401,404,422" in job
+    assert "github.rest.actions.getWorkflowRun" in job
+    assert "github.rest.actions.listWorkflowRunArtifacts" in job
+    assert "github.rest.actions.deleteArtifact" in job
+    assert "source.conclusion !== 'success'" in job
+    assert "['CI', new Set(['pull_request', 'push'])]" in job
+    assert "['Publish to PyPI', new Set(['workflow_dispatch'])]" in job
+    assert "allowedEvents.get(source.name)?.has(source.event)" in job
+    assert "repository.full_name !== repositoryName" in job
+    assert "Number.isSafeInteger(source.id)" in job
+    assert "Number.isSafeInteger(source.run_attempt)" in job
+    assert "Date.parse(source.updated_at)" in job
+    assert "current.run_attempt === source.run_attempt" in job
+    assert "current.status === 'completed'" in job
+    assert "run_id: source.id" in job
+    assert "github.paginate(" in job
+    assert "Date.parse(artifact.created_at) > sourceCompletedAt" in job
+    assert "retainedCounts[name] !== 1" in job
+    assert ".filter((artifact) => !retained.has(artifact.name))" in job
+    assert "artifact_id: artifact.id" in job
+    assert retained == {f"dist-wheels-{platform['platform-name']}" for platform in _BUILD_PLATFORMS}
 
 
 def test_ci_has_only_safe_pr_main_and_reusable_triggers() -> None:
@@ -694,6 +743,7 @@ def test_external_actions_are_pinned_to_immutable_commits() -> None:
         "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
         "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
         "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3",
         "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33",
     }
 
@@ -3123,6 +3173,7 @@ def test_release_artifact_is_complete_exact_and_self_describing() -> None:
     assert "check_downstream_install.sh" not in distribution
     assert "release/packages/" in distribution
     assert "release/release-manifest.json" in distribution
+    assert "cat release/release-manifest.json" in distribution
     assert "name: release-distributions" in distribution
     assert ci.index("Require every validation matrix to succeed") < ci.index(
         "Assemble the auditable release artifact"

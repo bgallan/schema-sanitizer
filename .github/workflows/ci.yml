@@ -555,6 +555,7 @@ jobs:
             --github-run-id "${GITHUB_RUN_ID}" \
             --github-run-attempt "${GITHUB_RUN_ATTEMPT}" \
             release/packages/*
+          cat release/release-manifest.json
       - name: Upload the only publishable release set
         id: upload-release-distributions
         continue-on-error: true

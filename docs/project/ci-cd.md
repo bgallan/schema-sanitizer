@@ -1,9 +1,10 @@
 # CI/CD pipeline
 
-The repository has exactly two GitHub Actions workflows: one canonical
-validation workflow and one manual PyPI publication wrapper. Pull requests,
-updates to `main`, and release candidates all execute the same validation
-definition; publication cannot select a shorter test path.
+The release path has one canonical validation workflow and one manual PyPI
+publication wrapper. Pull requests, updates to `main`, and release candidates
+all execute the same validation definition; publication cannot select a
+shorter test path. Two isolated lifecycle workflows refresh dependency
+advisories and prune consumed artifacts after a successful run.
 
 The workflows under [`.github/workflows/`](../../.github/workflows/) and the
 owned helper map in [`meta/ci/`](../../meta/ci/README.md) are the executable source of truth.
@@ -53,19 +54,24 @@ flowchart LR
     RECONCILE --> RELEASEGATE[release-gate<br/>unconditional terminal status]
     PUBLISH --> RELEASEGATE
     VERIFY --> RELEASEGATE
+    CHECK -->|direct CI succeeds| CLEANUP[artifact-cleanup.yml<br/>trusted post-run boundary]
+    RELEASEGATE -->|Publish succeeds| CLEANUP
+    CLEANUP --> RETAINED[Four certified wheel artifacts<br/>retained for seven days]
 ```
 
 | Workflow | Entry points | Role | External side effects |
 |---|---|---|---|
 | [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml) | `pull_request`, `push` to `main`, and `workflow_call` | Defines all build, test, security, coverage, packaging, and evidence jobs. | Uploads GitHub run artifacts only. |
 | [`.github/workflows/publish.yml`](../../.github/workflows/publish.yml) | `workflow_dispatch` only | Rejects an invalid request, calls `ci.yml` once, reconciles the validated manifest with PyPI, publishes only missing files, verifies the complete remote digest and provenance set, and emits one terminal release status. | Always targets production PyPI after canonical validation. |
+| [`.github/workflows/dependency-advisory-refresh.yml`](../../.github/workflows/dependency-advisory-refresh.yml) | Weekly schedule or input-free `workflow_dispatch` | Queries current dependency advisories and compares a reviewable candidate with the committed snapshot. | Uploads one 14-day advisory candidate; never changes repository files. |
+| [`.github/workflows/artifact-cleanup.yml`](../../.github/workflows/artifact-cleanup.yml) | Completion of `CI` or `Publish to PyPI` | After full success, verifies the source run and exact wheel inventory, then removes every consumed transient artifact. | Deletes source-run Actions artifacts and retains four certified wheel bundles. |
 
 The canonical graph has six matrices and one terminal job:
 
 | Job | Matrix entries | Dependency | Shared contract |
 |---|---:|---|---|
 | `platform-wheel-builds` | 4 platforms | None | Build, audit, smoke, certify, and upload one wheel for each release target. |
-| `platform-tests-PLATFORM` | 4 matrices × 3 shards | Complete wheel matrix | Run the three exhaustive functional shards against each fixed platform wheel and retain one certified evidence set per entry. |
+| `platform-tests-PLATFORM` | 4 matrices × 3 shards | Complete wheel matrix | Run the three exhaustive functional shards against each fixed platform wheel and upload one certified evidence set per entry. |
 | `validation-matrix` | 8 thematic workloads | None | Run quality, source packaging, certified native coverage, TSan, and four certified platform-sanitizer entries in parallel. |
 | `validation-gate` | 1 terminal job | All six matrices | Require exact success, verify the 12 platform-test sets, four wheel certificates, five sanitizer runs, and native-coverage certificate, then assemble and validate the release set. |
 
@@ -95,6 +101,15 @@ The canonical workflow has these exact triggers:
   `ready_for_review` events;
 - every `push` to `main`, including a merged pull request;
 - `workflow_call`, used only by `publish.yml`.
+
+The cleanup workflow observes completed `CI` and `Publish to PyPI` runs, but its
+only job runs after a `success` conclusion. It cannot be dispatched directly.
+It accepts only pull-request/push CI runs and manually dispatched publication
+runs, so a reusable-workflow invocation can never be pruned before its caller
+finishes. Its concurrency identity is the source run ID, and it checks the live
+run attempt both before inventory and immediately before deletion. Artifacts
+newer than the completion event make stale cleanup exit without modifying the
+run. This keeps a complete rerun from racing cleanup for the preceding attempt.
 
 Draft pull requests are not excluded: `opened`, `synchronize`, and `reopened`
 events can validate a draft, and `ready_for_review` starts validation when its
@@ -197,10 +212,11 @@ for each of the four targets. Four `platform-tests-PLATFORM` jobs list the exact
 12-entry product of those platforms and the `concurrency`, `memory-parquet`,
 and `io-pipeline` shards as fixed-platform matrices. Every matrix uses
 `fail-fast: false`, preserving evidence from companion entries when one fails.
-Both workflows fix `PYTHONHASHSEED=0`, enable Python UTF-8 mode, and use UTC;
-the Linux wheel build passes all three controls into its cibuildwheel container.
-They deliberately avoid a global `LC_ALL` value because no single UTF-8 locale
-name is portable across all Windows and macOS runners.
+The canonical validation and publication workflows fix `PYTHONHASHSEED=0`,
+enable Python UTF-8 mode, and use UTC; the Linux wheel build passes all three
+controls into its cibuildwheel container. They deliberately avoid a global
+`LC_ALL` value because no single UTF-8 locale name is portable across all
+Windows and macOS runners.
 
 GitHub Actions resolves `needs` at job granularity, not separately for each
 matrix entry. Consequently, the four test matrices start only after all entries
@@ -264,11 +280,12 @@ profiles unless a marker expression is supplied.
 Every functional-shard invocation emits a JUnit XML report with the duration of
 each test and a terminal log ranking the 50 slowest phases above 50 ms. Both
 files identify their platform and shard. The log is piped through `tee` with
-`pipefail`, so pytest's exit status remains authoritative. Successful and
-partial failure diagnostics remain in the run logs and in 12 seven-day
-`platform-test-evidence-*` artifacts. Each artifact has an exact shard-specific
-inventory and a content-addressed certificate; the repository still does not
-create Job Summaries for these tests.
+`pipefail`, so pytest's exit status remains authoritative. Diagnostics remain
+in the run logs. Twelve `platform-test-evidence-*` artifacts carry exact
+shard-specific inventories and content-addressed certificates through the
+terminal gate. Failed or cancelled runs retain them for seven days; a
+successful top-level run prunes them after every consumer has finished. The
+repository still does not create Job Summaries for these tests.
 
 Functional correctness tests do not treat wall-clock speed as a pass/fail
 signal. Deadline behavior is exercised with controlled clocks, exact timeout
@@ -422,8 +439,9 @@ high-risk source floors are:
 | Operation task arena | 39% | 53% | 42% | 24% |
 
 The native job still renders per-context and combined reports for diagnosis.
-Only its compact canonical certificate is retained and independently rebuilt
-against the checked-out source policy by `validation-gate`.
+Its compact canonical certificate is uploaded and independently rebuilt against
+the checked-out source policy by `validation-gate`; it remains downloadable only
+when the top-level run does not succeed.
 
 Python coverage is combined only after the regular, adversarial, and integration
 data files all exist as the exact expected regular-file set. Strict combination
@@ -505,10 +523,10 @@ separate, so dependency metadata and imports for one published extra cannot
 make another appear valid.
 
 These accelerators preserve the six matrices, 25-job graph, complete
-four-platform shard product, coverage contexts, sanitizer targets, and release
-artifacts. Hosted-runner capacity, network service, and cold-cache state remain
-variable external inputs; CI does not impose timing assertions or promise a
-particular duration.
+four-platform shard product, coverage contexts, sanitizer targets, and
+release-artifact production and verification contracts. Hosted-runner capacity,
+network service, and cold-cache state remain variable external inputs; CI does
+not impose timing assertions or promise a particular duration.
 
 ## [Release evidence](#index)
 
@@ -521,28 +539,39 @@ manual publisher also retry exact downloads after removing only the
 corresponding possibly partial destination.
 
 | Artifact | Contents | Retention | Consumer |
-|---|---|---:|---|
-| `dist-wheels-PLATFORM` (4) | One intermediate platform wheel and its native-payload certificate. | 7 days | The three shard entries in the matching `platform-tests-PLATFORM` job, `validation-gate`, and delayed reruns. |
-| `platform-test-evidence-PLATFORM-SHARD` (12) | Exact shard-specific runner, JUnit/timing, integrity, benchmark/certificate files, plus their outer content-addressed certificate. | 7 days | `validation-gate` and failure diagnosis. |
-| `source-distribution` | One validated intermediate sdist. | 7 days | `validation-gate` and delayed reruns. |
-| `native-coverage-certificate` | Aggregate and high-risk LLVM floors, translation-unit inventory, source digest, report digest, and run provenance. | 7 days | `validation-gate` and external audit. |
-| `sanitizer-certificate-OS-ARCH-SANITIZER` (5) | One run-policy certificate and its exact raw watchdog certificates. | 7 days | `validation-gate` and failure diagnosis. |
-| `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | 7 days | PyPI reconciliation and external audit. |
-| `pypi-publish-distributions` | Only manifest-matched files absent from PyPI. | 7 days | The code-free OIDC publisher; omitted when PyPI already has the complete matching set. |
+|---|---|---|---|
+| `dist-wheels-PLATFORM` (4) | One intermediate platform wheel and its native-payload certificate. | Seven days, including after success. | The three shard entries in the matching `platform-tests-PLATFORM` job, `validation-gate`, and post-success wheel review. |
+| `platform-test-evidence-PLATFORM-SHARD` (12) | Exact shard-specific runner, JUnit/timing, integrity, benchmark/certificate files, plus their outer content-addressed certificate. | Seven days after a non-successful run; pruned after success. | `validation-gate` and failure diagnosis. |
+| `source-distribution` | One validated intermediate sdist. | Seven days after a non-successful run; pruned after success. | `validation-gate` and failed-run recovery. |
+| `native-coverage-certificate` | Aggregate and high-risk LLVM floors, translation-unit inventory, source digest, report digest, and run provenance. | Seven days after a non-successful run; pruned after success. | `validation-gate` and failure diagnosis. |
+| `sanitizer-certificate-OS-ARCH-SANITIZER` (5) | One run-policy certificate and its exact raw watchdog certificates. | Seven days after a non-successful run; pruned after success. | `validation-gate` and failure diagnosis. |
+| `release-distributions` | `packages/` with the exact five distributions plus `release-manifest.json`. | Seven days after a non-successful run; pruned after success. | PyPI reconciliation, verification, failed-release recovery, and in-run audit. |
+| `pypi-publish-distributions` | Only manifest-matched files absent from PyPI. | Seven days after a non-successful run; pruned after success. | The code-free OIDC publisher; omitted when PyPI already has the complete matching set. |
 
 Python coverage and the full native HTML/raw reports remain in logs or the
-owning runner; the compact native certificate is retained. Platform JUnit,
-timing, benchmark, runner, Parquet, and integrity records are retained inside
-their exact per-shard artifacts. The four wheel-build jobs deliberately retain
+owning runner. Platform JUnit, timing, benchmark, runner, Parquet, and integrity
+records remain in their exact per-shard artifacts through final validation and
+on non-successful runs. The four wheel-build jobs deliberately retain
 cibuildwheel's native GitHub Job Summary; repository actions do not write any
 other Job Summary.
 
-A successful canonical CI run retains exactly 24 artifacts: four certified
-platform wheels, 12 platform-test evidence sets, one sdist, one native-coverage
-certificate, five sanitizer evidence sets, and the final auditable release set.
-A manual publication run adds one staged missing-package artifact only when
-publication is required. No workflow receives artifact-deletion permission,
-and no completed run is modified after it ends.
+A canonical CI run creates 24 artifact bundles because 20 are required for
+cross-job transport or terminal evidence verification. A manual publication
+run may add one staging artifact when publication is required. After the whole
+top-level workflow succeeds, `artifact-cleanup.yml` requires exactly one of
+each expected platform-wheel bundle before deleting every consumed transient
+artifact. The completed run then exposes exactly four artifact cards for the
+remainder of their seven-day retention: one certified wheel bundle per release
+platform. Each retained bundle contains one wheel and its small native-payload
+certificate.
+
+Failed and cancelled top-level runs do not delete anything, so diagnostic and
+partial-publication recovery inputs keep their configured seven-day retention.
+Only the isolated cleanup workflow receives `actions: write`; it checks out no
+source and neither downloads nor executes triggering-run content. The cleanup
+is not retroactive for runs completed before its definition reaches the default
+branch. Advisory-refresh artifacts belong to a different workflow and retain
+their independent 14-day lifecycle.
 
 The `source-distribution` validation entry builds and exercises the sdist while
 platform work is in flight. After every matrix succeeds, `validation-gate`
@@ -564,14 +593,17 @@ The gate creates a canonical `release-manifest.json` containing:
 - the filename, byte size, and SHA-256 digest of every distribution.
 
 The helper validates the packages before creating the manifest and rebuilds the
-expected data to verify the serialized manifest. `release-distributions` is the
-only reconciliation input; publication neither rebuilds nor wildcard-selects
+expected data to verify the serialized manifest. The gate prints its canonical
+JSON to the durable job log before upload. `release-distributions` is the only
+reconciliation input; publication neither rebuilds nor wildcard-selects
 packages. Reconciliation revalidates the remote `main` SHA immediately before
 staging, requests cache revalidation from PyPI, validates every existing
 filename and SHA-256 against the manifest, rejects unknown, mismatched,
 malformed, or yanked files, and atomically stages only missing distributions.
-The manifest is outside `packages/`, so it remains audit evidence and is never
-sent to PyPI.
+The manifest is outside `packages/`, so it is never sent to PyPI. Its artifact
+remains downloadable after a non-successful run; after success its canonical
+content remains in the validation-gate log while cleanup removes the transient
+release bundle.
 
 GitHub also calculates a digest for the uploaded artifact archive and checks it
 on download. That transport digest and the per-file manifest digests have
@@ -581,8 +613,8 @@ set.
 
 ## [Trust boundaries](#index)
 
-The manual workflow deliberately separates code execution from package-index
-authority:
+The publication and cleanup workflows deliberately separate code execution
+from package-index and artifact-deletion authority:
 
 | Phase | Repository code | Effective authority |
 |---|---|---|
@@ -592,6 +624,7 @@ authority:
 | `publish` | Has no checkout, Python setup, or repository-code execution. It runs only for `publish_required=true`, downloads `pypi-publish-distributions` by exact name, and its sole fixed shell step removes only `pypi-publish/` before a transport retry. Exact duplicates from an interrupted attempt are tolerated. | `id-token: write` only, behind the protected `pypi` GitHub Environment whose name is part of the Trusted Publisher identity. |
 | `verify` | Runs after publisher success, failure, or skip whenever reconciliation succeeded. It downloads the original `release-distributions`, requires all five unyanked filenames and SHA-256 digests, and cryptographically verifies at least one matching PyPI Publish attestation per file. | Read-only contents; no OIDC token. |
 | `release-gate` | Runs unconditionally and accepts only successful reconciliation and verification. It requires `publish=success` when `publish_required=true`, or `publish=skipped` when it is false. | No repository or package-index authority. |
+| post-run artifact cleanup | Runs from the default-branch workflow definition after an allowlisted source workflow succeeds. It checks out, downloads, and executes no source-run content; validates repository, workflow, run, attempt, timestamps, and the exact four-wheel inventory; and skips a stale event if a newer attempt exists. | `actions: write` only; no contents access or OIDC token. |
 
 Every external action used by workflows or repository-owned composite actions,
 including GitHub-maintained actions, is pinned to a full 40-character commit SHA.
@@ -620,8 +653,8 @@ identity only in the final job. It also publishes
 A PEP 740 attestation binds a distribution digest to the trusted workflow
 identity at publication time; `release-manifest.json` instead binds the
 validated five-file set to this repository commit and GitHub run. The manifest
-is internal audit evidence, is not a PEP 740 attestation, and is not itself
-uploaded to PyPI.
+recorded in the validation log is internal audit evidence, is not a PEP 740
+attestation, and is not itself uploaded to PyPI.
 
 The post-publish verifier installs `pypi-attestations==0.0.30` and its complete
 exact, vulnerability-audited compatible dependency lock outside the OIDC job.
@@ -741,30 +774,41 @@ files. In either case, the final verifier requires the complete remote digest
 set and one valid matching publish attestation per file. The unconditional
 `release-gate` then checks that publication succeeded exactly when
 reconciliation required it; this is the sole terminal release status. The
-protected `pypi` Environment supplies the final human approval pause. Before
-dispatching, the operator should retain and audit after the run:
+protected `pypi` Environment supplies the final human approval pause. For the
+release audit record, retain:
 
-- the dispatch actor, commit, requested version, run ID, and attempt;
-- all six aggregate matrix results and the final `validation-gate` result;
-- that `release-distributions` contains five packages and one manifest;
-- that the manifest project, version, commit, run provenance, filenames, sizes,
-  and SHA-256 digests match the candidate.
+- the workflow URL, dispatch actor, commit, requested version, run ID, and
+  attempt;
+- all six aggregate matrix results plus the `validation-gate`, reconciliation,
+  verification, and `release-gate` results;
+- the canonical manifest printed in the validation-gate log, including its
+  project, version, commit, run provenance, filenames, sizes, and SHA-256
+  digests;
+- the PyPI release URL, exact published files, and PyPI Integrity provenance
+  objects.
 
 The publisher sends only `pypi-publish/` to production PyPI. There is no target
 selector. `skip-existing` is enabled narrowly so a failed upload can resume the
 same immutable staged bytes; it cannot establish workflow success by itself.
 Reconciliation checks existing digests before OIDC authority is granted, and
 the no-OIDC verifier checks the complete remote set and cryptographic
-provenance afterward. Retain the workflow run URL, downloaded manifest,
-reconciliation, verification and `release-gate` status, PyPI release URL, and
-PyPI Integrity provenance objects as the release audit record.
+provenance afterward. A failed publication keeps `release-distributions` and
+any staging artifact for recovery and offline review. After a successful
+publication, those transient bundles are pruned only after verification and the
+terminal gate finish; the manifest remains in the log and the exact release
+files remain on PyPI.
 
 ## [Failures and recovery](#index)
 
-- For a PR or `main` run, a rerun can diagnose a transient runner failure; the
-  GitHub attempt number remains part of the record. Every owned artifact upload
-  replaces a same-named artifact from an earlier attempt, so reruns do not rely
-  on an expected name-conflict failure before retrying.
+- For a failed or cancelled PR or `main` run, cleanup does not run. A failed-job
+  rerun can reuse the retained diagnostics, and every owned upload replaces a
+  same-named artifact from the earlier attempt. The GitHub attempt number
+  remains part of the record.
+- After a successful run has been pruned, a selective rerun of a consumer such
+  as `validation-gate` cannot reuse deleted inputs. Use **Re-run all jobs** so
+  the complete evidence chain is rebuilt. Cleanup checks the live attempt twice
+  and refuses artifacts newer than its completion event, so stale cleanup does
+  not target a newly started complete attempt.
 - For a manual release that has not entered `publish`, cancel the run. If
   `main` still points at the candidate, start a new complete manual run; if
   `main` moved, validate the version on its current head. Prefer a complete new
@@ -775,7 +819,9 @@ PyPI Integrity provenance objects as the release audit record.
   recovery is **Re-run failed jobs** on that exact run. The verifier runs even
   when the publisher fails, the publisher tolerates only same-name duplicates,
   and the verifier still requires every remote digest and publish attestation
-  to match the original manifest identity.
+  to match the original manifest identity. Because that run has not succeeded,
+  cleanup leaves all recovery artifacts in place; a later successful attempt is
+  pruned only after its terminal gate finishes.
 - Do not use **Re-run all jobs** or start a new dispatch to recover a partial
   upload. Those choices rebuild platform wheels; cross-run wheel byte identity
   is not certified across mutable hosted images and toolchain patch revisions.
@@ -856,9 +902,9 @@ python meta/ci/release/check_distribution_contents.py \
 A developer machine cannot certify the four-platform release set. In CI, the
 `source-distribution` validation task performs the source rebuild and
 downstream checks while `validation-gate` adds `--release-set`, requires the
-exact five artifacts, and generates the manifest. An auditor who downloads
-`release-distributions` and checks out its recorded commit can revalidate it
-with the recorded run values:
+exact five artifacts, and generates the manifest. While a run is active or
+after a non-successful completion, an auditor can download
+`release-distributions` and revalidate it with the recorded run values:
 
 ```bash
 python meta/ci/release/release_manifest.py verify \
@@ -869,19 +915,30 @@ python meta/ci/release/release_manifest.py verify \
   release/packages/*
 ```
 
-Set the three variables from the manifest and GitHub run under review. Native
+Set the three variables from the manifest and GitHub run under review. After a
+successful standalone CI run, copy the canonical manifest from the
+validation-gate log, download the four retained wheel bundles, and rebuild the
+deterministic sdist from the recorded commit with the locked commands above;
+the verification command must reproduce its recorded digest. After a successful
+publication, the five exact distribution bytes are available from PyPI. Native
 sanitizer, fuzzing, coverage, and downstream helpers are grouped by owner in
-[`meta/ci/`](../../meta/ci/README.md); their arguments in `ci.yml` are the authoritative release
-configuration because the toolchains and runners are platform-specific.
+[`meta/ci/`](../../meta/ci/README.md); their arguments in `ci.yml` are the
+authoritative release configuration because the toolchains and runners are
+platform-specific.
 
 ## [Maintenance and audit](#index)
 
-- Keep exactly `ci.yml` and `publish.yml`. Add release-blocking checks to
-  `ci.yml`, never as a reduced or duplicated implementation in `publish.yml`.
+- Keep release logic centralized in `ci.yml` and `publish.yml`. Keep live
+  advisory maintenance isolated in `dependency-advisory-refresh.yml` and
+  artifact deletion isolated in `artifact-cleanup.yml`.
 - Keep all six matrices as direct dependencies of `validation-gate`, and keep
   its visible `CI / validation gate` status as the required `main` check.
 - Do not use `pull_request_target` for repository code from forks and do not
   grant `id-token: write` outside the final publication job.
+- Keep cleanup success-only and `workflow_run`-only, with `actions: write` as its
+  sole permission. It must not check out, download, or execute triggering-run
+  content, and it must fail closed on the exact wheel inventory while skipping
+  stale events from an earlier run attempt.
 - Keep Actionlint and Zizmor as blocking pre-commit checks for workflow schema,
   expressions, permissions, and security regressions.
 - Build every release file once. Reconciliation must download
@@ -905,10 +962,11 @@ configuration because the toolchains and runners are platform-specific.
   and release-helper tests whenever triggers, jobs, matrices, permissions,
   artifacts, retention, manifest fields, or publication controls change.
 
-For a compact external audit, verify that there are two workflow files, only
-`publish.yml` has `workflow_dispatch`, and `ci.yml` owns the three safe
-validation triggers. Every external `uses` reference must be a full commit SHA,
-only the final publish job has OIDC authority, `validation-gate` must depend
-directly on all six matrices, reconciliation must consume the named validated
-release artifact, and publication must consume only the conditional named
-seven-day missing-package artifact.
+For a compact external audit, verify that there are four workflow files;
+`publish.yml` is the sole manual release; advisory refresh is the sole scheduled
+workflow and its manual entry has no inputs; cleanup alone uses `workflow_run`
+and `actions: write`; and `ci.yml` owns the three safe validation triggers.
+Every external `uses` reference must be a full commit SHA, only the final publish
+job has OIDC authority, `validation-gate` must depend directly on all six
+matrices, reconciliation must consume the named validated release artifact, and
+publication must consume only the conditional named missing-package artifact.

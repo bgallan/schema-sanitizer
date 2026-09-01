@@ -28,6 +28,9 @@ a CI gate and therefore lives at
   `source-distribution`, `native-llvm-coverage`, `thread-sanitizer`, and
   `platform-sanitizer` workloads through repository-owned composite actions.
   The manual publication workflow reuses it unchanged.
+- [`.github/workflows/artifact-cleanup.yml`](../../.github/workflows/artifact-cleanup.yml)
+  is the sole artifact-deletion owner. It runs only after successful canonical
+  CI or publication completion and invokes no repository or triggering-run code.
 - [`.github/actions/restore-pip-cache/action.yml`](../../.github/actions/restore-pip-cache/action.yml)
   owns optional validation-cache identity. Its caller supplies one workload
   owner, exact Python patch, and the complete dependency-input files; the action
@@ -74,10 +77,10 @@ retries transport failures, HTTP 429, server errors, and HTTP 403 only with an
 official GitHub rate-limit header; its server-requested delay is capped at 30
 seconds per attempt, while semantic client errors fail immediately. Platform
 and release-set consumers retry artifact downloads only after clearing their
-exact partial destination. Intermediate wheels, the sdist, and the audited
-`release-distributions` set are retained for seven days. This keeps delayed
-failed-job reruns possible without granting artifact-deletion permissions or
-modifying a completed run.
+exact partial destination. Transient evidence remains available through its
+final consumer. Failed and cancelled top-level runs retain every uploaded input
+for up to seven days; after success, the isolated cleanup workflow removes the
+consumed artifacts and retains only the four certified platform-wheel bundles.
 The canonical sdist encodes the checked-out commit time through
 `SOURCE_DATE_EPOCH`, which its archive validator checks explicitly. CI builds it
 twice from clean owned directories and requires byte-identical archives before

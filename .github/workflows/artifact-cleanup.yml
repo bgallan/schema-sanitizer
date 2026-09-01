@@ -1,0 +1,145 @@
+---
+name: Prune successful run artifacts
+on:
+  # The trusted default-branch definition never executes source-run content.
+  workflow_run:  # zizmor: ignore[dangerous-triggers]
+    workflows: [CI, Publish to PyPI]
+    types: [completed]
+permissions: {}
+concurrency:
+  group: artifact-prune-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+jobs:
+  prune-transient-artifacts:
+    name: retain only the four certified wheel artifacts
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      # This sole job needs deletion authority for consumed source-run artifacts.
+      actions: write  # zizmor: ignore[excessive-permissions]
+    steps:
+      # workflow_run executes this default-branch workflow with write authority.
+      # Never check out or execute files from the triggering workflow run here.
+      - name: Delete every consumed transient artifact
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        with:
+          github-token: ${{ github.token }}
+          retries: 3
+          retry-exempt-status-codes: 400,401,404,422
+          script: |-
+            const source = context.payload.workflow_run;
+            const repository = context.payload.repository;
+            const repositoryName = `${context.repo.owner}/${context.repo.repo}`;
+            const allowedEvents = new Map([
+              ['CI', new Set(['pull_request', 'push'])],
+              ['Publish to PyPI', new Set(['workflow_dispatch'])],
+            ]);
+            if (
+              !source ||
+              source.conclusion !== 'success' ||
+              !allowedEvents.get(source.name)?.has(source.event) ||
+              !repository ||
+              repository.full_name !== repositoryName ||
+              !Number.isSafeInteger(source.id) ||
+              source.id <= 0 ||
+              !Number.isSafeInteger(source.run_attempt) ||
+              source.run_attempt <= 0 ||
+              !Number.isFinite(Date.parse(source.updated_at))
+            ) {
+              throw new Error('refusing to prune an unverified workflow run');
+            }
+            const sourceRunIsCurrent = async () => {
+              const {data: current} = await github.rest.actions.getWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: source.id,
+              });
+              return (
+                current.run_attempt === source.run_attempt &&
+                current.status === 'completed' &&
+                current.conclusion === 'success'
+              );
+            };
+            if (!(await sourceRunIsCurrent())) {
+              core.notice('source run advanced to another attempt; skipping stale cleanup');
+              return;
+            }
+            const retainedNames = [
+              'dist-wheels-linux-x86_64',
+              'dist-wheels-macos-arm64',
+              'dist-wheels-macos-x86_64',
+              'dist-wheels-windows-amd64',
+            ];
+            const retained = new Set(retainedNames);
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: source.id,
+                per_page: 100,
+              },
+            );
+            const invalidArtifacts = artifacts.filter(
+              (artifact) =>
+                !Number.isSafeInteger(artifact.id) ||
+                artifact.id <= 0 ||
+                typeof artifact.name !== 'string' ||
+                artifact.name.length === 0 ||
+                !Number.isFinite(Date.parse(artifact.created_at)),
+            );
+            if (invalidArtifacts.length !== 0) {
+              throw new Error('source run returned malformed artifact metadata');
+            }
+            const sourceCompletedAt = Date.parse(source.updated_at);
+            const newerArtifacts = artifacts.filter(
+              (artifact) => Date.parse(artifact.created_at) > sourceCompletedAt,
+            );
+            if (newerArtifacts.length !== 0) {
+              core.notice('newer-attempt artifacts detected; skipping stale cleanup');
+              return;
+            }
+            const retainedCounts = Object.fromEntries(
+              retainedNames.map((name) => [name, 0]),
+            );
+            for (const artifact of artifacts) {
+              if (retained.has(artifact.name)) {
+                retainedCounts[artifact.name] += 1;
+              }
+            }
+            const invalidRetained = retainedNames.filter(
+              (name) => retainedCounts[name] !== 1,
+            );
+            if (invalidRetained.length !== 0) {
+              throw new Error(
+                `successful run has an invalid wheel-artifact inventory: ${JSON.stringify(retainedCounts)}`,
+              );
+            }
+            const transient = artifacts
+              .filter((artifact) => !retained.has(artifact.name))
+              .sort((left, right) =>
+                left.name.localeCompare(right.name) || left.id - right.id,
+              );
+            if (!(await sourceRunIsCurrent())) {
+              core.notice('source run began another attempt; skipping stale cleanup');
+              return;
+            }
+            for (const artifact of transient) {
+              try {
+                await github.rest.actions.deleteArtifact({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  artifact_id: artifact.id,
+                });
+                core.info(`deleted ${artifact.name} (${artifact.id})`);
+              } catch (error) {
+                if (error.status !== 404) {
+                  throw error;
+                }
+                core.info(`artifact already absent: ${artifact.name} (${artifact.id})`);
+              }
+            }
+            core.info(
+              `retained ${retainedNames.length} wheel artifacts and deleted ${transient.length} transient artifacts`,
+            );
