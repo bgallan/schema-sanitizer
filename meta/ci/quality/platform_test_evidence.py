@@ -29,8 +29,8 @@ EXPECTED_TEST_INVENTORY = {
         "sha256": "22730c892d95e474773bbbc9b8c28afc46cff05348795bbe3a5485ffc50484a5",
     },
     "memory-parquet": {
-        "count": 1704,
-        "sha256": "f05c4444a34906fd021d401e8850e06ccc261a2a14d5c14e9da8683b118b1f2c",
+        "count": 1705,
+        "sha256": "3d2c659aca3f13fbfe4f3dec342bf0bae2c9f043742890e2906874f9452ba66c",
     },
     "io-pipeline": {
         "count": 1025,
@@ -55,6 +55,12 @@ EXPECTED_EXACT_SKIP_INVENTORY_SHA256 = {
         "memory-parquet",
     ): "a184dfafb6894585a7eaf20b6e99bf1b9ddeefc82df0c886a43bba554246e973",
 }
+
+
+def _nodeid_inventory_sha256(nodeids: Sequence[str]) -> str:
+    """Hash sorted pytest node IDs with one unambiguous trailing newline."""
+    canonical = "".join(f"{nodeid}\n" for nodeid in sorted(nodeids))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _github_binding(sha: str, run_id: str | int, run_attempt: str | int) -> dict[str, int | str]:

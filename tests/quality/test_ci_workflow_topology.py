@@ -1275,9 +1275,14 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
     assert '-G "Visual Studio 17 2022"' in sanitizer
     assert '-A "x64,version=10.0.26100.0"' in sanitizer
     assert "-T v143,host=x64,version=14.44.35207" in sanitizer
+    typed_generator_instance = (
+        "-DCMAKE_GENERATOR_INSTANCE:INTERNAL='C:/Program Files/Microsoft Visual "
+        "Studio/2022/Enterprise'"
+    )
+    assert sanitizer.count(typed_generator_instance) == 1
     assert (
         "-DCMAKE_GENERATOR_INSTANCE='C:/Program Files/Microsoft Visual "
-        "Studio/2022/Enterprise'" in sanitizer
+        "Studio/2022/Enterprise'" not in sanitizer
     )
     assert "CMAKE_SYSTEM_VERSION" not in sanitizer
     assert "windows-asan-cmake.log" not in sanitizer
@@ -1915,6 +1920,11 @@ def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive()
         for step in _step_bodies(quality_action)
         if "name: Run source quality contracts" in step
     )
+    inventory_contracts = next(
+        step
+        for step in _step_bodies(quality_action)
+        if "name: Authenticate platform-test collections" in step
+    )
 
     actual_shard_domains = {}
     for shard in shard_domains:
@@ -1945,6 +1955,21 @@ def test_source_quality_and_platform_test_ownership_is_disjoint_and_exhaustive()
     relocated_concurrency_tests = (
         "tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py",
     )
+    assert quality_action.index(inventory_contracts) < quality_action.index(quality_contracts)
+    assert inventory_contracts.count("verify_collection ") == 5
+    for component in (*shard_domains, "native-stress", "release-matrix"):
+        assert inventory_contracts.count(f"verify_collection {component}") == 1
+    assert "PYTEST_ADDOPTS=''" in inventory_contracts
+    assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1" in inventory_contracts
+    assert 'SCHEMA_SANITIZER_VERIFY_TEST_INVENTORY="${component}"' in inventory_contracts
+    assert inventory_contracts.count(f"--ignore={release_gate}") == 1
+    assert inventory_contracts.count(release_gate) == 2
+    assert inventory_contracts.count(f"--ignore={relocated_concurrency_tests[0]}") == 1
+    assert inventory_contracts.count(relocated_concurrency_tests[0]) == 2
+    assert inventory_contracts.count(cross_toolchain_quality_test) == 1
+    for domains in shard_domains.values():
+        for domain in domains:
+            assert f"tests/{domain}" in inventory_contracts
     assert quality_contracts.count("tests/quality") == 1
     assert cross_toolchain_quality_test in functional
     assert functional.count(cross_toolchain_quality_test) == 1

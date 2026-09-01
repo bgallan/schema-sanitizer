@@ -1,9 +1,8 @@
-"""Enforce fail-closed integrity contracts for installed-wheel platform tests.
+"""Enforce fail-closed collection and runtime integrity for platform tests.
 
-The plugin proves that CI imports the certified wheel, owns every optional dependency,
-collects the complete stress contract, permits only reviewed platform skips, and leaves
-native/process ledgers no less healthy after every test and the final session teardown.
-It also writes one compact JSON certificate even when pytest fails.
+Source-only checks authenticate each exact pytest selection before platform work, while
+installed-wheel checks prove provenance, dependency ownership, reviewed skips, and clean
+native/process ledgers. Runtime mode writes a compact certificate even when pytest fails.
 """
 
 from __future__ import annotations
@@ -23,6 +22,7 @@ import pytest
 from meta.ci.quality.platform_test_evidence import (
     EXPECTED_EXACT_SKIP_INVENTORY_SHA256,
     EXPECTED_TEST_INVENTORY,
+    _nodeid_inventory_sha256,
 )
 
 _STRICT_ENV = "SCHEMA_SANITIZER_STRICT_TEST_RUNTIME"
@@ -30,6 +30,7 @@ _PLATFORM_ENV = "SCHEMA_SANITIZER_PLATFORM_ARTIFACT"
 _SHARD_ENV = "SCHEMA_SANITIZER_TEST_SHARD"
 _EVIDENCE_ENV = "SCHEMA_SANITIZER_INTEGRITY_EVIDENCE"
 _STRESS_NODEIDS_ENV = "SCHEMA_SANITIZER_EXPECT_NATIVE_STRESS_NODEIDS"
+_VERIFY_COLLECTION_ENV = "SCHEMA_SANITIZER_VERIFY_TEST_INVENTORY"
 
 _REQUIRED_MODULES = (
     "duckdb",
@@ -341,12 +342,6 @@ class _SkipRecord:
     reason: str
 
 
-def _nodeid_inventory_sha256(nodeids: list[str] | tuple[str, ...]) -> str:
-    """Hash a sorted node-ID inventory using one unambiguous trailing newline."""
-    canonical = "".join(f"{nodeid}\n" for nodeid in sorted(nodeids))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
 def _skip_inventory_sha256(skips: list[_SkipRecord]) -> str:
     """Hash exact skip identities and reasons using canonical compact JSON."""
     canonical = json.dumps(
@@ -361,6 +356,14 @@ def _skip_inventory_sha256(skips: list[_SkipRecord]) -> str:
 def strict_platform_tests_enabled() -> bool:
     """Return whether the installed-wheel CI integrity contract is active."""
     return os.environ.get(_STRICT_ENV) == "1"
+
+
+def collection_integrity_component() -> str | None:
+    """Return the explicitly requested source collection component, if any."""
+    component = os.environ.get(_VERIFY_COLLECTION_ENV)
+    if component is not None and component not in EXPECTED_TEST_INVENTORY:
+        raise pytest.UsageError(f"unreviewed platform collection component: {component!r}")
+    return component
 
 
 def _normalize_skip_reason(longrepr: object) -> str:
@@ -602,6 +605,31 @@ def _skip_is_allowed(
     return False
 
 
+class StrictCollectionIntegrity:
+    """Fail a source-only collection whose exact reviewed identity has drifted."""
+
+    def __init__(self, component: str) -> None:
+        """Bind the checker to one known platform-test component."""
+        if component not in EXPECTED_TEST_INVENTORY:
+            raise pytest.UsageError(f"unreviewed platform collection component: {component!r}")
+        self.component = component
+
+    def pytest_collection_finish(self, session: pytest.Session) -> None:
+        """Compare every selected node ID with the independent reviewed policy."""
+        nodeids = tuple(item.nodeid for item in session.items)
+        policy = EXPECTED_TEST_INVENTORY[self.component]
+        digest = _nodeid_inventory_sha256(nodeids)
+        if len(nodeids) == policy["count"] and digest == policy["sha256"]:
+            return
+        message = (
+            f"{self.component} platform collection drifted: "
+            f"observed count={len(nodeids)}, sha256={digest}; "
+            f"expected count={policy['count']}, sha256={policy['sha256']}"
+        )
+        print(message, file=sys.stderr)
+        pytest.exit(message, returncode=pytest.ExitCode.TESTS_FAILED)
+
+
 class StrictPlatformIntegrity:
     """Audit one pytest process without relying on test order or runner timing."""
 
@@ -809,4 +837,9 @@ class StrictPlatformIntegrity:
                     reporter.write_line(issue, red=True)
 
 
-__all__ = ["StrictPlatformIntegrity", "strict_platform_tests_enabled"]
+__all__ = [
+    "collection_integrity_component",
+    "StrictCollectionIntegrity",
+    "StrictPlatformIntegrity",
+    "strict_platform_tests_enabled",
+]

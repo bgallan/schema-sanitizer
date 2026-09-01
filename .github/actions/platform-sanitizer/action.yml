@@ -230,7 +230,7 @@ runs:
           -G "Visual Studio 17 2022" \
           -A "x64,version=10.0.26100.0" \
           -T v143,host=x64,version=14.44.35207 \
-          -DCMAKE_GENERATOR_INSTANCE='C:/Program Files/Microsoft Visual Studio/2022/Enterprise' \
+          -DCMAKE_GENERATOR_INSTANCE:INTERNAL='C:/Program Files/Microsoft Visual Studio/2022/Enterprise' \
           -DSCHEMA_SANITIZER_ENABLE_LTO=OFF \
           -DSCHEMA_SANITIZER_ENABLE_PCH=OFF \
           -DSCHEMA_SANITIZER_SANITIZER="${SANITIZER}" \

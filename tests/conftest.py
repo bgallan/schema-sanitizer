@@ -18,9 +18,19 @@ _FIXED_OPERATION_TIME_NS = 1_700_000_000_123_456_000
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Register strict installed-wheel checks only for declared CI shards."""
-    from _support.ci_integrity import StrictPlatformIntegrity, strict_platform_tests_enabled
+    """Register declared collection or installed-wheel CI integrity checks."""
+    from _support.ci_integrity import (
+        StrictCollectionIntegrity,
+        StrictPlatformIntegrity,
+        collection_integrity_component,
+        strict_platform_tests_enabled,
+    )
 
+    component = collection_integrity_component()
+    if component is not None:
+        config.pluginmanager.register(
+            StrictCollectionIntegrity(component), "strict-collection-integrity"
+        )
     if strict_platform_tests_enabled():
         config.pluginmanager.register(StrictPlatformIntegrity(), "strict-platform-integrity")
 

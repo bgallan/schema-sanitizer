@@ -41,6 +41,42 @@ runs:
         python -m pip install --no-build-isolation --no-deps '.[dev]'
         python -m pip check
         python meta/ci/quality/run_pre_commit_tool.py --check-current
+    - name: Authenticate platform-test collections
+      shell: bash
+      run: |-
+        set -euo pipefail
+        verify_collection() {
+          local component="$1"
+          shift
+          PYTEST_ADDOPTS='' \
+            PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+            SCHEMA_SANITIZER_VERIFY_TEST_INVENTORY="${component}" \
+            pytest --collect-only -q -o pythonpath=. "$@" >/dev/null
+        }
+        verify_collection concurrency \
+          -m 'not native_stress' \
+          --ignore=tests/concurrency/test_concurrency_route_release_gate.py \
+          --ignore=tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py \
+          tests/concurrency
+        verify_collection memory-parquet \
+          -m 'not native_stress' \
+          tests/memory \
+          tests/parquet \
+          tests/sinks \
+          tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py \
+          tests/quality/test_fuzz_regression_runner.py::test_standalone_mutation_stream_matches_its_cross_library_golden
+        verify_collection io-pipeline \
+          -m 'not native_stress' \
+          tests/examples \
+          tests/io \
+          tests/pipeline \
+          tests/remote \
+          tests/schema
+        verify_collection native-stress \
+          -m native_stress \
+          tests/concurrency
+        verify_collection release-matrix \
+          tests/concurrency/test_concurrency_route_release_gate.py
     - name: Compile every Python package module
       shell: bash
       run: |-

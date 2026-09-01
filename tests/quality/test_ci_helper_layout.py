@@ -546,6 +546,10 @@ def test_windows_toolchain_certificate_supports_direct_sanitizer_builds(
             "CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/unreviewed",
         ),
         (
+            "CMAKE_GENERATOR_INSTANCE:INTERNAL=C:/Program Files/Microsoft Visual Studio/2022/Enterprise",
+            "CMAKE_GENERATOR_INSTANCE:UNINITIALIZED=C:/Program Files/Microsoft Visual Studio/2022/Enterprise",
+        ),
+        (
             "CMAKE_GENERATOR_PLATFORM:INTERNAL=x64,version=10.0.26100.0",
             "CMAKE_GENERATOR_PLATFORM:INTERNAL=x64,version=10.0.22621.0",
         ),

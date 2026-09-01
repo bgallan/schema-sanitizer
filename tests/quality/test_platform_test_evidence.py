@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 from _support.ci_integrity import (
+    StrictCollectionIntegrity,
     StrictPlatformIntegrity,
     _skip_inventory_sha256,
     _skip_is_allowed,
@@ -26,11 +27,38 @@ _RUN_ID = 123
 _RUN_ATTEMPT = 2
 _TEST_COUNTS = {
     "concurrency": 511,
-    "memory-parquet": 1704,
+    "memory-parquet": 1705,
     "io-pipeline": 1025,
     "native-stress": 1,
     "release-matrix": 3,
 }
+
+
+def test_source_collection_integrity_fails_closed_on_identity_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-sized replacement cannot satisfy the authenticated collection policy."""
+    reviewed = ("tests/sample.py::test_one", "tests/sample.py::test_two")
+    monkeypatch.setitem(
+        evidence.EXPECTED_TEST_INVENTORY,
+        "sample",
+        {
+            "count": len(reviewed),
+            "sha256": evidence._nodeid_inventory_sha256(reviewed),
+        },
+    )
+    plugin = StrictCollectionIntegrity("sample")
+    exact = SimpleNamespace(items=[SimpleNamespace(nodeid=nodeid) for nodeid in reviewed])
+    plugin.pytest_collection_finish(exact)  # type: ignore[arg-type]
+    replaced = SimpleNamespace(
+        items=[
+            SimpleNamespace(nodeid=reviewed[0]),
+            SimpleNamespace(nodeid="tests/sample.py::test_replacement"),
+        ]
+    )
+
+    with pytest.raises(pytest.exit.Exception, match="sample platform collection drifted"):
+        plugin.pytest_collection_finish(replaced)  # type: ignore[arg-type]
 
 
 def _integrity_payload(platform: str, shard: str) -> dict[str, object]:
