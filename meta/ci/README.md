@@ -29,8 +29,9 @@ a CI gate and therefore lives at
   `platform-sanitizer` workloads through repository-owned composite actions.
   The manual publication workflow reuses it unchanged.
 - [`.github/workflows/artifact-cleanup.yml`](../../.github/workflows/artifact-cleanup.yml)
-  is the sole artifact-deletion owner. It runs only after successful canonical
-  CI or publication completion and invokes no repository or triggering-run code.
+  is the sole artifact-deletion owner. It runs automatically after successful
+  canonical CI or publication completion, can manually reconcile an eligible
+  successful run, and invokes no repository or triggering-run code.
 - [`.github/actions/restore-pip-cache/action.yml`](../../.github/actions/restore-pip-cache/action.yml)
   owns optional validation-cache identity. Its caller supplies one workload
   owner, exact Python patch, and the complete dependency-input files; the action
@@ -101,7 +102,7 @@ ASan/UBSan installs the extension and builds its executor and fuzz targets from
 one named, configuration-certified CMake graph. Windows may restore the exact
 CPython NuGet package, but verifies its digest, link safety, AMD64 PE identity,
 interpreter patch, and pointer width before cibuildwheel may consume it. None of
-these paths remove a test, sanitizer target, platform cell, or release artifact;
+these paths remove a test, sanitizer target, platform job, or release artifact;
 cache availability and runner speed never determine a gate result.
 
 ## Local checks

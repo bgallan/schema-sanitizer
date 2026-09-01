@@ -761,6 +761,17 @@ def test_native_coverage_certificate_closes_inventory_floors_and_provenance(
         github_run_id=7,
         github_run_attempt=1,
     )
+    helper.verify_certificate(certificate, **{**options, "github_run_attempt": 2})
+    payload = json.loads(certificate.read_text(encoding="utf-8"))
+    payload["provenance"]["github_run_attempt"] = 3
+    certificate.write_text(helper._canonical_json(payload), encoding="utf-8")
+    with pytest.raises(AssertionError, match="provenance mismatch"):
+        helper.verify_certificate(certificate, **{**options, "github_run_attempt": 2})
+    payload["provenance"]["github_run_attempt"] = True
+    certificate.write_text(helper._canonical_json(payload), encoding="utf-8")
+    with pytest.raises(AssertionError, match="provenance mismatch"):
+        helper.verify_certificate(certificate, **{**options, "github_run_attempt": 2})
+    helper.create_certificate(report, certificate, **options)
     with pytest.raises(AssertionError, match="provenance mismatch"):
         helper.verify_certificate(
             certificate,
@@ -770,6 +781,10 @@ def test_native_coverage_certificate_closes_inventory_floors_and_provenance(
             github_run_id=7,
             github_run_attempt=1,
         )
+    with pytest.raises(AssertionError, match="provenance mismatch"):
+        helper.verify_certificate(certificate, **{**options, "github_run_id": 8})
+    with pytest.raises(ValueError, match="positive integers"):
+        helper.verify_certificate(certificate, **{**options, "github_run_attempt": True})
 
     payload = json.loads(certificate.read_text(encoding="utf-8"))
     payload["source_tree_sha256"] = "0" * 64
@@ -867,7 +882,30 @@ def test_platform_wheel_certificate_rejects_binary_and_run_tampering(tmp_path: P
         github_run_id=9,
         github_run_attempt=1,
     )
-    with pytest.raises(AssertionError, match="changed"):
+    helper.verify_certificate(
+        certificate,
+        wheel_directory=tmp_path,
+        **{**options, "github_run_attempt": 2},
+    )
+    payload = json.loads(certificate.read_text(encoding="utf-8"))
+    payload["provenance"]["github_run_attempt"] = 3
+    certificate.write_text(helper._canonical_json(payload), encoding="utf-8")
+    with pytest.raises(AssertionError, match="provenance mismatch"):
+        helper.verify_certificate(
+            certificate,
+            wheel_directory=tmp_path,
+            **{**options, "github_run_attempt": 2},
+        )
+    payload["provenance"]["github_run_attempt"] = True
+    certificate.write_text(helper._canonical_json(payload), encoding="utf-8")
+    with pytest.raises(AssertionError, match="provenance mismatch"):
+        helper.verify_certificate(
+            certificate,
+            wheel_directory=tmp_path,
+            **{**options, "github_run_attempt": 2},
+        )
+    helper.create_certificate(wheel, certificate, **options)
+    with pytest.raises(AssertionError, match="provenance mismatch"):
         helper.verify_certificate(
             certificate,
             wheel_directory=tmp_path,
@@ -875,6 +913,12 @@ def test_platform_wheel_certificate_rejects_binary_and_run_tampering(tmp_path: P
             github_sha="a" * 40,
             github_run_id=10,
             github_run_attempt=1,
+        )
+    with pytest.raises(ValueError, match="positive integers"):
+        helper.verify_certificate(
+            certificate,
+            wheel_directory=tmp_path,
+            **{**options, "github_run_attempt": True},
         )
     payload = json.loads(certificate.read_text(encoding="utf-8"))
     payload["platform"] = "macos-x86_64"
@@ -955,6 +999,48 @@ def test_sanitizer_certificates_require_exact_matrix_and_watchdog_bytes(tmp_path
         github_run_id=11,
         github_run_attempt=1,
     )
+    helper.verify_directory(
+        tmp_path,
+        github_sha="a" * 40,
+        github_run_id=11,
+        github_run_attempt=2,
+    )
+    first_certificate = sorted(tmp_path.glob("sanitizer-run-*.json"))[0]
+    first_payload = json.loads(first_certificate.read_text(encoding="utf-8"))
+    first_payload["provenance"]["github_run_attempt"] = 3
+    first_certificate.write_text(helper._canonical_json(first_payload), encoding="utf-8")
+    with pytest.raises(AssertionError, match="provenance mismatch"):
+        helper.verify_directory(
+            tmp_path,
+            github_sha="a" * 40,
+            github_run_id=11,
+            github_run_attempt=2,
+        )
+    first_payload["provenance"]["github_run_attempt"] = True
+    first_certificate.write_text(helper._canonical_json(first_payload), encoding="utf-8")
+    with pytest.raises(AssertionError, match="provenance mismatch"):
+        helper.verify_directory(
+            tmp_path,
+            github_sha="a" * 40,
+            github_run_id=11,
+            github_run_attempt=2,
+        )
+    first_payload["provenance"]["github_run_attempt"] = 1
+    first_certificate.write_text(helper._canonical_json(first_payload), encoding="utf-8")
+    with pytest.raises(AssertionError, match="provenance mismatch"):
+        helper.verify_directory(
+            tmp_path,
+            github_sha="a" * 40,
+            github_run_id=12,
+            github_run_attempt=2,
+        )
+    with pytest.raises(ValueError, match="positive integers"):
+        helper.verify_directory(
+            tmp_path,
+            github_sha="a" * 40,
+            github_run_id=11,
+            github_run_attempt=True,
+        )
     extra_evidence = tmp_path / "unreviewed-evidence.txt"
     extra_evidence.write_text("unexpected\n", encoding="utf-8")
     with pytest.raises(AssertionError, match="evidence inventory mismatch"):

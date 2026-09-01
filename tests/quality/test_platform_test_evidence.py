@@ -81,6 +81,14 @@ def _integrity_payload(platform: str, shard: str) -> dict[str, object]:
         "selected_test_count": _TEST_COUNTS[shard],
         "expected_test_inventory_sha256": inventory,
         "selected_test_inventory_sha256": inventory,
+        "initial_native_anomalies": {name: 0 for name in evidence._NATIVE_ANOMALY_KEYS},
+        "final_native_anomalies": {name: 0 for name in evidence._NATIVE_ANOMALY_KEYS},
+        "initial_process_anomalies": {name: 0 for name in evidence._PROCESS_ANOMALY_KEYS},
+        "final_process_anomalies": {name: 0 for name in evidence._PROCESS_ANOMALY_KEYS},
+        "provenance": {
+            "schema_sanitizer": "/installed/schema_sanitizer/__init__.py",
+            "schema_sanitizer._core_abi3": "/installed/schema_sanitizer/_core_abi3.so",
+        },
     }
 
 
@@ -217,16 +225,137 @@ def test_platform_job_certificate_rejects_changed_exact_skip_set(tmp_path: Path)
         evidence.create_certificate(root, certificate, **_options("linux", "memory-parquet"))
 
 
-def test_platform_job_verifier_rejects_run_binding_tamper(tmp_path: Path) -> None:
-    """A certificate from another workflow attempt cannot satisfy this gate."""
+def test_platform_job_verifier_accepts_only_same_run_prior_attempts(tmp_path: Path) -> None:
+    """Partial reruns reuse prior evidence but reject foreign or future producers."""
     root = tmp_path / "artifacts"
     certificate = root / "platform-test-certificate-linux-io-pipeline.json"
     _complete_evidence(root, "linux", "io-pipeline")
     options = _options("linux", "io-pipeline")
     evidence.create_certificate(root, certificate, **options)
 
+    evidence.verify_certificate(root, certificate, **{**options, "github_run_attempt": 3})
+    with pytest.raises(ValueError, match="GitHub binding mismatch"):
+        evidence.verify_certificate(root, certificate, **{**options, "github_run_attempt": 1})
+    with pytest.raises(ValueError, match="GitHub binding mismatch"):
+        evidence.verify_certificate(root, certificate, **{**options, "github_run_id": _RUN_ID + 1})
+    with pytest.raises(ValueError, match="GitHub binding mismatch"):
+        evidence.verify_certificate(root, certificate, **{**options, "github_sha": "b" * 40})
+
+    payload = json.loads(certificate.read_text(encoding="utf-8"))
+    payload["github"]["run_attempt"] = True
+    certificate.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="GitHub binding mismatch"):
         evidence.verify_certificate(root, certificate, **{**options, "github_run_attempt": 3})
+
+
+def test_platform_job_verifier_revalidates_raw_process_integrity(tmp_path: Path) -> None:
+    """Updated digests cannot conceal an unsatisfied raw process certificate."""
+    root = tmp_path / "artifacts"
+    certificate = root / "platform-test-certificate-linux-io-pipeline.json"
+    options = _options("linux", "io-pipeline")
+    _complete_evidence(root, "linux", "io-pipeline")
+    evidence.create_certificate(root, certificate, **options)
+
+    integrity = root / "integrity-linux-io-pipeline.json"
+    raw = json.loads(integrity.read_text(encoding="utf-8"))
+    raw["satisfied"] = False
+    raw["issues"] = ["tampered process evidence"]
+    integrity.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
+
+    outer = json.loads(certificate.read_text(encoding="utf-8"))
+    digest = evidence._sha256(integrity)
+    for record in outer["files"]:
+        if record["filename"] == integrity.name:
+            record["sha256"] = digest
+            record["size"] = integrity.stat().st_size
+    outer["integrity"][0]["sha256"] = digest
+    certificate.write_text(evidence._canonical_json(outer), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unsatisfied contract"):
+        evidence.verify_certificate(root, certificate, **options)
+
+
+def test_platform_job_verifier_rejects_rehashed_runtime_anomalies(tmp_path: Path) -> None:
+    """A rehashed outer record cannot conceal a nonzero final runtime anomaly."""
+    root = tmp_path / "artifacts"
+    certificate = root / "platform-test-certificate-linux-io-pipeline.json"
+    options = _options("linux", "io-pipeline")
+    _complete_evidence(root, "linux", "io-pipeline")
+    evidence.create_certificate(root, certificate, **options)
+
+    integrity = root / "integrity-linux-io-pipeline.json"
+    raw = json.loads(integrity.read_text(encoding="utf-8"))
+    raw["final_native_anomalies"]["native.counter_underflows"] = 1
+    integrity.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
+
+    outer = json.loads(certificate.read_text(encoding="utf-8"))
+    digest = evidence._sha256(integrity)
+    for record in outer["files"]:
+        if record["filename"] == integrity.name:
+            record["sha256"] = digest
+            record["size"] = integrity.stat().st_size
+    outer["integrity"][0]["sha256"] = digest
+    certificate.write_text(evidence._canonical_json(outer), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="final native anomalies"):
+        evidence.verify_certificate(root, certificate, **options)
+
+
+def test_platform_job_verifier_requires_canonical_outer_certificate(tmp_path: Path) -> None:
+    """Equivalent noncanonical JSON cannot replace the certified outer record."""
+    root = tmp_path / "artifacts"
+    certificate = root / "platform-test-certificate-linux-io-pipeline.json"
+    options = _options("linux", "io-pipeline")
+    _complete_evidence(root, "linux", "io-pipeline")
+    payload = evidence.create_certificate(root, certificate, **options)
+    certificate.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not canonical JSON"):
+        evidence.verify_certificate(root, certificate, **options)
+
+
+@pytest.mark.parametrize("run_attempt", [True, False, 0, -1, "invalid"])
+def test_platform_job_verifier_rejects_invalid_current_attempts(
+    tmp_path: Path, run_attempt: object
+) -> None:
+    """The gate attempt is always a strictly positive non-boolean integer."""
+    root = tmp_path / "artifacts"
+    certificate = root / "platform-test-certificate-linux-io-pipeline.json"
+    _complete_evidence(root, "linux", "io-pipeline")
+    options = _options("linux", "io-pipeline")
+    evidence.create_certificate(root, certificate, **options)
+
+    with pytest.raises(ValueError, match="positive integer"):
+        evidence.verify_certificate(
+            root, certificate, **{**options, "github_run_attempt": run_attempt}
+        )
+
+
+@pytest.mark.parametrize("run_id", [True, False, 0, -1, "123"])
+def test_platform_job_verifier_rejects_invalid_current_run_ids(
+    tmp_path: Path, run_id: object
+) -> None:
+    """Library verification requires a strict positive non-boolean run ID."""
+    root = tmp_path / "artifacts"
+    certificate = root / "platform-test-certificate-linux-io-pipeline.json"
+    _complete_evidence(root, "linux", "io-pipeline")
+    options = _options("linux", "io-pipeline")
+    evidence.create_certificate(root, certificate, **options)
+
+    with pytest.raises(ValueError, match="run ID must be a positive integer"):
+        evidence.verify_certificate(root, certificate, **{**options, "github_run_id": run_id})
+
+
+def test_platform_job_verifier_rejects_noncanonical_current_sha(tmp_path: Path) -> None:
+    """The current commit identity must remain an exact lowercase full digest."""
+    root = tmp_path / "artifacts"
+    certificate = root / "platform-test-certificate-linux-io-pipeline.json"
+    _complete_evidence(root, "linux", "io-pipeline")
+    options = _options("linux", "io-pipeline")
+    evidence.create_certificate(root, certificate, **options)
+
+    with pytest.raises(ValueError, match="full 40-character commit digest"):
+        evidence.verify_certificate(root, certificate, **{**options, "github_sha": _SHA.upper()})
 
 
 def test_platform_job_verifier_rejects_missing_or_extra_downloaded_files(tmp_path: Path) -> None:

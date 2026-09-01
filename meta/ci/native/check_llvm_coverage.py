@@ -4,6 +4,8 @@
 The checker proves that every code-mapped production translation unit is represented,
 authenticates the exact zero-region wrapper policy and complete native source tree,
 applies aggregate and high-risk floors, and emits provenance-bound canonical JSON.
+Verification permits evidence from a prior attempt of the same immutable run so a
+partial rerun does not discard a completed native-coverage job.
 """
 
 from __future__ import annotations
@@ -197,6 +199,48 @@ def _canonical_json(payload: Mapping[str, Any]) -> str:
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
+def _validate_github_identity(github_sha: str, github_run_id: int, github_run_attempt: int) -> None:
+    """Require one well-formed current GitHub workflow identity."""
+    if not isinstance(github_sha, str) or _GIT_SHA.fullmatch(github_sha) is None:
+        raise ValueError("github_sha must be a lowercase 40- or 64-character Git object ID")
+    if (
+        type(github_run_id) is not int
+        or type(github_run_attempt) is not int
+        or github_run_id < 1
+        or github_run_attempt < 1
+    ):
+        raise ValueError("GitHub run identity values must be positive integers")
+
+
+def _producer_attempt(
+    provenance: object,
+    *,
+    github_sha: str,
+    github_run_id: int,
+    github_run_attempt: int,
+) -> int:
+    """Validate immutable run coordinates and return a reusable producer attempt."""
+    _validate_github_identity(github_sha, github_run_id, github_run_attempt)
+    if not isinstance(provenance, Mapping) or set(provenance) != {
+        "git_sha",
+        "github_run_attempt",
+        "github_run_id",
+    }:
+        raise AssertionError("native coverage certificate provenance mismatch")
+    producer_run_id = provenance.get("github_run_id")
+    producer_attempt = provenance.get("github_run_attempt")
+    if (
+        provenance.get("git_sha") != github_sha
+        or type(producer_run_id) is not int
+        or producer_run_id != github_run_id
+        or type(producer_attempt) is not int
+        or producer_attempt < 1
+        or producer_attempt > github_run_attempt
+    ):
+        raise AssertionError("native coverage certificate provenance mismatch")
+    return producer_attempt
+
+
 def _write_atomically(destination: Path, content: str) -> None:
     """Replace a regular certificate atomically without following symlinks."""
     if destination.is_symlink() or (destination.exists() and not destination.is_file()):
@@ -227,10 +271,7 @@ def build_certificate(
 ) -> dict[str, Any]:
     """Validate an LLVM JSON export and return its deterministic certificate."""
     _regular_file(report, "LLVM coverage export")
-    if _GIT_SHA.fullmatch(github_sha) is None:
-        raise ValueError("github_sha must be a lowercase 40- or 64-character Git object ID")
-    if github_run_id < 1 or github_run_attempt < 1:
-        raise ValueError("GitHub run identity values must be positive integers")
+    _validate_github_identity(github_sha, github_run_id, github_run_attempt)
     payload = json.loads(report.read_text(encoding="utf-8"))
     if payload.get("type") != "llvm.coverage.json.export":
         raise AssertionError(f"unexpected LLVM export type: {payload.get('type')!r}")
@@ -326,7 +367,7 @@ def verify_certificate(
     github_run_id: int,
     github_run_attempt: int,
 ) -> None:
-    """Verify canonical serialization, format, floors, and workflow provenance."""
+    """Verify coverage evidence from this run's current or a prior attempt."""
     _regular_file(certificate, "native coverage certificate")
     serialized = certificate.read_text(encoding="utf-8")
     payload = json.loads(serialized)
@@ -336,13 +377,12 @@ def verify_certificate(
         raise AssertionError(
             f"unexpected native coverage certificate format: {payload.get('format')!r}"
         )
-    expected_provenance = {
-        "git_sha": github_sha,
-        "github_run_attempt": github_run_attempt,
-        "github_run_id": github_run_id,
-    }
-    if payload.get("provenance") != expected_provenance:
-        raise AssertionError("native coverage certificate provenance mismatch")
+    _producer_attempt(
+        payload.get("provenance"),
+        github_sha=github_sha,
+        github_run_id=github_run_id,
+        github_run_attempt=github_run_attempt,
+    )
     if set(payload) != {
         "critical_floors",
         "critical_sources",

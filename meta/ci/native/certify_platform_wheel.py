@@ -4,6 +4,8 @@
 The certificate authenticates the wheel and extension bytes, proves the exact
 binary architecture and macOS deployment floor, audits Windows PE imports and
 reviewed runtime DLLs, and binds all evidence to one workflow run and commit.
+Verification preserves the producing attempt while allowing GitHub's same-run
+partial-rerun gate to reuse an already successful wheel build.
 """
 
 from __future__ import annotations
@@ -48,6 +50,48 @@ def _regular_file(path: Path, label: str) -> None:
     """Require a non-symlinked regular input file."""
     if path.is_symlink() or not path.is_file():
         raise AssertionError(f"{label} must be a regular file: {path}")
+
+
+def _validate_github_identity(github_sha: str, github_run_id: int, github_run_attempt: int) -> None:
+    """Require one well-formed current GitHub workflow identity."""
+    if not isinstance(github_sha, str) or _GIT_SHA.fullmatch(github_sha) is None:
+        raise ValueError("github_sha must be a lowercase 40- or 64-character Git object ID")
+    if (
+        type(github_run_id) is not int
+        or type(github_run_attempt) is not int
+        or github_run_id < 1
+        or github_run_attempt < 1
+    ):
+        raise ValueError("GitHub run identity values must be positive integers")
+
+
+def _producer_attempt(
+    provenance: object,
+    *,
+    github_sha: str,
+    github_run_id: int,
+    github_run_attempt: int,
+) -> int:
+    """Validate immutable run coordinates and return a reusable producer attempt."""
+    _validate_github_identity(github_sha, github_run_id, github_run_attempt)
+    if not isinstance(provenance, Mapping) or set(provenance) != {
+        "git_sha",
+        "github_run_attempt",
+        "github_run_id",
+    }:
+        raise AssertionError("platform-wheel certificate provenance mismatch")
+    producer_run_id = provenance.get("github_run_id")
+    producer_attempt = provenance.get("github_run_attempt")
+    if (
+        provenance.get("git_sha") != github_sha
+        or type(producer_run_id) is not int
+        or producer_run_id != github_run_id
+        or type(producer_attempt) is not int
+        or producer_attempt < 1
+        or producer_attempt > github_run_attempt
+    ):
+        raise AssertionError("platform-wheel certificate provenance mismatch")
+    return producer_attempt
 
 
 def _write_atomically(destination: Path, content: str) -> None:
@@ -316,10 +360,7 @@ def build_certificate(
     _regular_file(wheel, "platform wheel")
     if platform not in PLATFORMS:
         raise ValueError(f"unsupported platform certificate: {platform}")
-    if _GIT_SHA.fullmatch(github_sha) is None:
-        raise ValueError("github_sha must be a lowercase 40- or 64-character Git object ID")
-    if github_run_id < 1 or github_run_attempt < 1:
-        raise ValueError("GitHub run identity values must be positive integers")
+    _validate_github_identity(github_sha, github_run_id, github_run_attempt)
     required_tag = str(PLATFORMS[platform]["tag"])
     if required_tag not in wheel.name or not wheel.name.endswith(".whl"):
         raise AssertionError(f"{wheel.name}: filename does not encode {platform}")
@@ -365,7 +406,7 @@ def verify_certificate(
     github_run_id: int,
     github_run_attempt: int,
 ) -> None:
-    """Rebuild a platform certificate from its authenticated downloaded wheel."""
+    """Rebuild a wheel certificate, accepting its same-run prior attempt."""
     _regular_file(certificate, "platform-wheel certificate")
     serialized = certificate.read_text(encoding="utf-8")
     payload = json.loads(serialized)
@@ -374,6 +415,12 @@ def verify_certificate(
     wheel_payload = payload.get("wheel")
     if payload.get("format") != CERTIFICATE_FORMAT or not isinstance(wheel_payload, Mapping):
         raise AssertionError("platform-wheel certificate has an invalid format")
+    producer_attempt = _producer_attempt(
+        payload.get("provenance"),
+        github_sha=github_sha,
+        github_run_id=github_run_id,
+        github_run_attempt=github_run_attempt,
+    )
     filename = wheel_payload.get("filename")
     if not isinstance(filename, str):
         raise AssertionError("platform-wheel certificate omits wheel identity")
@@ -400,7 +447,7 @@ def verify_certificate(
         platform=platform,
         github_sha=github_sha,
         github_run_id=github_run_id,
-        github_run_attempt=github_run_attempt,
+        github_run_attempt=producer_attempt,
     )
     if payload != expected:
         raise AssertionError("platform-wheel certificate or wheel bytes changed")

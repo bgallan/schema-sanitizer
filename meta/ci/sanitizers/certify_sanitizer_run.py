@@ -3,7 +3,9 @@
 
 The certificate closes platform-specific blind spots by recording the exact
 sanitizer policy and authenticating bounded subprocess evidence where a native
-platform executes the concurrency probe and instrumented extension.
+platform executes the concurrency probe and instrumented extension. Verification
+allows evidence from an earlier attempt of the same immutable run, supporting
+deterministic partial reruns without accepting foreign provenance.
 """
 
 from __future__ import annotations
@@ -66,6 +68,48 @@ _LINUX_EXTENSION_TESTS = (
 def _canonical_json(payload: Mapping[str, Any]) -> str:
     """Serialize sanitizer evidence with canonical whitespace and key order."""
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def _validate_github_identity(github_sha: str, github_run_id: int, github_run_attempt: int) -> None:
+    """Require one well-formed current GitHub workflow identity."""
+    if not isinstance(github_sha, str) or _GIT_SHA.fullmatch(github_sha) is None:
+        raise ValueError("github_sha must be a lowercase 40- or 64-character Git object ID")
+    if (
+        type(github_run_id) is not int
+        or type(github_run_attempt) is not int
+        or github_run_id < 1
+        or github_run_attempt < 1
+    ):
+        raise ValueError("GitHub run identity values must be positive integers")
+
+
+def _producer_attempt(
+    provenance: object,
+    *,
+    github_sha: str,
+    github_run_id: int,
+    github_run_attempt: int,
+) -> int:
+    """Validate immutable run coordinates and return a reusable producer attempt."""
+    _validate_github_identity(github_sha, github_run_id, github_run_attempt)
+    if not isinstance(provenance, Mapping) or set(provenance) != {
+        "git_sha",
+        "github_run_attempt",
+        "github_run_id",
+    }:
+        raise AssertionError("sanitizer run certificate provenance mismatch")
+    producer_run_id = provenance.get("github_run_id")
+    producer_attempt = provenance.get("github_run_attempt")
+    if (
+        provenance.get("git_sha") != github_sha
+        or type(producer_run_id) is not int
+        or producer_run_id != github_run_id
+        or type(producer_attempt) is not int
+        or producer_attempt < 1
+        or producer_attempt > github_run_attempt
+    ):
+        raise AssertionError("sanitizer run certificate provenance mismatch")
+    return producer_attempt
 
 
 def _regular_file(path: Path, label: str) -> None:
@@ -423,10 +467,7 @@ def build_certificate(
     github_run_attempt: int,
 ) -> dict[str, Any]:
     """Return a validated sanitizer policy and authenticated execution evidence."""
-    if _GIT_SHA.fullmatch(github_sha) is None:
-        raise ValueError("github_sha must be a lowercase 40- or 64-character Git object ID")
-    if github_run_id < 1 or github_run_attempt < 1:
-        raise ValueError("GitHub run identity values must be positive integers")
+    _validate_github_identity(github_sha, github_run_id, github_run_attempt)
     policy = _policy(sanitizer, mode, runner_os)
     evidence = _windows_toolchain_evidence(
         evidence_directory,
@@ -463,13 +504,20 @@ def create_certificate(certificate: Path, **options: Any) -> None:
 
 
 def verify_certificate(certificate: Path, **options: Any) -> None:
-    """Rebuild sanitizer evidence and compare it with a canonical certificate."""
+    """Verify canonical same-run sanitizer evidence from any prior attempt."""
     _regular_file(certificate, "sanitizer run certificate")
     serialized = certificate.read_text(encoding="utf-8")
     payload = json.loads(serialized)
     if not isinstance(payload, Mapping) or serialized != _canonical_json(payload):
         raise AssertionError("sanitizer run certificate is not canonical JSON")
-    if payload != build_certificate(**options):
+    producer_attempt = _producer_attempt(
+        payload.get("provenance"),
+        github_sha=options["github_sha"],
+        github_run_id=options["github_run_id"],
+        github_run_attempt=options["github_run_attempt"],
+    )
+    producer_options = {**options, "github_run_attempt": producer_attempt}
+    if payload != build_certificate(**producer_options):
         raise AssertionError("sanitizer run certificate, policy, or evidence changed")
 
 

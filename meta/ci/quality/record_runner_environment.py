@@ -1,7 +1,7 @@
-"""Record comparable, non-secret platform-runner evidence for CI timings.
+"""Record comparable, non-secret platform-shard runner evidence for CI timings.
 
-It gathers normalized operating-system, CPU, memory, toolchain, and runner metadata
-without recording secrets.
+It captures the exact Python and reviewed distribution versions together with normalized
+platform, CPU, affinity, and cgroup data without copying environment variables or secrets.
 """
 
 from __future__ import annotations
@@ -19,6 +19,22 @@ from types import ModuleType
 
 _CGROUP_VIEW: ModuleType | None = None
 _MAX_SIGNED_64 = (1 << 63) - 1
+_COMMON_DISTRIBUTIONS = frozenset(
+    {
+        "duckdb",
+        "pandas",
+        "polars",
+        "pyarrow",
+        "pytest",
+        "schema-sanitizer",
+    }
+)
+_SHARD_DISTRIBUTIONS = {
+    "concurrency": _COMMON_DISTRIBUTIONS,
+    "memory-parquet": _COMMON_DISTRIBUTIONS | {"defusedxml"},
+    "io-pipeline": _COMMON_DISTRIBUTIONS | {"aiohttp"},
+}
+_EVIDENCE_DISTRIBUTIONS = tuple(sorted(_COMMON_DISTRIBUTIONS | {"aiohttp", "defusedxml"}))
 
 
 def _optional_text(path: str) -> str | None:
@@ -247,7 +263,30 @@ def bounded_build_parallelism(limit: int = 4) -> int:
     return min(limit, effective_cpu_capacity())
 
 
-def runner_environment() -> dict[str, object]:
+def _installed_distribution_versions(shard: str) -> dict[str, str | None]:
+    """Record reviewed versions and reject a missing shard requirement."""
+    try:
+        required = _SHARD_DISTRIBUTIONS[shard]
+    except KeyError as exc:
+        raise ValueError(f"unknown platform-test shard: {shard}") from exc
+    versions: dict[str, str | None] = {}
+    for name in _EVIDENCE_DISTRIBUTIONS:
+        try:
+            version = metadata.version(name)
+        except metadata.PackageNotFoundError as exc:
+            if name in required:
+                raise RuntimeError(
+                    f"required {shard} distribution is not installed: {name}"
+                ) from exc
+            versions[name] = None
+        else:
+            if name not in required:
+                raise RuntimeError(f"unselected {shard} distribution is installed: {name}")
+            versions[name] = version
+    return versions
+
+
+def runner_environment(shard: str) -> dict[str, object]:
     """Build evidence without copying environment variables into artifacts."""
     affinity: list[int] | None = None
     if hasattr(os, "sched_getaffinity"):
@@ -261,23 +300,13 @@ def runner_environment() -> dict[str, object]:
     linux_cpu_max = _optional_text("/sys/fs/cgroup/cpu.max") if is_linux else None
     linux_cgroup_capacity = _linux_cgroup_cpu_capacity() if is_linux else None
     return {
-        "schema_version": 2,
+        "schema_version": 3,
+        "shard": shard,
         "python": {
             "implementation": platform.python_implementation(),
             "version": platform.python_version(),
         },
-        "installed_distributions": {
-            name: metadata.version(name)
-            for name in (
-                "aiohttp",
-                "duckdb",
-                "pandas",
-                "polars",
-                "pyarrow",
-                "pytest",
-                "schema-sanitizer",
-            )
-        },
+        "installed_distributions": _installed_distribution_versions(shard),
         "platform": {
             "system": platform.system(),
             "release": platform.release(),
@@ -303,13 +332,17 @@ def runner_environment() -> dict[str, object]:
 def main(argv: list[str] | None = None) -> int:
     """Write the runner evidence JSON to the requested output path."""
     arguments = sys.argv[1:] if argv is None else argv
-    if len(arguments) != 1:
-        print("usage: record_runner_environment.py OUTPUT", file=sys.stderr)
+    if len(arguments) != 3 or arguments[0] != "--shard":
+        print("usage: record_runner_environment.py --shard SHARD OUTPUT", file=sys.stderr)
         return 2
-    output = Path(arguments[0])
+    shard = arguments[1]
+    if shard not in _SHARD_DISTRIBUTIONS:
+        print(f"unknown platform-test shard: {shard}", file=sys.stderr)
+        return 2
+    output = Path(arguments[2])
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        json.dumps(runner_environment(), indent=2, sort_keys=True) + "\n",
+        json.dumps(runner_environment(shard), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     print(output.read_text(encoding="utf-8"), end="")

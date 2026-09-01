@@ -11,6 +11,9 @@ inputs:
   shard:
     description: Functional workload (concurrency, memory-parquet, or io-pipeline).
     required: true
+  producer-result:
+    description: Result of the exact platform-wheel producer dependency.
+    required: true
 runs:
   using: composite
   steps:
@@ -46,8 +49,11 @@ runs:
       with:
         # Match the interpreter used to build every release wheel.
         python-version: 3.11.9
-        cache: pip
-        cache-dependency-path: |-
+    - uses: ./.github/actions/restore-pip-cache
+      with:
+        owner: platform-tests-${{ inputs.shard }}
+        python-version: 3.11.9
+        dependency-paths: |-
           meta/ci/requirements/platform-tests.txt
           meta/ci/requirements/python-artifact-sha256.lock
     - name: Reset generated platform-test paths
@@ -84,27 +90,113 @@ runs:
       env:
         FIRST_DOWNLOAD_OUTCOME: ${{ steps.download-platform-wheel.outcome }}
         PLATFORM_NAME: ${{ inputs.platform-name }}
+        PRODUCER_RESULT: ${{ inputs.producer-result }}
         RETRY_DOWNLOAD_OUTCOME: ${{ steps.retry-platform-wheel-download.outcome }}
       shell: bash
       run: |-
         set -euo pipefail
+        case "${PRODUCER_RESULT}" in
+          success | failure | skipped | cancelled) ;;
+          *)
+            echo "Unexpected ${PLATFORM_NAME} producer result: ${PRODUCER_RESULT}" >&2
+            exit 2
+            ;;
+        esac
         if [[ "${FIRST_DOWNLOAD_OUTCOME}" != 'success' && \
           "${RETRY_DOWNLOAD_OUTCOME}" != 'success' ]]; then
+          if [[ "${PRODUCER_RESULT}" == 'success' ]]; then
+            echo "The successful ${PLATFORM_NAME} producer artifact remained unavailable after two bounded downloads" >&2
+            exit 2
+          fi
           echo "::notice title=Skipped ${PLATFORM_NAME} shard::The upstream ${PLATFORM_NAME} build did not publish its certified artifact after two bounded download attempts. The wheel build and validation gate retain the root-cause failures; this dependent shard is a clean no-op."
           echo 'available=false' >> "${GITHUB_OUTPUT}"
         else
           echo 'available=true' >> "${GITHUB_OUTPUT}"
         fi
+    - name: Verify the downloaded platform wheel before installation
+      if: steps.platform-wheel-availability.outputs.available == 'true'
+      env:
+        PLATFORM_NAME: ${{ inputs.platform-name }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        shopt -s nullglob dotglob
+        wheels=(wheelhouse/*.whl)
+        certificates=(wheelhouse/platform-wheel-certificate-*.json)
+        entries=(wheelhouse/*)
+        expected_certificate="wheelhouse/platform-wheel-certificate-${PLATFORM_NAME}.json"
+        if [[ "${#entries[@]}" -ne 2 || "${#wheels[@]}" -ne 1 || \
+          "${#certificates[@]}" -ne 1 || \
+          "${certificates[0]:-}" != "${expected_certificate}" ]]; then
+          echo "Expected only one ${PLATFORM_NAME} wheel and its matching certificate" >&2
+          exit 2
+        fi
+        for entry in "${entries[@]}"; do
+          if [[ "${entry}" != "${wheels[0]}" && "${entry}" != "${expected_certificate}" ]]; then
+            echo "Unexpected platform-wheel artifact entry: ${entry}" >&2
+            exit 2
+          fi
+        done
+        python meta/ci/native/certify_platform_wheel.py verify \
+          --certificate "${expected_certificate}" \
+          --wheel-directory wheelhouse \
+          --platform "${PLATFORM_NAME}" \
+          --github-sha "${GITHUB_SHA}" \
+          --github-run-id "${GITHUB_RUN_ID}" \
+          --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
     - name: Install the wheel and functional-suite dependencies
       if: steps.platform-wheel-availability.outputs.available == 'true'
       env:
         PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/platform-tests.txt
+        TEST_SHARD: ${{ inputs.shard }}
       shell: bash
       run: |-
         set -euo pipefail
+        # Pass every transitive requirement explicitly: pip's hash-checking mode
+        # does not inherit hashes from constraints for an implicit dependency.
+        packages=(
+          colorama
+          duckdb
+          iniconfig
+          numpy
+          packaging
+          pandas
+          pluggy
+          polars
+          polars-runtime-32
+          pyarrow
+          pygments
+          pytest
+          python-dateutil
+          six
+          tzdata
+        )
+        case "${TEST_SHARD}" in
+          concurrency) ;;
+          memory-parquet) packages+=(defusedxml) ;;
+          io-pipeline)
+            packages+=(
+              aiohappyeyeballs
+              aiohttp
+              aiosignal
+              attrs
+              frozenlist
+              idna
+              multidict
+              propcache
+              typing-extensions
+              yarl
+            )
+            ;;
+          *)
+            echo "Unknown platform test shard: ${TEST_SHARD}" >&2
+            exit 2
+            ;;
+        esac
         python meta/ci/quality/ensure_pinned_pip.py
         python -m meta.ci.quality.install_locked_requirements \
-          --lock meta/ci/requirements/platform-tests.txt --all
+          --lock meta/ci/requirements/platform-tests.txt \
+          --packages "${packages[@]}"
         python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
         python -m pip check
     - name: Assert tests import the installed wheel
@@ -149,6 +241,7 @@ runs:
       shell: bash
       run: >-
         python meta/ci/quality/record_runner_environment.py
+        --shard "${TEST_SHARD}"
         "artifacts/runner-cpu-${PLATFORM_ARTIFACT}-${TEST_SHARD}.json"
     - name: Record a cross-platform reader scaling measurement
       if: steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard

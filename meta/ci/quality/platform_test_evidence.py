@@ -1,8 +1,10 @@
 """Create and verify content-addressed evidence for one platform-test job.
 
 Each job keeps its timing, JUnit, runner, benchmark, and in-process integrity records in
-one artifact. This tool checks the exact shard-specific inventory, binds it to immutable
-GitHub run coordinates, and emits one compact certificate for the validation gate.
+one artifact whose exact shard-specific inventory this tool binds to immutable GitHub
+run coordinates before emitting one compact certificate for the validation gate.
+Same-run evidence from an earlier successful attempt remains valid during a partial rerun
+without weakening the immutable run and commit identity.
 """
 
 from __future__ import annotations
@@ -20,6 +22,57 @@ _FORMAT = "schema-sanitizer-platform-job-evidence-v1"
 _INTEGRITY_FORMAT = "schema-sanitizer-platform-integrity-v2"
 _SHARDS = frozenset({"concurrency", "memory-parquet", "io-pipeline"})
 _PLATFORMS = frozenset({"linux", "macos-arm64", "macos-x86_64", "windows"})
+_INTEGRITY_KEYS = frozenset(
+    {
+        "expected_skip_inventory_sha256",
+        "expected_test_count",
+        "expected_test_inventory_sha256",
+        "final_native_anomalies",
+        "final_process_anomalies",
+        "format",
+        "github",
+        "initial_native_anomalies",
+        "initial_process_anomalies",
+        "issues",
+        "maximum_skip_count",
+        "platform",
+        "provenance",
+        "pytest_exitstatus",
+        "satisfied",
+        "selected_test_count",
+        "selected_test_inventory_sha256",
+        "shard",
+        "skip_inventory_sha256",
+        "skips",
+    }
+)
+_NATIVE_ANOMALY_KEYS = frozenset(
+    {
+        "native.completion_memory_protocol_violations",
+        "native.counter_underflows",
+        "native.external_runtime_resident_protocol_violations",
+        "native_fd.protocol_violations",
+        "native_fd.uncertain_close_debts",
+    }
+)
+_PROCESS_ANOMALY_KEYS = frozenset(
+    {
+        "async.corrupted",
+        "async.protocol_violations",
+        "cleanup.protocol_violations",
+        "fds.over_release_count",
+        "fds.unknown_lease_releases",
+        "guardian.protocol_violations",
+        "janitor.protocol_violations",
+        "remote.protocol_violations",
+        "retry.protocol_violations",
+        "temporary.authoritative_protocol_violations",
+        "temporary.over_release_count",
+        "temporary.protocol_violations",
+        "threads.over_release_count",
+        "threads.unknown_lease_releases",
+    }
+)
 
 # The gate owns the reviewed collection identities independently from the pytest
 # process that reports them. Canonical node IDs are sorted and newline-terminated.
@@ -63,22 +116,39 @@ def _nodeid_inventory_sha256(nodeids: Sequence[str]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _github_binding(sha: str, run_id: str | int, run_attempt: str | int) -> dict[str, int | str]:
-    """Normalize and validate immutable GitHub run coordinates."""
-    normalized_sha = str(sha).lower()
-    normalized_run_id = str(run_id)
-    normalized_attempt = str(run_attempt)
-    if re.fullmatch(r"[0-9a-f]{40}", normalized_sha) is None:
+def _github_binding(sha: str, run_id: int, run_attempt: int) -> dict[str, int | str]:
+    """Validate one strict immutable GitHub run identity."""
+    if type(sha) is not str or re.fullmatch(r"[0-9a-f]{40}", sha) is None:
         raise ValueError("GitHub SHA must be a full 40-character commit digest")
-    if not normalized_run_id.isdecimal() or int(normalized_run_id) <= 0:
+    if type(run_id) is not int or run_id <= 0:
         raise ValueError("GitHub run ID must be a positive integer")
-    if not normalized_attempt.isdecimal() or int(normalized_attempt) <= 0:
+    if type(run_attempt) is not int or run_attempt <= 0:
         raise ValueError("GitHub run attempt must be a positive integer")
     return {
-        "sha": normalized_sha,
-        "run_id": int(normalized_run_id),
-        "run_attempt": int(normalized_attempt),
+        "sha": sha,
+        "run_id": run_id,
+        "run_attempt": run_attempt,
     }
+
+
+def _producer_github_binding(raw: object, current: dict[str, int | str]) -> dict[str, int | str]:
+    """Validate a producer binding reusable by the current workflow attempt."""
+    if not isinstance(raw, dict) or set(raw) != {"sha", "run_id", "run_attempt"}:
+        raise ValueError("platform job certificate GitHub binding mismatch")
+    producer_run_id = raw.get("run_id")
+    producer_attempt = raw.get("run_attempt")
+    current_attempt = current["run_attempt"]
+    if (
+        raw.get("sha") != current["sha"]
+        or type(producer_run_id) is not int
+        or producer_run_id != current["run_id"]
+        or type(producer_attempt) is not int
+        or producer_attempt < 1
+        or type(current_attempt) is not int
+        or producer_attempt > current_attempt
+    ):
+        raise ValueError("platform job certificate GitHub binding mismatch")
+    return {"sha": raw["sha"], "run_id": producer_run_id, "run_attempt": producer_attempt}
 
 
 def _regular_file(path: Path) -> None:
@@ -89,6 +159,11 @@ def _regular_file(path: Path) -> None:
         raise ValueError(f"missing evidence file: {path}") from exc
     if path.is_symlink() or not stat.S_ISREG(mode):
         raise ValueError(f"evidence path must be a regular file: {path}")
+
+
+def _canonical_json(payload: dict[str, Any]) -> str:
+    """Serialize one certificate using the repository's canonical JSON form."""
+    return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
 def _sha256(path: Path) -> str:
@@ -111,17 +186,20 @@ def _skip_inventory_sha256(skips: list[dict[str, str]]) -> str:
     return hashlib.sha256(f"{canonical}\n".encode()).hexdigest()
 
 
-def _load_json(path: Path) -> dict[str, Any]:
-    """Load a bounded JSON object from a regular evidence file."""
+def _load_json(path: Path, *, canonical: bool = False) -> dict[str, Any]:
+    """Load one bounded JSON object and optionally require canonical bytes."""
     _regular_file(path)
     if path.stat().st_size > 4 * 1024 * 1024:
         raise ValueError(f"evidence JSON exceeds the 4 MiB limit: {path}")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        serialized = path.read_text(encoding="utf-8")
+        payload = json.loads(serialized)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid evidence JSON: {path}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"evidence JSON must contain an object: {path}")
+    if canonical and serialized != _canonical_json(payload):
+        raise ValueError(f"platform job certificate is not canonical JSON: {path}")
     return payload
 
 
@@ -169,6 +247,38 @@ def _integrity_filename(platform: str, component: str) -> str:
     return f"integrity-{platform}-{component}.json"
 
 
+def _validate_zero_anomalies(raw: object, expected: frozenset[str], *, label: str) -> None:
+    """Require one exact zero-valued runtime-anomaly snapshot."""
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != expected
+        or any(type(value) is not int or value != 0 for value in raw.values())
+    ):
+        raise ValueError(f"platform integrity {label} anomalies are malformed")
+
+
+def _validate_provenance(raw: object, *, path: Path) -> None:
+    """Require bounded installed-wheel module provenance for one process."""
+    if (
+        not isinstance(raw, dict)
+        or not raw
+        or any(
+            not isinstance(name, str)
+            or (name != "schema_sanitizer" and not name.startswith("schema_sanitizer."))
+            or not isinstance(location, str)
+            or not location
+            or len(location) > 4096
+            or not (location.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", location))
+            for name, location in raw.items()
+        )
+        or not {
+            "schema_sanitizer",
+            "schema_sanitizer._core_abi3",
+        }.issubset(raw)
+    ):
+        raise ValueError(f"platform integrity wheel provenance is malformed: {path}")
+
+
 def _validate_integrity(
     path: Path,
     *,
@@ -178,7 +288,7 @@ def _validate_integrity(
 ) -> dict[str, Any]:
     """Validate one in-process certificate and return its bounded summary."""
     payload = _load_json(path)
-    if payload.get("format") != _INTEGRITY_FORMAT:
+    if set(payload) != _INTEGRITY_KEYS or payload.get("format") != _INTEGRITY_FORMAT:
         raise ValueError(f"unexpected platform integrity format: {path}")
     if payload.get("github") != github:
         raise ValueError(f"platform integrity GitHub binding mismatch: {path}")
@@ -188,6 +298,27 @@ def _validate_integrity(
         raise ValueError(f"platform integrity reports an unsatisfied contract: {path}")
     if payload.get("pytest_exitstatus") != 0:
         raise ValueError(f"platform integrity reports a failed pytest process: {path}")
+    _validate_zero_anomalies(
+        payload.get("initial_native_anomalies"),
+        _NATIVE_ANOMALY_KEYS,
+        label="initial native",
+    )
+    _validate_zero_anomalies(
+        payload.get("final_native_anomalies"),
+        _NATIVE_ANOMALY_KEYS,
+        label="final native",
+    )
+    _validate_zero_anomalies(
+        payload.get("initial_process_anomalies"),
+        _PROCESS_ANOMALY_KEYS,
+        label="initial process",
+    )
+    _validate_zero_anomalies(
+        payload.get("final_process_anomalies"),
+        _PROCESS_ANOMALY_KEYS,
+        label="final process",
+    )
+    _validate_provenance(payload.get("provenance"), path=path)
     skips = payload.get("skips")
     maximum_skips = payload.get("maximum_skip_count")
     selected_tests = payload.get("selected_test_count")
@@ -257,8 +388,7 @@ def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
         raise ValueError(f"certificate temporary path already exists: {temporary}")
     try:
         with temporary.open("x", encoding="utf-8", newline="\n") as handle:
-            json.dump(payload, handle, indent=2, sort_keys=True)
-            handle.write("\n")
+            handle.write(_canonical_json(payload))
             handle.flush()
             os.fsync(handle.fileno())
         if path.is_symlink():
@@ -278,8 +408,8 @@ def create_certificate(
     platform: str,
     shard: str,
     github_sha: str,
-    github_run_id: str | int,
-    github_run_attempt: str | int,
+    github_run_id: int,
+    github_run_attempt: int,
 ) -> dict[str, object]:
     """Validate a job inventory and create its content-addressed certificate."""
     if platform not in _PLATFORMS or shard not in _SHARDS:
@@ -327,11 +457,15 @@ def verify_certificate(
     platform: str,
     shard: str,
     github_sha: str,
-    github_run_id: str | int,
-    github_run_attempt: str | int,
+    github_run_id: int,
+    github_run_attempt: int,
 ) -> dict[str, Any]:
-    """Verify a downloaded certificate and every content-addressed evidence file."""
-    payload = _load_json(certificate)
+    """Verify downloaded same-run evidence from the current or a prior attempt."""
+    if platform not in _PLATFORMS or shard not in _SHARDS:
+        raise ValueError(f"unknown platform-test identity: {platform}:{shard}")
+    if evidence_dir.is_symlink() or not evidence_dir.is_dir():
+        raise ValueError(f"evidence directory must be a real directory: {evidence_dir}")
+    payload = _load_json(certificate, canonical=True)
     github = _github_binding(github_sha, github_run_id, github_run_attempt)
     if certificate.parent.resolve() != evidence_dir.resolve():
         raise ValueError("platform job certificate must reside in its evidence directory")
@@ -342,10 +476,22 @@ def verify_certificate(
             "downloaded platform evidence inventory mismatch: "
             f"expected={expected_inventory}, actual={actual}"
         )
-    if payload.get("format") != _FORMAT or payload.get("satisfied") is not True:
+    if (
+        set(payload)
+        != {
+            "files",
+            "format",
+            "github",
+            "integrity",
+            "platform",
+            "satisfied",
+            "shard",
+        }
+        or payload.get("format") != _FORMAT
+        or payload.get("satisfied") is not True
+    ):
         raise ValueError(f"platform job certificate is not satisfied: {certificate}")
-    if payload.get("github") != github:
-        raise ValueError(f"platform job certificate GitHub binding mismatch: {certificate}")
+    producer_github = _producer_github_binding(payload.get("github"), github)
     if payload.get("platform") != platform or payload.get("shard") != shard:
         raise ValueError(f"platform job certificate identity mismatch: {certificate}")
     expected = _expected_files(platform, shard)
@@ -372,15 +518,25 @@ def verify_certificate(
     components = payload.get("integrity")
     if not isinstance(components, list) or len(components) != len(expected_components):
         raise ValueError(f"platform job integrity inventory is malformed: {certificate}")
-    for component, record in zip(expected_components, components, strict=True):
-        if not isinstance(record, dict):
-            raise ValueError(f"platform job integrity entry is malformed: {certificate}")
-        filename = _integrity_filename(platform, component)
-        if record.get("filename") != filename or record.get("sha256") != _sha256(
-            evidence_dir / filename
-        ):
-            raise ValueError(f"platform job integrity digest mismatch: {filename}")
+    rebuilt_components = [
+        _validate_integrity(
+            evidence_dir / _integrity_filename(platform, component),
+            platform=platform,
+            component=component,
+            github=producer_github,
+        )
+        for component in expected_components
+    ]
+    if components != rebuilt_components:
+        raise ValueError(f"platform job integrity summaries changed: {certificate}")
     return payload
+
+
+def _positive_integer(raw: str) -> int:
+    """Parse one canonical positive decimal for an argparse option."""
+    if re.fullmatch(r"[1-9][0-9]*", raw) is None:
+        raise argparse.ArgumentTypeError("value must be a positive decimal integer")
+    return int(raw, 10)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -394,8 +550,8 @@ def _parser() -> argparse.ArgumentParser:
         child.add_argument("--platform", required=True, choices=sorted(_PLATFORMS))
         child.add_argument("--shard", required=True, choices=sorted(_SHARDS))
         child.add_argument("--github-sha", required=True)
-        child.add_argument("--github-run-id", required=True)
-        child.add_argument("--github-run-attempt", required=True)
+        child.add_argument("--github-run-id", required=True, type=_positive_integer)
+        child.add_argument("--github-run-attempt", required=True, type=_positive_integer)
     return parser
 
 

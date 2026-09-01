@@ -135,10 +135,12 @@ owned helper map under [`meta/ci/`](../../meta/ci/README.md) are the source of t
 - remote fault handling and Parquet contracts.
 
 Keep jobs broad enough to catch platform-specific native failures while
-avoiding duplicate jobs that exercise the same contract. The four wheel jobs
-use one pinned CPython patch, one pinned direct adapter set, and identical
-functional/stress selections; platform-specific skips should be limited to
-capabilities that genuinely do not exist on that operating system.
+avoiding duplicate jobs that exercise the same contract. The four wheel
+producers share one pinned build interpreter and toolchain contract. Their four
+matching test matrices use one pinned CPython patch, shard-specific selections
+from one locked adapter set, and identical functional/stress shard definitions;
+platform-specific skips should be limited to capabilities that genuinely do not
+exist on that operating system.
 
 ## [Documentation changes](#index)
 

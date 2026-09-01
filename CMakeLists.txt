@@ -69,7 +69,16 @@ if(CMAKE_GENERATOR MATCHES "^Visual Studio ")
             FORCE)
 endif()
 
-find_package(Threads REQUIRED)
+# MSVC's standard-library threading support needs no pthread discovery or link
+# flags. Define the conventional imported interface directly on that toolchain;
+# every other compiler retains CMake's required platform probe.
+if(MSVC)
+  if(NOT TARGET Threads::Threads)
+    add_library(Threads::Threads INTERFACE IMPORTED)
+  endif()
+else()
+  find_package(Threads REQUIRED)
+endif()
 
 option(SCHEMA_SANITIZER_ENABLE_LTO
        "Enable IPO/LTO in Release builds when supported" ON)
