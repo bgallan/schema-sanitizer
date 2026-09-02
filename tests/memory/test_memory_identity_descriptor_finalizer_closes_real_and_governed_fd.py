@@ -58,9 +58,10 @@ def test_identity_descriptor_finalizer_closes_real_and_governed_fd(
     # Check the resources owned by this identity. Global counts may change
     # concurrently while bounded cleanup workers make progress.
     assert lease._released
-    with pytest.raises(OSError) as captured:
-        os.fstat(descriptor)
-    assert captured.value.errno == errno.EBADF
+    assert owner._physical_opened is False
+    assert owner._state == owner._CLOSED
+    # A descriptor integer can be reused immediately after close by another
+    # runtime worker, so a later fstat/EBADF check is not a valid close oracle.
 
 
 def test_staged_path_handoff_transfers_original_claim_owner(

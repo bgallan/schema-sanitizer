@@ -158,6 +158,7 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         ".github/actions/platform-sanitizer/action.yml",
         ".github/actions/quality-validation/action.yml",
         ".github/actions/restore-pip-cache/action.yml",
+        ".github/actions/restore-release-distributions/action.yml",
         ".github/actions/source-distribution/action.yml",
         ".github/actions/test-platform-wheel/action.yml",
         ".github/actions/thread-sanitizer/action.yml",

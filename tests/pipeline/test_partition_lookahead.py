@@ -303,7 +303,9 @@ def test_temporary_window_contention_is_retried_at_partition_ordinal(
         controller.close()
         parent.close()
 
-    assert attempts == (2 if controller.enabled else 1)
+    # close() disables the controller, so compare against the immutable policy
+    # decision captured before exercising and closing it.
+    assert attempts == (2 if parallel_lookahead else 1)
 
 
 def test_prefetched_remote_prefix_resumes_after_retained_file_count(monkeypatch) -> None:
