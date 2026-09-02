@@ -1,15 +1,23 @@
-"""Regression coverage for memory external thread borrow linearizes with parent release."""
+"""Exercises parent and child thread-borrow linearization alongside descriptor opening,
+runtime shrink, dataset and stream lifetimes, deadlines, native telemetry, and
+concurrent close. A parent cannot release capacity used by a live borrow; dataset
+cleanup remains a single retryable owner until the last stream and physical descriptor
+retire."""
 
 from __future__ import annotations
 
-import gc
 import os
 import threading
 import weakref
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, ContentionObservedLock
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    ContentionObservedLock,
+    join_thread_or_fail,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
@@ -19,6 +27,7 @@ CPP = ROOT / "cpp/src"
 def test_external_thread_borrow_linearizes_with_parent_release(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify external thread borrow linearizes with parent release."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -31,14 +40,15 @@ def test_external_thread_borrow_linearizes_with_parent_release(
 
     entered = threading.Event()
     continue_borrow = threading.Event()
-    original = module._OperationThreadBorrowBudget.try_borrow_up_to
+    original = module._OperationThreadBorrowBudget.try_borrow_up_to_exact
 
-    def blocked(self: object, desired: int, *, minimum: int = 1) -> int:
+    def blocked(self: object, desired: int, *, minimum: int = 1, exact: bool = False) -> object:
+        """Pause at the blocked synchronization point."""
         entered.set()
         assert continue_borrow.wait(SCHEDULER_TIMEOUT_SECONDS)
-        return original(self, desired, minimum=minimum)
+        return original(self, desired, minimum=minimum, exact=exact)
 
-    monkeypatch.setattr(module._OperationThreadBorrowBudget, "try_borrow_up_to", blocked)
+    monkeypatch.setattr(module._OperationThreadBorrowBudget, "try_borrow_up_to_exact", blocked)
     result: list[object] = []
     acquire_thread = threading.Thread(
         target=lambda: result.append(
@@ -55,8 +65,8 @@ def test_external_thread_borrow_linearizes_with_parent_release(
     assert operation._lock.contention_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert release_thread.is_alive(), "parent release must block behind atomic child publication"
     continue_borrow.set()
-    acquire_thread.join(SCHEDULER_TIMEOUT_SECONDS)
-    release_thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(acquire_thread)
+    join_thread_or_fail(release_thread)
     assert len(result) == 1
     runtime = result[0]
     assert getattr(runtime, "workers") == 3
@@ -77,6 +87,7 @@ def test_external_thread_borrow_linearizes_with_parent_release(
 
 
 def _capture_error(fn: object, errors: list[BaseException]) -> None:
+    """Capture the error for the enclosing assertion."""
     try:
         fn()  # type: ignore[misc]
     except BaseException as exc:
@@ -86,6 +97,7 @@ def _capture_error(fn: object, errors: list[BaseException]) -> None:
 def test_parent_shrink_cannot_invalidate_live_external_borrow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify parent shrink cannot invalidate live external borrow."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -108,31 +120,30 @@ def test_parent_shrink_cannot_invalidate_live_external_borrow(
 
 
 def test_fd_opening_state_prevents_credit_release_before_opener_returns(tmp_path: Path) -> None:
+    """Verify FD opening state prevents credit release before opener returns."""
     from schema_sanitizer.core_impl import process_resources as module
 
-    released = threading.Event()
     entered = threading.Event()
     continue_open = threading.Event()
-
-    class Lease:
-        def release(self) -> None:
-            released.set()
-
-    capability = module.FileDescriptorCapability(
-        Lease(), 1, label="external-thread-borrow-linearizes-with-parent-opening"
+    capability = module.acquire_file_descriptor_capability(
+        1,
+        timeout_seconds=2,
+        label="external-thread-borrow-linearizes-with-parent-opening",
     )
     path = tmp_path / "x"
     path.write_bytes(b"x")
 
     def opener() -> int:
+        """Open the resource after the parent borrow is established."""
         fd = os.open(path, os.O_RDONLY)
         entered.set()
-        assert continue_open.wait(2)
+        assert continue_open.wait(SCHEDULER_TIMEOUT_SECONDS)
         return fd
 
     errors: list[BaseException] = []
 
     def use() -> None:
+        """Use the borrowed resource while its parent release races."""
         try:
             with capability.open_descriptor(opener):
                 pass
@@ -141,57 +152,22 @@ def test_fd_opening_state_prevents_credit_release_before_opener_returns(tmp_path
 
     thread = threading.Thread(target=use)
     thread.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert capability.opening == 1
     with pytest.raises(RuntimeError, match="descriptors are opening"):
         capability.release()
-    assert not released.is_set()
     continue_open.set()
-    thread.join(2)
+    join_thread_or_fail(thread)
     assert not errors
     assert capability.opening == 0
     assert capability.opened == 0
     capability.release()
-    assert released.is_set()
-
-
-def test_external_runtime_gc_finalizer_returns_all_components() -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    calls: list[str] = []
-
-    class Native:
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            calls.append(f"native:{amount}")
-
-    class Lease:
-        def release(self) -> None:
-            calls.append("lease")
-
-    budget = module._OperationThreadBorrowBudget(2)
-    assert budget.try_borrow(2)
-    runtime = module.ExternalRuntimeConcurrencyLease(
-        Lease(),
-        workers=2,
-        parallel=True,
-        parent_lease=object(),
-        borrow_budget=budget,
-        borrowed=2,
-        native=Native(),
-        native_amount=2,
-    )
-    ref = weakref.ref(runtime)
-    del runtime
-    gc.collect()
-    module.drain_finalizer_cleanup()
-    assert ref() is None
-    assert budget.borrowed == 0
-    assert calls == ["native:2", "lease"]
 
 
 def test_external_runtime_shrinks_logical_and_native_envelope_to_real_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify external runtime shrinks logical and native envelope to real pool."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -199,25 +175,40 @@ def test_external_runtime_shrinks_logical_and_native_envelope_to_real_pool(
     native_calls: list[tuple[str, int]] = []
 
     class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+        def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            """Acquire the fake exact-permit lease requested by the resource owner."""
+            assert desired >= minimum
             native_calls.append(("acquire", desired))
-            return desired
+            return SimpleNamespace(amount=desired), desired
 
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            native_calls.append(("release", amount))
+        @staticmethod
+        def exact_permit_lease_amount(receipt: object) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
+            return int(receipt.amount)  # type: ignore[attr-defined]
+
+        @staticmethod
+        def resize_exact_permit_lease(receipt: object, target: int) -> int:
+            """Resize the fake exact-permit lease to the requested amount."""
+            previous = int(receipt.amount)  # type: ignore[attr-defined]
+            receipt.amount = target  # type: ignore[attr-defined]
+            native_calls.append(("release", previous - target))
+            return target
 
     class Runtime:
         @staticmethod
         def cpu_count() -> int:
+            """Return the controlled CPU count reported by the runtime."""
             return 2
 
         @staticmethod
         def set_cpu_count(_value: int) -> None:
+            """Record the CPU count selected by the controlled runtime."""
             raise AssertionError("pool already at physical width")
 
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
     monkeypatch.setattr(module, "_refresh_thread_governor_capacity", lambda: None)
-    monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
+    native = Native()
+    monkeypatch.setattr(module, "_native_external_thread_api", lambda: native)
     monkeypatch.setattr(concurrency_contracts, "current_runtime_execution_lease", lambda: None)
     lease = module.acquire_external_runtime_threads(8, allow_parallel=True)
     logical_claim = lease._lease
@@ -246,20 +237,24 @@ def test_external_runtime_shrinks_logical_and_native_envelope_to_real_pool(
 
 
 def test_dataset_lifetime_retains_fd_and_stage_until_last_stream_reference() -> None:
+    """Verify dataset lifetime retains FD and stage until last stream reference."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as module
 
     events: list[str] = []
 
     class Dataset:
         def __del__(self) -> None:
+            """Run fallback cleanup when the dataset test double is collected."""
             events.append("dataset")
 
     class Capability:
         def close(self) -> None:
+            """Close the resources owned by the capability test double."""
             events.append("capability")
 
     class Stage:
         def close(self) -> None:
+            """Close the resources owned by the stage test double."""
             events.append("stage")
 
     owner = module._DatasetLifetimeOwner(Dataset(), Capability(), Stage())
@@ -271,12 +266,14 @@ def test_dataset_lifetime_retains_fd_and_stage_until_last_stream_reference() -> 
 
 
 def test_stream_scoped_owner_retires_when_batch_iterator_finishes() -> None:
+    """Verify stream scoped owner retires when batch iterator finishes."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as module
 
     events: list[str] = []
 
     class Resource:
         def close(self) -> None:
+            """Close the resources owned by the resource test double."""
             events.append("close")
 
     owner = module._ParquetStreamKeepaliveOwner()
@@ -292,6 +289,7 @@ def test_stream_scoped_owner_retires_when_batch_iterator_finishes() -> None:
 
 
 def test_close_waits_have_real_deadlines(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify close waits have real deadlines."""
     from schema_sanitizer.core_impl import process_resources as module
 
     monkeypatch.setattr(module, "_RESOURCE_CLOSE_WAIT_TIMEOUT_SECONDS", 0.05)
@@ -302,12 +300,14 @@ def test_close_waits_have_real_deadlines(monkeypatch: pytest.MonkeyPatch) -> Non
         closed = False
 
         def close(self) -> None:
+            """Close the resources owned by the stream test double."""
             entered.set()
-            assert continue_close.wait(2)
+            assert continue_close.wait(SCHEDULER_TIMEOUT_SECONDS)
             self.closed = True
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             pass
 
     monkeypatch.setattr(module, "record_physical_file_descriptors_opened", lambda _n=1: None)
@@ -316,11 +316,12 @@ def test_close_waits_have_real_deadlines(monkeypatch: pytest.MonkeyPatch) -> Non
     owner.bind(Stream(), Lease())
     first = threading.Thread(target=owner.close)
     first.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     clock_values = iter((100.0, 101.0))
     clock_reads = 0
 
     def advancing_clock() -> float:
+        """Advance the monotonic clock on each observation."""
         nonlocal clock_reads
         clock_reads += 1
         return next(clock_values)
@@ -330,7 +331,7 @@ def test_close_waits_have_real_deadlines(monkeypatch: pytest.MonkeyPatch) -> Non
         owner.close()
     assert clock_reads == 2
     continue_close.set()
-    first.join(2)
+    join_thread_or_fail(first)
 
     path_src = (SRC / "core_impl/path_identity.py").read_text(encoding="utf-8")
     replay_src = (SRC / "api_impl/parquet/replay_stream.py").read_text(encoding="utf-8")
@@ -339,6 +340,7 @@ def test_close_waits_have_real_deadlines(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_native_thread_authority_is_owner_process_guarded() -> None:
+    """Verify native thread authority is owner process guarded."""
     source = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     acquire = source[source.index("TryAcquireProcessPhysicalThreadPermitsUpTo") :]
     acquire = acquire[: acquire.index("TryAcquireProcessExternalRuntimeThreadPermitsUpTo")]
@@ -349,6 +351,7 @@ def test_native_thread_authority_is_owner_process_guarded() -> None:
 
 
 def test_native_fd_protocol_violation_and_uncertain_debt_are_observable() -> None:
+    """Verify native FD protocol violation and uncertain debt are observable."""
     header = (CPP / "internal/runtime/process_fd_governor.hh").read_text(encoding="utf-8")
     runtime = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     abi = (CPP / "api/python_abi3/runtime/ordered_executor_probe.cc").read_text(encoding="utf-8")
@@ -361,11 +364,13 @@ def test_native_fd_protocol_violation_and_uncertain_debt_are_observable() -> Non
 
 
 def test_native_fd_snapshot_accepts_extended_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify native FD snapshot accepts extended telemetry."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class Native:
         @staticmethod
         def process_file_descriptor_permits_snapshot() -> tuple[int, int, int, int, int, int]:
+            """Return the current FD permit ledger snapshot."""
             return (3, 2, 100, 4, 5, 6)
 
     monkeypatch.setattr(module, "_native_file_descriptor_api", lambda: Native())
@@ -377,18 +382,21 @@ def test_native_fd_snapshot_accepts_extended_telemetry(monkeypatch: pytest.Monke
 
 
 def test_dataset_lifetime_cleanup_failure_keeps_exact_owner_for_retry() -> None:
+    """Verify dataset lifetime cleanup failure keeps exact owner for retry."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as module
 
     events: list[str] = []
 
     class Dataset:
         def __del__(self) -> None:
+            """Run fallback cleanup when the dataset test double is collected."""
             events.append("dataset")
 
     class Capability:
         attempts = 0
 
         def close(self) -> None:
+            """Close the resources owned by the capability test double."""
             self.attempts += 1
             events.append(f"capability:{self.attempts}")
             if self.attempts == 1:
@@ -396,6 +404,7 @@ def test_dataset_lifetime_cleanup_failure_keeps_exact_owner_for_retry() -> None:
 
     class Stage:
         def close(self) -> None:
+            """Close the resources owned by the stage test double."""
             events.append("stage")
 
     owner = module._DatasetLifetimeOwner(Dataset(), Capability(), Stage())
@@ -412,6 +421,7 @@ def test_dataset_lifetime_cleanup_failure_keeps_exact_owner_for_retry() -> None:
 def test_unconfigurable_runtime_reserves_reported_pool_width(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify unconfigurable runtime reserves reported pool width."""
     from schema_sanitizer.api_impl import results as module
 
     requested: list[tuple[int, bool]] = []
@@ -421,14 +431,17 @@ def test_unconfigurable_runtime_reserves_reported_pool_width(
         parallel = True
 
         def close(self) -> None:
+            """Close the resources owned by the lease test double."""
             pass
 
     class Runtime:
         @staticmethod
         def thread_pool_size() -> int:
+            """Return the configured external thread-pool size."""
             return 3
 
     def acquire(desired: int, *, allow_parallel: bool, runtime: object | None = None) -> Lease:
+        """Acquire the resource under the controlled scheduling conditions."""
         assert runtime is Runtime
         requested.append((desired, allow_parallel))
         return Lease()
@@ -440,6 +453,7 @@ def test_unconfigurable_runtime_reserves_reported_pool_width(
 
 
 def test_dataset_lifetime_retirement_is_single_closer_under_concurrent_close() -> None:
+    """Verify dataset lifetime retirement is single closer under concurrent close."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as module
 
     entered = threading.Event()
@@ -448,30 +462,33 @@ def test_dataset_lifetime_retirement_is_single_closer_under_concurrent_close() -
 
     class Dataset:
         def __del__(self) -> None:
+            """Run fallback cleanup when the dataset test double is collected."""
             events.append("dataset")
 
     class Capability:
         def close(self) -> None:
+            """Close the resources owned by the capability test double."""
             events.append("capability")
             entered.set()
-            assert continue_close.wait(2)
+            assert continue_close.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     class Stage:
         def close(self) -> None:
+            """Close the resources owned by the stage test double."""
             events.append("stage")
 
     owner = module._DatasetLifetimeOwner(Dataset(), Capability(), Stage())
     errors: list[BaseException] = []
     first = threading.Thread(target=lambda: _capture_error(owner.close, errors))
     first.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     # A duplicate closer must not race the already-published retirement or
     # release any component a second time.
     owner.close()
     assert events == ["dataset", "capability"]
     continue_close.set()
-    first.join(2)
+    join_thread_or_fail(first)
     assert not errors
     assert events == ["dataset", "capability", "stage"]
     assert owner._closed

@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency lexical scalars preserve single multi output."""
+"""Preserve lexical scalar semantics through parallel inference and writing.
+
+Numbers, booleans, strings, coercions, and escapes must match the single-worker result, with the
+direct token route taking precedence and canonical fallback handling unsupported spellings.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,6 @@ import os
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from benchmarks.concurrency.telemetry.support import consume_arrow_c_stream
@@ -51,9 +54,8 @@ def _telemetry(source: Path, **extra: object) -> dict[str, object]:
     return context.performance_stats()
 
 
-def test_lexical_scalars_preserve_single_multi_output(tmp_path: Path) -> None:
+def test_lexical_scalars_preserve_single_multi_output(tmp_path: Path, require_native: None) -> None:
     """Direct bool/int/float/null/string tokens remain byte-identical."""
-    require_native()
     rows: list[dict[str, object]] = []
     float_values = (1.25, -0.0, 1e-200, 1.7976931348623157e308, 42.0)
     for index in range(8_192):
@@ -87,9 +89,9 @@ def test_lexical_scalars_preserve_single_multi_output(tmp_path: Path) -> None:
 
 def test_string_coercions_and_escapes_use_canonical_fallback(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Quoted coercions and escaped UTF-8 retain the existing parser path."""
-    require_native()
     rows: list[dict[str, object]] = []
     for index in range(2_048):
         row: dict[str, object] = {

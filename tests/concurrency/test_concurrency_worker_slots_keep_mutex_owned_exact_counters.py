@@ -1,10 +1,12 @@
-"""Regression coverage for concurrency worker slots keep mutex owned exact counters."""
+"""Protect exact arena counters with mutex-owned worker-slot transitions.
+
+Local and stolen dequeues must avoid queue-depth read-modify-write races, and concurrent direct
+producers must leave snapshots internally consistent.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
-
-from conftest import require_native
 
 from schema_sanitizer.core_impl.native_runtime import native_core
 
@@ -14,7 +16,7 @@ RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
 
 
 def test_worker_slots_keep_mutex_owned_exact_counters() -> None:
-    """Verify the named concurrency regression contract."""
+    """Verify worker slots keep mutex owned exact counters."""
     source = ARENA.read_text(encoding="utf-8")
     slot = source[source.index("struct WorkerSlot") : source.index("explicit State")]
 
@@ -26,7 +28,7 @@ def test_worker_slots_keep_mutex_owned_exact_counters() -> None:
 
 
 def test_local_and_stolen_dequeue_avoid_queue_depth_rmw() -> None:
-    """Verify the named concurrency regression contract."""
+    """Verify local and stolen dequeue avoid queue depth RMW."""
     runtime = RUNTIME.read_text(encoding="utf-8")
 
     assert "--slot.queued_local;" in runtime
@@ -36,9 +38,8 @@ def test_local_and_stolen_dequeue_avoid_queue_depth_rmw() -> None:
     assert ".queued.fetch_sub" not in runtime
 
 
-def test_concurrent_direct_producers_preserve_exact_snapshots() -> None:
-    """Verify the named concurrency regression contract."""
-    require_native()
+def test_concurrent_direct_producers_preserve_exact_snapshots(require_native: None) -> None:
+    """Verify concurrent direct producers preserve exact snapshots."""
     for workers in (2, 4, 8, 16):
         _elapsed, submitted, finished, queued, started, peak = (
             native_core.operation_task_arena_concurrent_submit_probe(workers, 2, 2_000)

@@ -1,4 +1,7 @@
-"""Regression coverage for memory cancel linearizes before claimed callback starts."""
+"""Stress-tests retry scheduling and structured shutdown under cancellation races, same-key
+coalescing, huge delays, hard-link cleanup, fork reset, and worker-lease overflow.
+Claimed callbacks cannot start after cancellation, retained cleanup queues stay bounded
+and fair, and shutdown orders producers before the guardian."""
 
 from __future__ import annotations
 
@@ -7,8 +10,16 @@ import stat
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    run_isolated_python_probe,
+    wait_event_or_fail,
+    wait_for_process_exit,
+)
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -16,6 +27,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def _move_pending_to_ready(scheduler) -> None:
+    """Move one retry record from pending to ready state."""
     with scheduler._condition:
         for item in tuple(scheduler._current.values()):
             scheduler._current.pop(item.key, None)
@@ -26,6 +38,7 @@ def _move_pending_to_ready(scheduler) -> None:
 
 
 def test_cancel_linearizes_before_claimed_callback_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify cancel linearizes before claimed callback starts."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -46,6 +59,7 @@ def test_cancel_linearizes_before_claimed_callback_starts(monkeypatch: pytest.Mo
 def test_same_key_is_single_flight_with_one_coalesced_successor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify same key is single flight with one coalesced successor."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -69,6 +83,7 @@ def test_same_key_is_single_flight_with_one_coalesced_successor(
 
 
 def test_generation_tombstones_are_pruned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify generation tombstones are pruned."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -84,6 +99,7 @@ def test_generation_tombstones_are_pruned(monkeypatch: pytest.MonkeyPatch) -> No
 
 @pytest.mark.parametrize("delay", [float("nan"), float("inf"), -1.0])
 def test_retry_rejects_non_finite_or_negative_delay(delay: float) -> None:
+    """Verify retry rejects non finite or negative delay."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -92,6 +108,7 @@ def test_retry_rejects_non_finite_or_negative_delay(delay: float) -> None:
 
 
 def test_retry_huge_finite_delay_saturates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify retry huge finite delay saturates."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -103,6 +120,7 @@ def test_retry_huge_finite_delay_saturates(monkeypatch: pytest.MonkeyPatch) -> N
 def test_claim_sweeper_removes_crash_left_hardlink_alias(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify claim sweeper removes crash left hardlink alias."""
     import schema_sanitizer.core_impl.path_identity as module
 
     root = tmp_path / "claims"
@@ -129,6 +147,7 @@ def test_claim_sweeper_removes_crash_left_hardlink_alias(
 def test_claim_publication_fsyncs_alias_removal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify claim publication fsyncs alias removal."""
     import schema_sanitizer.core_impl.path_identity as module
 
     getattr(monkeypatch, "set" + "env")(
@@ -141,6 +160,7 @@ def test_claim_publication_fsyncs_alias_removal(
     directory_syncs = 0
 
     def count_fsync(descriptor: int) -> None:
+        """Record count fsync for the enclosing assertion."""
         nonlocal directory_syncs
         if stat.S_ISDIR(os.fstat(descriptor).st_mode):
             directory_syncs += 1
@@ -153,8 +173,8 @@ def test_claim_publication_fsyncs_alias_removal(
     module.release_path_identity(identity)
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="POSIX fork required")
-def test_after_fork_path_reset_never_acquires_inherited_owner_lock(tmp_path: Path) -> None:
+def _probe_after_fork_path_reset_never_acquires_inherited_owner_lock() -> None:
+    """Exercise the inherited-owner lock reset in a disposable process."""
     import schema_sanitizer.core_impl.path_identity as module
 
     owner = module.PathClaimOwner(None, None, None)
@@ -162,14 +182,15 @@ def test_after_fork_path_reset_never_acquires_inherited_owner_lock(tmp_path: Pat
     release = threading.Event()
 
     def hold() -> None:
+        """Hold the synchronization point until the competing path arrives."""
         owner.lock.acquire()
         locked.set()
-        release.wait(5)
+        wait_event_or_fail(release)
         owner.lock.release()
 
     thread = threading.Thread(target=hold)
     thread.start()
-    assert locked.wait(2)
+    assert locked.wait(SCHEDULER_TIMEOUT_SECONDS)
     module._ABANDONED_CLAIM_OWNERS = {id(owner): owner}
     read_fd, write_fd = os.pipe()
     pid = os.fork()
@@ -181,7 +202,7 @@ def test_after_fork_path_reset_never_acquires_inherited_owner_lock(tmp_path: Pat
         finally:
             os._exit(0)
     os.close(write_fd)
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     data = b""
     while time.monotonic() < deadline and not data:
         import select
@@ -189,15 +210,24 @@ def test_after_fork_path_reset_never_acquires_inherited_owner_lock(tmp_path: Pat
         if select.select([read_fd], [], [], 0.05)[0]:
             data = os.read(read_fd, 2)
     release.set()
-    thread.join(2)
+    join_thread_or_fail(thread)
     os.close(read_fd)
-    os.waitpid(pid, 0)
+    wait_for_process_exit(pid)
     assert data == b"ok"
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_after_fork_path_reset_never_acquires_inherited_owner_lock() -> None:
+    """Verify after fork path reset never acquires inherited owner lock."""
+    run_isolated_python_probe(
+        __file__, "_probe_after_fork_path_reset_never_acquires_inherited_owner_lock"
+    )
 
 
 def test_guardian_parks_overflow_without_destroying_owner_under_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify guardian parks overflow without destroying owner under lock."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     monkeypatch.setattr(module, "_RELEASE_MAX_ATTEMPTS", 1)
@@ -206,6 +236,7 @@ def test_guardian_parks_overflow_without_destroying_owner_under_lock(
 
     class WorkerPermit:
         def release(self) -> None:
+            """Release the resource held by the worker permit test double."""
             pass
 
     monkeypatch.setattr(module, "acquire_release_guardian_thread", WorkerPermit)
@@ -213,11 +244,12 @@ def test_guardian_parks_overflow_without_destroying_owner_under_lock(
 
     class Broken:
         def release(self) -> None:
+            """Release the resource held by the broken test double."""
             raise OSError("permanent")
 
     owner = Broken()
     assert guardian.adopt(owner, retained_bytes=32)
-    deadline = time.monotonic() + 2
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while time.monotonic() < deadline and guardian.snapshot().parked_owners == 0:
         time.sleep(0.002)
     snap = guardian.snapshot()
@@ -227,6 +259,7 @@ def test_guardian_parks_overflow_without_destroying_owner_under_lock(
 
 
 def test_cleanup_dispatcher_round_robins_subsystems(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify cleanup dispatcher round robins subsystems."""
     import schema_sanitizer.core_impl.cleanup_dispatcher as module
 
     dispatcher = module._CleanupDispatcher()
@@ -234,10 +267,12 @@ def test_cleanup_dispatcher_round_robins_subsystems(monkeypatch: pytest.MonkeyPa
 
     class A:
         def __call__(self) -> None:
+            """Stand in for a storage cleanup callback."""
             pass
 
     class B:
         def __call__(self) -> None:
+            """Stand in for a remote cleanup callback."""
             pass
 
     assert dispatcher.submit(A(), retained_bytes=16, subsystem=module.CleanupSubsystem.STORAGE)
@@ -249,6 +284,7 @@ def test_cleanup_dispatcher_round_robins_subsystems(monkeypatch: pytest.MonkeyPa
 
 
 def test_scheduler_structured_close_rejects_new_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify scheduler structured close rejects new work."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -260,6 +296,7 @@ def test_scheduler_structured_close_rejects_new_work(monkeypatch: pytest.MonkeyP
 
 
 def test_native_arena_source_has_checked_inline_admission_and_bounded_reaper() -> None:
+    """Verify native arena source has checked inline admission and bounded reaper."""
     source = (
         Path(__file__).parents[2] / "cpp/src/internal/runtime/operation_task_arena.cc"
     ).read_text()
@@ -274,6 +311,7 @@ def test_native_arena_source_has_checked_inline_admission_and_bounded_reaper() -
 def test_retry_scheduler_failed_worker_lease_overflow_is_retained(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify retry scheduler failed worker lease overflow is retained."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -290,6 +328,7 @@ def test_retry_scheduler_failed_worker_lease_overflow_is_retained(
 
 
 def test_cleanup_dispatcher_failed_worker_leases_are_never_truncated() -> None:
+    """Verify cleanup dispatcher failed worker leases are never truncated."""
     import schema_sanitizer.core_impl.cleanup_dispatcher as module
 
     dispatcher = module._CleanupDispatcher()
@@ -305,6 +344,7 @@ def test_cleanup_dispatcher_failed_worker_leases_are_never_truncated() -> None:
 
 
 def test_janitor_failed_thread_lease_fallback_is_bounded_and_fail_closed() -> None:
+    """Verify janitor failed thread lease fallback is bounded and fail closed."""
     import schema_sanitizer.core_impl.temporary_janitor as module
 
     janitor = module._TemporaryArtifactJanitor()
@@ -321,50 +361,88 @@ def test_janitor_failed_thread_lease_fallback_is_bounded_and_fail_closed() -> No
 def test_structured_runtime_shutdown_orders_producers_before_guardian(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import schema_sanitizer.core_impl.cleanup_dispatcher as cleanup
-    import schema_sanitizer.core_impl.process_resources as resources
-    import schema_sanitizer.core_impl.retry_scheduler as retry
+    """Verify structured runtime shutdown orders producers before guardian."""
     import schema_sanitizer.core_impl.runtime_shutdown as shutdown
-    import schema_sanitizer.core_impl.temporary_janitor as janitor
+    from schema_sanitizer.core_impl import runtime_registry
+    from schema_sanitizer.remote_impl import (
+        sync_cleanup_escrow as _sync_cleanup_escrow,  # noqa: F401
+    )
 
     order: list[str] = []
 
     class Service:
         def __init__(self, name: str) -> None:
+            """Initialize the service test double."""
             self.name = name
 
         def close(self, *, deadline_seconds: float) -> bool:
+            """Close the resources owned by the service test double."""
             assert deadline_seconds >= 0
             order.append(self.name)
             return True
 
-    monkeypatch.setattr(retry, "_SCHEDULER", Service("retry"))
-    monkeypatch.setattr(janitor, "_JANITOR", Service("janitor"))
-    monkeypatch.setattr(cleanup, "_DISPATCHER", Service("cleanup"))
-    monkeypatch.setattr(retry, "_RELEASE_GUARDIAN", Service("guardian"))
-    # This is an ordering unit test with fake services. Keep the corresponding
-    # process-global admissions and real notifier/reaper untouched; otherwise
-    # their live leases cannot be drained by the substituted services.
-    monkeypatch.setattr(resources, "close_process_resource_external_admission", lambda: None)
-    monkeypatch.setattr(resources, "close_process_resource_admission", lambda: None)
-    monkeypatch.setattr(resources, "close_release_guardian_thread_admission", lambda: None)
-    monkeypatch.setattr(resources, "shutdown_availability_notifier", lambda **_kwargs: True)
-    monkeypatch.setattr(shutdown, "_shutdown_native_cleanup_reaper", lambda _deadline: True)
+    real_registry = shutdown._registry_module._RUNTIME_SERVICES
+    registry_before = real_registry.snapshot()
+    assert dict(registry_before.service_kinds).get("sync_provider_cleanup_escrow") == 1
     try:
+        resources = shutdown._resources_module
+        monkeypatch.setattr(
+            shutdown,
+            "_registry_module",
+            SimpleNamespace(_RUNTIME_SERVICES=runtime_registry._RuntimeServiceRegistry()),
+        )
+        monkeypatch.setattr(
+            shutdown,
+            "_retry_module",
+            SimpleNamespace(_SCHEDULER=Service("retry"), _RELEASE_GUARDIAN=Service("guardian")),
+        )
+        monkeypatch.setattr(
+            shutdown,
+            "_janitor_module",
+            SimpleNamespace(_JANITOR=Service("janitor")),
+        )
+        monkeypatch.setattr(
+            shutdown,
+            "_cleanup_module",
+            SimpleNamespace(_DISPATCHER=Service("cleanup")),
+        )
+        # Substitute only shutdown's module view. Live workers keep the real process-global
+        # services and therefore cannot observe these ordering doubles during test teardown.
+        monkeypatch.setattr(
+            shutdown,
+            "_resources_module",
+            SimpleNamespace(
+                close_process_resource_external_admission=lambda: None,
+                close_process_resource_admission=lambda: None,
+                close_release_guardian_thread_admission=lambda: None,
+                shutdown_availability_notifier=lambda **_kwargs: True,
+                availability_notifier_snapshot=resources.availability_notifier_snapshot,
+                availability_notifier_thread_snapshot=(
+                    resources.availability_notifier_thread_snapshot
+                ),
+                process_file_descriptor_snapshot=resources.process_file_descriptor_snapshot,
+                process_thread_snapshot=resources.process_thread_snapshot,
+                release_guardian_thread_snapshot=resources.release_guardian_thread_snapshot,
+                uncertain_fd_close_snapshot=resources.uncertain_fd_close_snapshot,
+            ),
+        )
+        monkeypatch.setattr(shutdown, "_shutdown_native_cleanup_reaper", lambda _deadline: True)
         result = shutdown.shutdown_concurrency_runtime(deadline_seconds=1.0)
         assert result.retry_scheduler_stopped
         assert result.janitor_stopped
         assert result.cleanup_dispatcher_stopped
         assert result.release_guardian_stopped
-        # terminal_success is intentionally stricter and may be false when an
-        # unrelated real singleton worker from a previous test remains alive.
         assert order == ["janitor", "cleanup", "retry", "guardian"]
     finally:
         shutdown._reset_runtime_shutdown_for_tests()
+        registry_after = real_registry.snapshot()
+        assert dict(registry_after.service_kinds).get("sync_provider_cleanup_escrow") == 1
+        assert not registry_after.admission_closed
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -0.1])
 def test_structured_runtime_shutdown_rejects_invalid_deadlines(value: float) -> None:
+    """Verify structured runtime shutdown rejects invalid deadlines."""
     from schema_sanitizer.core_impl.runtime_shutdown import shutdown_concurrency_runtime
 
     with pytest.raises(ValueError, match="finite and non-negative"):
@@ -374,6 +452,7 @@ def test_structured_runtime_shutdown_rejects_invalid_deadlines(value: float) -> 
 def test_release_guardian_reports_trusted_resource_reservations(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify release guardian reports trusted resource reservations."""
     import schema_sanitizer.core_impl.retry_scheduler as module
     from schema_sanitizer.core_impl import temporary_storage
 
@@ -381,6 +460,7 @@ def test_release_guardian_reports_trusted_resource_reservations(
         reserved_bytes = 8 * 1024 * 1024
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             return None
 
     monkeypatch.setattr(temporary_storage, "TemporaryStorageLease", Lease)

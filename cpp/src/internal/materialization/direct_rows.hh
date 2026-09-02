@@ -1,4 +1,6 @@
 // Declares direct raw-row materialization into Arrow arrays.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 
@@ -17,22 +19,23 @@ namespace sanitize::internal {
 // Unified raw-row (text) materialization fast-path.
 class DirectMaterializer {
 public:
-  // Destroys the DirectMaterializer.
+  /// Releases frontend-specific scratch through the polymorphic materializer
+  /// interface.
   virtual ~DirectMaterializer() = default;
 
-  // Converts one raw frontend row without mutating a shared Arrow builder.
+  /// Converts one raw frontend row without mutating a shared Arrow builder.
   virtual sanitize::Result<PreparedRow>
   PrepareRaw(const sanitize::CompiledPlan &plan, const RowRef &row,
              const PreparedOptions &opts, IngestDiagnostics *diagnostics) = 0;
 
-  // Appends one raw frontend row directly into the batch appender.
+  /// Appends one raw frontend row directly into the batch appender.
   virtual sanitize::Result<AppendRowResult>
   AppendRaw(BatchAppender *app, const RowRef &row, const PreparedOptions &opts,
             IngestDiagnostics *diagnostics);
 };
 
-// Factory: returns a frontend-specific DirectMaterializer (keyed by frontend
-// name).
+/// Selects a frontend-specific direct materializer backed by the operation
+/// pool.
 sanitize::Result<std::unique_ptr<DirectMaterializer>>
 make_direct_materializer(std::string_view frontend_name,
                          PoolResource *pmr_pool);

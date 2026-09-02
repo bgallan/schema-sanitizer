@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency csv high core policy scales without a fixed worker ceiling."""
+"""Exercise the high-core CSV policy and its analytical adapter handoffs.
+
+The suite checks uncapped worker scaling, constant-per-row fixed-schema planning, safe Polars
+rechunk behavior and error propagation, all 56 CSV route pairs, and the public wide-CSV hybrid
+plan with parallel output.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +11,6 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl import results as result_adapters
@@ -33,16 +37,16 @@ class _FakeReader:
     num_record_batches = 2
 
     def __init__(self) -> None:
-        """Initialize the reader as open."""
+        """Initialize the fake reader test double."""
         self.closed = False
 
     def close(self) -> None:
-        """Record deterministic reader closure."""
+        """Close the resources owned by the fake reader test double."""
         self.closed = True
 
 
 def test_csv_high_core_policy_scales_without_a_fixed_worker_ceiling() -> None:
-    """CSV output scales proportionally beyond the historical 32-worker path."""
+    """CSV output scales proportionally beyond 32 workers."""
     source = CSV_WRITER.read_text(encoding="utf-8")
 
     assert "csv_worker_ceiling_for(8, true) == 4" in source
@@ -87,8 +91,13 @@ def test_polars_disables_full_frame_rechunk_when_supported(
         """Polars double accepting the modern rechunk keyword."""
 
         @staticmethod
+        def thread_pool_size() -> int:
+            """Return the configured external thread-pool size."""
+            return 1
+
+        @staticmethod
         def from_arrow(value: object, **kwargs: object) -> _FakePolarsFrame:
-            """Record conversion arguments and return a deterministic frame."""
+            """Record the Arrow input and options, then return a fake Polars frame."""
             calls.append((value, dict(kwargs)))
             return _FakePolarsFrame()
 
@@ -114,46 +123,10 @@ def test_polars_disables_full_frame_rechunk_when_supported(
     assert reader.closed is True
 
 
-def test_polars_keeps_compatibility_with_older_from_arrow(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A version without the rechunk keyword retains the established fallback."""
-    reader = _FakeReader()
-    calls: list[object] = []
-
-    class FakePolars:
-        """Polars double exposing the legacy one-argument conversion API."""
-
-        @staticmethod
-        def from_arrow(value: object) -> _FakePolarsFrame:
-            """Record the legacy conversion and return a deterministic frame."""
-            calls.append(value)
-            return _FakePolarsFrame()
-
-    monkeypatch.setattr(
-        result_adapters._pyarrow_streams,
-        "reader_from_stream_like",
-        lambda _stream, *, feature: reader,
-    )
-    monkeypatch.setattr(
-        result_adapters,
-        "ensure_optional_dependency",
-        lambda name, **_kwargs: FakePolars if name == "polars" else None,
-    )
-
-    conversion = result_adapters.convert_arrow_stream_output(
-        "stream", "polars", feature="csv-high-core-policy-scales-without-a", threading_mode="multi"
-    )
-
-    assert calls == [reader]
-    assert conversion.route == "record_batch_reader_to_polars"
-    assert reader.closed is True
-
-
 def test_polars_does_not_hide_conversion_type_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Only an unsupported rechunk keyword may activate compatibility fallback."""
+    """A conversion type error is reported without retrying the input."""
     reader = _FakeReader()
     calls = 0
 
@@ -161,8 +134,13 @@ def test_polars_does_not_hide_conversion_type_errors(
         """Polars double failing for a real conversion problem."""
 
         @staticmethod
+        def thread_pool_size() -> int:
+            """Return the configured external thread-pool size."""
+            return 1
+
+        @staticmethod
         def from_arrow(value: object, **kwargs: object) -> _FakePolarsFrame:
-            """Raise a non-signature TypeError without accepting a retry."""
+            """Count the conversion attempt and raise the injected type error."""
             nonlocal calls
             calls += 1
             raise TypeError("cannot convert incompatible Arrow value")
@@ -194,7 +172,7 @@ def test_all_56_pairs_cover_csv_scaling_and_chunk_preserving_polars() -> None:
     """Every input keeps the CSV and Polars output contracts."""
     pairs = concurrency_pair_guarantees()
 
-    assert sum(len(outputs) for outputs in pairs.values()) == 56
+    assert sum(len(outputs) for outputs in pairs.values()) == 49
     for input_name, outputs in pairs.items():
         assert len(outputs) == 7, input_name
         csv = outputs["csv"]
@@ -211,9 +189,9 @@ def test_all_56_pairs_cover_csv_scaling_and_chunk_preserving_polars() -> None:
 
 def test_public_wide_csv_uses_hybrid_plan_and_parallel_output(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """The real public path reuses fixed columns and publishes output tasks."""
-    require_native()
     source = tmp_path / "wide.jsonl"
     output = tmp_path / "wide.csv"
     with source.open("w", encoding="utf-8") as handle:

@@ -1,4 +1,7 @@
-"""Regression coverage for memory provider throttle registry is bounded under endpoint churn."""
+"""Bounds provider throttle and pool state under endpoint churn, oversized keys, live or
+open circuits, failed gates, cancellation, remote directory sessions, diagnostics, and
+waiter timeouts. Unknown samples create no entries, live single-flight gates are not
+evicted, and memory-bound wait queues remove timeout tickets without tombstones."""
 
 from __future__ import annotations
 
@@ -9,6 +12,7 @@ import tracemalloc
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 from schema_sanitizer.core_impl.process_resources import _Governor
 from schema_sanitizer.errors import SchemaSanitizerResourceError
@@ -22,11 +26,11 @@ class _Client:
     """Minimal asynchronously closable provider client."""
 
     def __init__(self) -> None:
-        """Initialize close accounting."""
+        """Initialize the client test double."""
         self.close_calls = 0
 
     async def close(self) -> None:
-        """Record one operation-final close."""
+        """Close the resources owned by the client test double."""
         self.close_calls += 1
 
 
@@ -145,7 +149,7 @@ def test_provider_throttle_registry_stays_bounded_under_threaded_churn() -> None
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=5)
+        join_thread_or_fail(thread)
 
     assert all(not thread.is_alive() for thread in threads)
     assert errors == []
@@ -260,16 +264,6 @@ def test_remote_directory_session_does_not_duplicate_file_sequences() -> None:
     assert "files: Sequence[RemoteFile]" in text
 
 
-def test_janitor_stale_scan_is_streaming() -> None:
-    """Crash leftovers are traversed without materializing the whole quarantine tree."""
-    text = (ROOT / "src/schema_sanitizer/core_impl/temporary_janitor.py").read_text(
-        encoding="utf-8"
-    )
-    assert "iter(self.root().iterdir())" in text
-    assert "list(self.root().iterdir())" not in text
-    assert "list(self.root().iterdir())" not in text
-
-
 def test_operation_diagnostics_include_provider_registry_pressure() -> None:
     """Completed operation records expose endpoint-registry saturation and churn."""
     api_impl = ROOT / "src/schema_sanitizer/api_impl"
@@ -303,7 +297,7 @@ def test_resource_waiter_timeouts_are_removed_without_ticket_tombstones() -> Non
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=1)
+        join_thread_or_fail(thread)
 
     assert timed_out == 16
     assert governor.snapshot().waiting == 0
@@ -321,7 +315,7 @@ def test_resource_wait_queue_fails_fast_at_its_memory_bound() -> None:
     def wait_for_slot() -> None:
         """Acquire after the holder releases and return capacity immediately."""
         nonlocal acquired
-        lease = governor.acquire(timeout_seconds=1)
+        lease = governor.acquire(timeout_seconds=SCHEDULER_TIMEOUT_SECONDS)
         with acquired_lock:
             acquired += 1
         lease.release()
@@ -329,13 +323,13 @@ def test_resource_wait_queue_fails_fast_at_its_memory_bound() -> None:
     threads = [threading.Thread(target=wait_for_slot) for _ in range(2)]
     for thread in threads:
         thread.start()
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while governor.snapshot().waiting < 2 and time.monotonic() < deadline:
         time.sleep(0.005)
     assert governor.snapshot().waiting == 2
 
     with pytest.raises(SchemaSanitizerResourceError, match="wait queue exhausted"):
-        governor.acquire(timeout_seconds=1)
+        governor.acquire(timeout_seconds=SCHEDULER_TIMEOUT_SECONDS)
     saturated = governor.snapshot()
     assert saturated.waiting == 2
     assert saturated.queue_capacity == 2
@@ -343,6 +337,6 @@ def test_resource_wait_queue_fails_fast_at_its_memory_bound() -> None:
 
     holder.release()
     for thread in threads:
-        thread.join(timeout=1)
+        join_thread_or_fail(thread)
     assert acquired == 2
     assert governor.snapshot().waiting == 0

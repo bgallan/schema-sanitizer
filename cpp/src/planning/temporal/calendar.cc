@@ -1,4 +1,6 @@
-// Converts validated temporal fields into epoch-based values.
+// Converts validated temporal fields into epoch-based scalar values.
+// Gregorian calendar and clock checks precede bounded date, time, and timestamp
+// arithmetic so invalid or overflowing captures never reach caller state.
 
 #include "internal/planning/temporal/parts.hh"
 
@@ -9,10 +11,12 @@
 namespace sanitize::internal {
 namespace {
 
+/// Returns whether the Gregorian year contains February 29.
 bool is_leap_year(int year) {
   return (year % 4 == 0) && ((year % 100 != 0) || (year % 400 == 0));
 }
 
+/// Returns the number of days in a valid Gregorian month, or zero otherwise.
 int days_in_month(int year, int month) {
   switch (month) {
   case 1:

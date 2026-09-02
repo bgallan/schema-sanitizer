@@ -1,4 +1,6 @@
-// Defines public option enums, catalog-backed options, and prepared state.
+// Defines public option enums, catalog-backed inputs, and immutable prepared
+// state. Parsing, naming, evolution, threading, and error policies are
+// validated once and exposed through allocation-conscious runtime lookups.
 
 #pragma once
 
@@ -89,27 +91,27 @@ struct PreparedOptions {
   std::vector<SimpleTemporalPattern> simple_date_patterns;
   std::vector<SimpleTemporalPattern> simple_time_patterns;
 
-  // Returns whether the value matches a configured true token.
+  /// Returns whether the value matches a configured true token.
   bool is_true_token(std::string_view s) const;
-  // Returns whether the value matches a configured false token.
+  /// Returns whether the value matches a configured false token.
   bool is_false_token(std::string_view s) const;
-  // Parses a timestamp string into Unix nanoseconds.
+  /// Parses a timestamp string into Unix nanoseconds.
   bool parse_timestamp_ns(std::string_view s, int64_t *out_ns) const;
-  // Parses a date string into Arrow date32 days.
+  /// Parses a date string into Arrow date32 days.
   bool parse_date_days(std::string_view s, int32_t *out_days) const;
-  // Parses a time string into seconds since midnight.
+  /// Parses a time string into seconds since midnight.
   bool parse_time_seconds(std::string_view s, int32_t *out_seconds) const;
-  // Returns whether the value matches any configured timestamp pattern.
+  /// Returns whether the value matches any configured timestamp pattern.
   bool match_timestamp(std::string_view s) const;
-  // Returns whether the value matches any configured date pattern.
+  /// Returns whether the value matches any configured date pattern.
   bool match_date(std::string_view s) const;
-  // Returns whether the value matches any configured time pattern.
+  /// Returns whether the value matches any configured time pattern.
   bool match_time(std::string_view s) const;
 };
 
 using PreparedOptionsPtr = std::shared_ptr<const PreparedOptions>;
 
-// Validates and compiles options for the ingestion pipeline.
+/// Validates and compiles options for the ingestion pipeline.
 sanitize::Result<PreparedOptionsPtr> prepare_options(const Options &opts);
 
 } // namespace sanitize

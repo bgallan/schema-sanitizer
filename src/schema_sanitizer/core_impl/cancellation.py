@@ -1,4 +1,8 @@
-"""Cooperative operation cancellation and monotonic deadlines."""
+"""Provide cooperative operation cancellation and monotonic deadlines.
+
+Context-scoped tokens combine explicit cancellation with optional deadlines and make sleeps and
+future waits interruptible without exposing wall-clock drift.
+"""
 
 from __future__ import annotations
 
@@ -150,11 +154,13 @@ _FORK_PREPARED_CURRENT_TOKEN: ContextVar[OperationCancellationToken | None] | No
 
 
 def _prepare_cancellation_token_for_fork() -> None:
+    """Prepare cancellation token for fork."""
     global _FORK_PREPARED_CURRENT_TOKEN
     _FORK_PREPARED_CURRENT_TOKEN = _FORK_CURRENT_TOKEN_BANKS[_FORK_CURRENT_TOKEN_BANK_INDEX]
 
 
 def _clear_cancellation_token_fork_preparation() -> None:
+    """Clear cancellation token fork preparation."""
     global _FORK_PREPARED_CURRENT_TOKEN
     _FORK_PREPARED_CURRENT_TOKEN = None
 
@@ -215,7 +221,8 @@ async def cancellable_async_sleep(seconds: float, *, stage: str) -> None:
     import asyncio
 
     normalized = normalize_duration(seconds, name=f"{stage} sleep duration", allow_zero=True)
-    assert normalized is not None
+    if normalized is None:
+        raise AssertionError("validated sleep duration cannot be absent")
     remaining = normalized
     while remaining > 0:
         check_operation_cancelled(stage=stage)
@@ -225,8 +232,8 @@ async def cancellable_async_sleep(seconds: float, *, stage: str) -> None:
         sleep_seconds = 0.1 if slice_seconds is None else slice_seconds
         started = monotonic()
         await asyncio.sleep(sleep_seconds)
-        # Subtract at least the requested slice. Test doubles and unusual event
-        # loops may return immediately; they must not turn cancellation polling
+        # Subtract at least the requested slice. Spurious event loops may return
+        # immediately; they must not turn cancellation polling
         # into an unbounded busy loop. Real scheduling delays are also honoured.
         remaining = max(0.0, remaining - max(sleep_seconds, monotonic() - started))
     check_operation_cancelled(stage=stage)
@@ -235,7 +242,8 @@ async def cancellable_async_sleep(seconds: float, *, stage: str) -> None:
 def cancellable_sleep(seconds: float, *, stage: str) -> None:
     """Block in short cancellable slices bounded by the active deadline."""
     normalized = normalize_duration(seconds, name=f"{stage} sleep duration", allow_zero=True)
-    assert normalized is not None
+    if normalized is None:
+        raise AssertionError("validated sleep duration cannot be absent")
     remaining = normalized
     while remaining > 0:
         check_operation_cancelled(stage=stage)
@@ -271,7 +279,8 @@ async def await_cancellable_future(future, *, stage: str, poll_seconds: float = 
             return await future
         remaining = None if token is None else token.remaining_seconds(poll_seconds)
         if remaining is not None and remaining <= 0:
-            assert token is not None
+            if token is None:
+                raise AssertionError("bounded cancellation wait requires a token")
             token.raise_if_cancelled(stage=stage)
         timeout = poll_seconds if remaining is None else max(0.001, remaining)
         done, _pending = await asyncio.wait(

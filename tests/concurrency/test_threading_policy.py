@@ -1,4 +1,9 @@
-"""Contracts for deterministic single and bounded multi execution modes."""
+"""Define deterministic single-worker and bounded multi-worker execution policy.
+
+Normalization, public defaults, Boolean validation, inline sync and prefetch behavior, output
+parity, affinity-aware capacity, low-memory fallback, and uncapped-but-governed multi widths are
+verified without allowing single mode to create helper threads or processes.
+"""
 
 from __future__ import annotations
 
@@ -13,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import require_native
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.execution_policy import (
@@ -36,9 +41,10 @@ def _logical_jsonl_rows(path: Path) -> list[dict[str, object]]:
     return rows
 
 
-def test_single_policy_forces_every_project_owned_parallel_limit_to_one() -> None:
+def test_single_policy_forces_every_project_owned_parallel_limit_to_one(
+    require_native: None,
+) -> None:
     """Single mode is the inline oracle regardless of host capacity or budget."""
-    require_native()
     policy = execution_policy("single", 512 * 1024 * 1024, available_cpus=128)
 
     assert policy.requested_mode == "single"
@@ -58,9 +64,8 @@ def test_single_policy_forces_every_project_owned_parallel_limit_to_one() -> Non
     assert policy.fallback_to_one_worker_reason == "single_requested"
 
 
-def test_multi_policy_is_bounded_and_can_fall_back_to_one_worker() -> None:
+def test_multi_policy_is_bounded_and_can_fall_back_to_one_worker(require_native: None) -> None:
     """Multi derives safe limits rather than exposing a worker-count knob."""
-    require_native()
     parallel = execution_policy("multi", 256 * 1024 * 1024, available_cpus=8)
     constrained = execution_policy("multi", 1, available_cpus=8)
 
@@ -172,16 +177,7 @@ def test_run_sync_single_refuses_to_create_async_helper_thread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An active event loop cannot silently force a helper host thread in single mode."""
-    from schema_sanitizer.remote_impl import async_bridge, transport
-
-    class ForbiddenThread:
-        """Fail if the extracted async bridge constructs a host thread."""
-
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            """Reject construction of the forbidden helper thread."""
-            raise AssertionError("single mode constructed async helper thread")
-
-    monkeypatch.setattr(async_bridge, "Thread", ForbiddenThread)
+    from schema_sanitizer.remote_impl import async_bridge
 
     async def run() -> None:
         """Exercise the synchronous bridge from an active event loop."""
@@ -191,7 +187,7 @@ def test_run_sync_single_refuses_to_create_async_helper_thread(
             return 1
 
         with pytest.raises(RuntimeError, match="helper host thread"):
-            transport.run_sync(value(), threading_mode="single")
+            async_bridge.run_sync(value(), threading_mode="single")
 
     asyncio.run(run())
 
@@ -200,40 +196,47 @@ def test_remote_prefetch_single_stages_inline_without_executor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The remote source-plan prefetcher owns no pool in single mode."""
+    from schema_sanitizer.api_impl.input.directory_preparation import (
+        RemoteNativeDirectorySourceManifest,
+    )
     from schema_sanitizer.api_impl.source_plan import remote
+    from schema_sanitizer.sources import RemoteFile
 
     class ForbiddenCoordinator:
         """Fail if the multi-only remote coordinator is constructed."""
 
         def __init__(self, *_args: object, **_kwargs: object) -> None:
-            """Reject construction of the forbidden coordinator."""
+            """Initialize the forbidden coordinator test double."""
             raise AssertionError("single mode constructed RemoteIoCoordinator")
 
     staged = SimpleNamespace(close=lambda: None)
 
-    class Manifest:
+    class Manifest(RemoteNativeDirectorySourceManifest):
         """Provide one inline-stage manifest for the prefetch test."""
 
-        files = ("a",)
-        chunk_size = 1
-        memory_limit_bytes = 512 * 1024 * 1024
-        threading_mode = "single"
-
         def stage_chunk(self, start: int) -> object:
-            """Return the one staged test chunk."""
+            """Stage one chunk through the controlled session."""
             assert start == 0
             return staged
 
     monkeypatch.setattr(remote, "RemoteIoCoordinator", ForbiddenCoordinator)
-    iterator = remote.RemoteChunkPrefetchIterator(Manifest())
+    iterator = remote.RemoteChunkPrefetchIterator(
+        Manifest(
+            [RemoteFile("s3://bucket/a.csv", "a.csv", 1)],
+            "csv",
+            memory_limit_bytes=512 * 1024 * 1024,
+            chunk_size=1,
+        )
+    )
     assert next(iterator) is staged
     iterator.close()
     assert iterator._coordinator is None
 
 
-def test_single_and_multi_produce_same_logical_jsonl_output(tmp_path: Path) -> None:
+def test_single_and_multi_produce_same_logical_jsonl_output(
+    tmp_path: Path, require_native: None
+) -> None:
     """The initial executors preserve ordered logical output and registry state."""
-    require_native()
     source = tmp_path / "input.jsonl"
     source.write_text(
         '{"id":1,"nested":{"name":"a"}}\n{"id":2,"nested":{"name":"b"}}\n',
@@ -260,9 +263,9 @@ def test_single_and_multi_produce_same_logical_jsonl_output(tmp_path: Path) -> N
 
 def test_single_local_conversion_does_not_add_host_threads_or_processes(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """A local single run preserves its thread baseline and creates no child process."""
-    require_native()
     proc_root = Path("/proc")
     if not sys.platform.startswith("linux") or not proc_root.is_dir():
         pytest.skip("host thread/process accounting requires Linux /proc")
@@ -305,12 +308,12 @@ for index in range(2):
         text=True,
     )
     child_proc = proc_root / str(process.pid)
-    deadline = time.monotonic() + 10.0
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
         time.sleep(0.001)
     if not ready.exists():
         process.terminate()
-        stdout, stderr = process.communicate(timeout=5)
+        stdout, stderr = process.communicate(timeout=SCHEDULER_TIMEOUT_SECONDS)
         pytest.fail(f"child did not initialize: stdout={stdout!r} stderr={stderr!r}")
 
     baseline_threads = len(tuple((child_proc / "task").iterdir()))

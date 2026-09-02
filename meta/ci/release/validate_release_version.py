@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate the package version and manual PyPI release controls."""
+"""Validate the package version and manual PyPI release controls.
+
+It validates package and requested versions, reads manual-workflow inputs, and requires
+explicit publication confirmation.
+"""
 
 from __future__ import annotations
 
@@ -10,11 +14,22 @@ from pathlib import Path
 
 VERSION_PATTERN = re.compile(r"\d+\.\d+(?:\.\d+)?(?:\.post\d+)?")
 PUBLISH_CONFIRMATION = "publish schema-sanitizer"
+_MAX_EVENT_BYTES = 1024 * 1024
+
+
+def _read_regular_text(path: Path, description: str, *, max_bytes: int) -> str:
+    """Read one bounded regular non-symlink text input."""
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"{description} must be a regular file: {path}")
+    payload = path.read_bytes()
+    if len(payload) > max_bytes:
+        raise ValueError(f"{description} exceeds the byte limit: {path}")
+    return payload.decode("utf-8")
 
 
 def validate_release_version(version_file: Path, release_version: str = "") -> str:
     """Return the validated version or raise ``ValueError``."""
-    version = version_file.read_text(encoding="utf-8").strip()
+    version = _read_regular_text(version_file, "version source", max_bytes=128).strip()
     if VERSION_PATTERN.fullmatch(version) is None:
         raise ValueError(f"Invalid {version_file}: {version}")
 
@@ -27,7 +42,9 @@ def validate_release_version(version_file: Path, release_version: str = "") -> s
 
 def workflow_inputs_from_event(event_file: Path) -> dict[str, object]:
     """Read manual workflow inputs from a GitHub event payload."""
-    payload = json.loads(event_file.read_text(encoding="utf-8"))
+    payload = json.loads(
+        _read_regular_text(event_file, "workflow event", max_bytes=_MAX_EVENT_BYTES)
+    )
     inputs = payload.get("inputs", {})
     return inputs if isinstance(inputs, dict) else {}
 

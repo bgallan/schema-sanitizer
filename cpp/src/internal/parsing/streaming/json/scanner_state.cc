@@ -1,4 +1,6 @@
 // Owns lifecycle and chunk state for incremental JSON scanning.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/streaming/json/scanner.hh"
 

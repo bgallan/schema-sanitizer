@@ -1,4 +1,6 @@
-// Dispatches built-in frontend names to frontend factories.
+// Dispatches stable built-in format names to native frontend factories.
+// The registry keeps CSV, JSON, JSONL, array, and XML construction behind one
+// ownership-preserving entry point for ingestion orchestration.
 
 #include "sanitize/registry/registry.hh"
 

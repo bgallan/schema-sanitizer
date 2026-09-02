@@ -1,4 +1,7 @@
-"""Cross-language operation-wide resident-memory ledger regressions."""
+"""Validates one atomic cross-language operation-memory ledger for Python reservations,
+directory metadata, native reader work, high-level text streams, remote control bodies,
+and transfer chunks. Charges precede blocking reads and remain held until the owning
+stream or body closes, while peak usage survives ledger closure."""
 
 from __future__ import annotations
 
@@ -7,6 +10,7 @@ from pathlib import Path
 from threading import Barrier, Event, Lock
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, wait_event_or_fail
 
 from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
 from schema_sanitizer.core_impl.execution import ExecutionContext as NativeExecutionContext
@@ -50,18 +54,18 @@ def test_python_ledger_reservations_are_atomic_and_preserve_peak_after_close() -
                 all_attempted.set()
         if lease is None:
             return False
-        release.wait(timeout=10)
+        wait_event_or_fail(release)
         lease.close()
         return True
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         futures = [pool.submit(reserve_one) for _ in range(16)]
-        assert all_attempted.wait(timeout=10)
+        assert all_attempted.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
         snapshot = ledger.snapshot()
         assert snapshot.reserved_bytes == limit
         assert snapshot.peak_reserved_bytes == limit
         release.set()
-        results = [future.result(timeout=10) for future in futures]
+        results = [future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) for future in futures]
 
     assert sum(results) == limit // unit
     assert ledger.snapshot().reserved_bytes == 0
@@ -124,10 +128,9 @@ def test_high_level_text_input_keeps_its_reservation_until_stream_close(
 ) -> None:
     """Materialized text and native stream allocations share one output lifetime."""
     from schema_sanitizer.api_impl import execution_context as module
-    from schema_sanitizer.api_impl import input_lifetime
 
     created: list[OperationExecutionContext] = []
-    real_factory = input_lifetime.OperationExecutionContext
+    real_factory = module.OperationExecutionContext
 
     def create_context(**kwargs):
         """Capture the operation context created by the public execution path."""
@@ -135,7 +138,7 @@ def test_high_level_text_input_keeps_its_reservation_until_stream_close(
         created.append(context)
         return context
 
-    monkeypatch.setattr(input_lifetime, "OperationExecutionContext", create_context)
+    monkeypatch.setattr(module, "OperationExecutionContext", create_context)
     payload = "a,b\n" + "1,2\n" * 2000
     output = module.ExecutionContext().to_sink(
         payload,
@@ -168,18 +171,18 @@ def test_remote_control_body_retains_shared_ledger_charge_until_released(
         status = 200
 
         def read(self, size: int = -1) -> bytes:
-            """Implement the minimal response protocol required by the test."""
+            """Read bounded data from the response test double."""
             return b'{"value":1}' if size < 0 else b'{"value":1}'[:size]
 
         def getheaders(self):
-            """Implement the minimal response protocol required by the test."""
+            """Return the controlled HTTP response headers."""
             return []
 
     class Connection:
-        """Provide a focused helper for the surrounding regression."""
+        """Expose the closeable connection paired with the bounded response."""
 
         def close(self) -> None:
-            """Close the helper resource exactly once."""
+            """Close the resources owned by the connection test double."""
             pass
 
     monkeypatch.setattr(
@@ -233,20 +236,20 @@ def test_remote_transfer_reserves_chunk_before_blocking_read(
         calls = 0
 
         def getheader(self, _name: str):
-            """Implement the minimal response protocol required by the test."""
+            """Return the requested controlled HTTP response header."""
             return None
 
         def read(self, _size: int = -1) -> bytes:
-            """Implement the minimal response protocol required by the test."""
+            """Read bounded data from the response test double."""
             observed.append(operation.memory_ledger.snapshot().reserved_bytes)
             self.calls += 1
             return b"data" if self.calls == 1 else b""
 
     class Connection:
-        """Provide a focused helper for the surrounding regression."""
+        """Expose the closeable connection paired with the staged response."""
 
         def close(self) -> None:
-            """Close the helper resource exactly once."""
+            """Close the resources owned by the connection test double."""
             pass
 
     monkeypatch.setattr(

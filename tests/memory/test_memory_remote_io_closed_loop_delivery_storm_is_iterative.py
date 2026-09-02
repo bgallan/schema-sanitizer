@@ -1,4 +1,8 @@
-"""Regression coverage for memory remote io closed loop delivery storm is iterative."""
+"""Exercises iterative closed-loop delivery plus asynchronous retry accounting,
+cancellation-graph walking, registry compaction, prefetch cursor or lease cleanup,
+native option caches, inline storage release, and pressure reset after fork. Delivery
+and cancellation never recurse, successful work is not replayed after telemetry failure,
+and consumed or pending chunks close without losing cursor state."""
 
 from __future__ import annotations
 
@@ -7,10 +11,16 @@ import os
 import select
 from collections import OrderedDict, deque
 from concurrent.futures import Future
+from threading import Condition, RLock
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    run_isolated_python_probe,
+    wait_for_process_exit,
+)
 
 _NATIVE_STUB_MODULES = (
     "schema_sanitizer.core_impl.native_options",
@@ -27,19 +37,14 @@ def test_remote_io_closed_loop_delivery_storm_is_iterative() -> None:
 
     class ClosedLoop:
         def call_soon_threadsafe(self, *_args: object, **_kwargs: object) -> None:
+            """Reject scheduling through the forbidden thread-safe callback."""
             raise RuntimeError("event loop is closed")
 
     governor = module.RemoteIoPermitGovernor(capacity=1, max_waiters=1200)
     with governor._lock:
         for index in range(1100):
-            governor._waiters.append(
-                module._Waiter(
-                    ClosedLoop(),
-                    SimpleNamespace(),
-                    1,
-                    "label",
-                    f"operation-{index}",
-                )
+            governor._enqueue_waiter_locked(
+                module._Waiter(ClosedLoop(), SimpleNamespace(), 1, "label", f"operation-{index}")
             )
         deliveries = governor._grant_ready_locked()
 
@@ -61,24 +66,30 @@ def test_retry_async_neutrally_releases_throttle_on_base_exception(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
             self.failures = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
         def failure(self, _exc: BaseException) -> None:
+            """Count a throttle failure notification."""
             self.failures += 1
 
         def success(self) -> None:
+            """Reject an unexpected success-path invocation."""
             raise AssertionError("operation did not succeed")
 
     lease = Lease()
 
     async def acquire(_key: str) -> Lease:
+        """Return the controlled permit acquisition result."""
         return lease
 
     async def operation() -> None:
+        """Raise the deliberate failure for the operation path."""
         raise failure()
 
     monkeypatch.setattr(provider_throttle, "acquire_provider_request", acquire)
@@ -105,23 +116,29 @@ def test_retry_async_does_not_repeat_success_when_success_accounting_fails(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.failures = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             raise AssertionError("successful operations are not neutrally released")
 
         def failure(self, _exc: BaseException) -> None:
+            """Count a throttle failure notification."""
             self.failures += 1
 
         def success(self) -> None:
+            """Reject an unexpected success-path invocation."""
             raise RuntimeError("success telemetry failed")
 
     lease = Lease()
 
     async def acquire(_key: str) -> Lease:
+        """Return the controlled permit acquisition result."""
         return lease
 
     async def operation() -> str:
+        """Run the controlled operation under test."""
         nonlocal calls
         calls += 1
         return "committed"
@@ -149,9 +166,11 @@ def test_bounded_wait_checks_external_cancellation_once() -> None:
 
     class EventProbe:
         def __init__(self) -> None:
+            """Initialize the event probe test double."""
             self.calls = 0
 
         def is_set(self) -> bool:
+            """Count the cancellation probe and report that cancellation is unset."""
             self.calls += 1
             return False
 
@@ -195,6 +214,7 @@ def test_operation_registry_compacts_attacker_sized_ids() -> None:
 
     class Source:
         def snapshot(self) -> dict[str, object]:
+            """Return a snapshot of the state recorded by the test double."""
             return {"state": "running"}
 
     source = Source()
@@ -211,7 +231,9 @@ def test_operation_registry_compacts_attacker_sized_ids() -> None:
 
 
 def _bare_remote_prefetch_iterator(module: Any, manifest: Any) -> Any:
+    """Construct a remote prefetch iterator without starting background work."""
     iterator = object.__new__(module.RemoteChunkPrefetchIterator)
+    iterator._pid = os.getpid()
     iterator._manifest = manifest
     iterator._policy = SimpleNamespace(async_concurrency=1)
     iterator._prefetch_chunks = 1
@@ -220,24 +242,41 @@ def _bare_remote_prefetch_iterator(module: Any, manifest: Any) -> Any:
     iterator._owns_coordinator = False
     iterator._download_session = None
     iterator._futures = deque()
+    iterator._failed_storage_leases = deque()
+    iterator._callbackless_storage_futures = {}
     iterator._next_start = 0
+    iterator._close_lock = RLock()
+    iterator._close_condition = Condition(iterator._close_lock)
+    iterator._close_in_progress = False
+    iterator._cleanup_callbacks_inflight = 0
+    iterator._admissions_inflight = 0
+    iterator._consumers_inflight = 0
+    iterator._protocol_violations = 0
+    iterator._starting = False
+    iterator._fill_in_progress = False
+    iterator._close_started = False
+    iterator._session_closer = None
     iterator._closed = False
     iterator._started = True
+    iterator._remote_timeout_seconds = 0.1
+    iterator._finalizer_ticket = None
+    iterator._finalizer_capsule = None
     return iterator
 
 
 def test_remote_prefetch_next_chunk_failure_releases_lease_and_preserves_cursor(
     monkeypatch: pytest.MonkeyPatch,
-    native_stub: None,
 ) -> None:
     """Planning failure cannot leak disk capacity or skip a chunk on retry."""
     from schema_sanitizer.api_impl.source_plan import remote as module
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     lease = Lease()
@@ -247,7 +286,7 @@ def test_remote_prefetch_next_chunk_failure_releases_lease_and_preserves_cursor(
         next_chunk_start=lambda _start: (_ for _ in ()).throw(RuntimeError("planning failed")),
     )
     iterator = _bare_remote_prefetch_iterator(module, manifest)
-    monkeypatch.setattr(module, "adaptive_concurrency_target", lambda *_a, **_k: 1)
+    monkeypatch.setattr(module, "_adaptive_parallel_slots", lambda *_a, **_k: 1)
 
     with pytest.raises(RuntimeError, match="planning failed"):
         iterator._fill_prefetch_window()
@@ -258,14 +297,18 @@ def test_remote_prefetch_next_chunk_failure_releases_lease_and_preserves_cursor(
 
 def test_remote_prefetch_submission_failure_preserves_cursor(
     monkeypatch: pytest.MonkeyPatch,
-    native_stub: None,
 ) -> None:
     """Admission overload cannot advance the manifest before submission commits."""
     from schema_sanitizer.api_impl.source_plan import remote as module
 
-    manifest = SimpleNamespace(files=(object(),), chunk_size=1)
+    manifest = SimpleNamespace(
+        files=(object(),),
+        chunk_size=1,
+        next_chunk_start=lambda start: start + 1,
+    )
     iterator = _bare_remote_prefetch_iterator(module, manifest)
-    monkeypatch.setattr(module, "adaptive_concurrency_target", lambda *_a, **_k: 1)
+    iterator._coordinator = None
+    monkeypatch.setattr(module, "_adaptive_parallel_slots", lambda *_a, **_k: 1)
     monkeypatch.setattr(
         iterator,
         "_submit_stage",
@@ -278,12 +321,10 @@ def test_remote_prefetch_submission_failure_preserves_cursor(
     assert not iterator._futures
 
 
-def test_remote_prefetch_cancelled_drain_still_exits_shared_session(
-    native_stub: None,
-) -> None:
+def test_remote_prefetch_cancelled_drain_still_exits_shared_session() -> None:
     """Cancelling the drain task must execute the separate session's __aexit__."""
     from schema_sanitizer.api_impl.source_plan import remote as module
-    from schema_sanitizer.remote_impl.io_coordinator import StagedResultOwnership
+    from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
 
     captured: list[Any] = []
 
@@ -291,22 +332,24 @@ def test_remote_prefetch_cancelled_drain_still_exits_shared_session(
         shutdown_timeout_seconds = 0.001
 
         def submit(self, operation: Any, **_kwargs: object) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             captured.append(operation)
             return Future()
 
     class Session:
         def __init__(self) -> None:
+            """Initialize the session test double."""
             self.exits = 0
 
         async def __aexit__(self, *_exc: object) -> None:
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
             self.exits += 1
 
     running: Future[Any] = Future()
     running.set_running_or_notify_cancel()
     setattr(running, "_schema_sanitizer_staged_ownership", StagedResultOwnership())
     session = Session()
-    iterator = object.__new__(module.RemoteChunkPrefetchIterator)
-    iterator._closed = False
+    iterator = _bare_remote_prefetch_iterator(module, SimpleNamespace(files=()))
     iterator._futures = deque([running])
     iterator._coordinator = Coordinator()
     iterator._owns_coordinator = False
@@ -316,6 +359,7 @@ def test_remote_prefetch_cancelled_drain_still_exits_shared_session(
     operation = captured[0]
 
     async def exercise() -> None:
+        """Cancel prefetch during drain and verify shared-session cleanup."""
         task = asyncio.create_task(operation(None))
         await asyncio.sleep(0)
         task.cancel()
@@ -335,6 +379,7 @@ def test_native_options_cache_reset_discards_inherited_capsules(
     old_lock = module._PREPARED_OPTIONS_CACHE_LOCK
     module._PREPARED_OPTIONS_CACHE = OrderedDict([(b"one", object())])
     module._PREPARED_OPTIONS_CACHE_BYTES = 3
+    module._prepare_options_cache_for_fork()
     module._reset_prepared_options_cache_after_fork()
 
     assert module._PREPARED_OPTIONS_CACHE == OrderedDict()
@@ -342,21 +387,22 @@ def test_native_options_cache_reset_discards_inherited_capsules(
     assert module._PREPARED_OPTIONS_CACHE_LOCK is not old_lock
 
 
-def test_remote_inline_stage_base_exception_releases_storage_lease(
-    native_stub: None,
-) -> None:
+def test_remote_inline_stage_base_exception_releases_storage_lease() -> None:
     """Inline control-flow failures must return their pre-acquired disk reservation."""
     from schema_sanitizer.api_impl.source_plan import remote as module
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     class Manifest:
         def stage_chunk(self, _start: int) -> object:
+            """Stage one chunk through the controlled session."""
             raise KeyboardInterrupt("inline stage interrupted")
 
     lease = Lease()
@@ -370,11 +416,11 @@ def test_remote_inline_stage_base_exception_releases_storage_lease(
     assert lease.releases == 1
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
-def test_native_options_actual_fork_replaces_inherited_locked_cache(
-    native_stub: None,
-) -> None:
-    """The registered at-fork hook must replace a lock held by another thread."""
+def _probe_native_options_actual_fork() -> None:
+    """Exercise the native-options at-fork hook in a disposable process."""
+    from schema_sanitizer.core_impl import native_runtime
+
+    native_runtime.native_core = SimpleNamespace(options_catalog=lambda: ())
     from schema_sanitizer.core_impl import native_options as module
 
     module._PREPARED_OPTIONS_CACHE = OrderedDict([(b"inherited", object())])
@@ -403,29 +449,34 @@ def test_native_options_actual_fork_replaces_inherited_locked_cache(
     os.close(write_fd)
     module._PREPARED_OPTIONS_CACHE_LOCK.release()
     try:
-        readable, _, _ = select.select([read_fd], [], [], 2.0)
+        readable, _, _ = select.select([read_fd], [], [], SCHEDULER_TIMEOUT_SECONDS)
         assert readable, "fork child did not report cache state"
         payload = os.read(read_fd, 128).decode("ascii")
     finally:
         os.close(read_fd)
-        waited_pid, status = os.waitpid(pid, 0)
-    assert waited_pid == pid
+        status = wait_for_process_exit(pid)
     assert os.waitstatus_to_exitcode(status) == 0
     assert payload == "0:0:1"
 
 
-def test_remote_prefetch_refill_failure_closes_consumed_chunk(
-    native_stub: None,
-) -> None:
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_native_options_actual_fork_replaces_inherited_locked_cache() -> None:
+    """The registered at-fork hook must replace a lock held by another thread."""
+    run_isolated_python_probe(__file__, "_probe_native_options_actual_fork")
+
+
+def test_remote_prefetch_refill_failure_closes_consumed_chunk() -> None:
     """A chunk not yet returned to the caller must retain a cleanup owner."""
     from schema_sanitizer.api_impl.source_plan import remote as module
-    from schema_sanitizer.remote_impl.io_coordinator import StagedResultOwnership
+    from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
 
     class Staged:
         def __init__(self) -> None:
+            """Initialize the staged test double."""
             self.closes = 0
 
         def close(self) -> None:
+            """Close the resources owned by the staged test double."""
             self.closes += 1
 
     staged = Staged()
@@ -434,16 +485,14 @@ def test_remote_prefetch_refill_failure_closes_consumed_chunk(
     future.set_result(ownership.publish(staged))
     setattr(future, "_schema_sanitizer_staged_ownership", ownership)
 
-    iterator = object.__new__(module.RemoteChunkPrefetchIterator)
-    iterator._started = True
-    iterator._closed = False
+    iterator = _bare_remote_prefetch_iterator(module, SimpleNamespace(files=()))
     iterator._futures = deque([future])
-    iterator._remote_timeout_seconds = 0.1
     iterator._ensure_started = lambda: None
     iterator._fill_prefetch_window = lambda: (_ for _ in ()).throw(RuntimeError("refill failed"))
     close_calls = 0
 
     def close() -> None:
+        """Close the resource at the synchronization point under test."""
         nonlocal close_calls
         close_calls += 1
         iterator._closed = True
@@ -455,26 +504,22 @@ def test_remote_prefetch_refill_failure_closes_consumed_chunk(
     assert close_calls == 1
 
 
-def test_remote_prefetch_unexpected_stop_iteration_still_closes(
-    native_stub: None,
-) -> None:
+def test_remote_prefetch_unexpected_stop_iteration_still_closes() -> None:
     """A provider-originated StopIteration cannot bypass iterator cleanup."""
     from schema_sanitizer.api_impl.source_plan import remote as module
-    from schema_sanitizer.remote_impl.io_coordinator import StagedResultOwnership
+    from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
 
     future: Future[Any] = Future()
     future.set_exception(StopIteration("provider stopped"))
     setattr(future, "_schema_sanitizer_staged_ownership", StagedResultOwnership())
 
-    iterator = object.__new__(module.RemoteChunkPrefetchIterator)
-    iterator._started = True
-    iterator._closed = False
+    iterator = _bare_remote_prefetch_iterator(module, SimpleNamespace(files=()))
     iterator._futures = deque([future])
-    iterator._remote_timeout_seconds = 0.1
     iterator._ensure_started = lambda: None
     close_calls = 0
 
     def close() -> None:
+        """Close the resource at the synchronization point under test."""
         nonlocal close_calls
         close_calls += 1
         iterator._closed = True
@@ -485,9 +530,8 @@ def test_remote_prefetch_unexpected_stop_iteration_still_closes(
     assert close_calls == 1
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
-def test_system_pressure_actual_fork_replaces_lock_and_hysteresis() -> None:
-    """A fork child must not inherit a locked sampler or parent pressure history."""
+def _probe_system_pressure_actual_fork() -> None:
+    """Exercise the pressure sampler at-fork hook in a disposable process."""
     from schema_sanitizer.core_impl import system_pressure as module
 
     previous = (
@@ -529,12 +573,12 @@ def test_system_pressure_actual_fork_replaces_lock_and_hysteresis() -> None:
     os.close(write_fd)
     module._lock.release()
     try:
-        readable, _, _ = select.select([read_fd], [], [], 2.0)
+        readable, _, _ = select.select([read_fd], [], [], SCHEDULER_TIMEOUT_SECONDS)
         assert readable, "fork child did not report pressure state"
         payload = os.read(read_fd, 256).decode("ascii")
     finally:
         os.close(read_fd)
-        waited_pid, status = os.waitpid(pid, 0)
+        status = wait_for_process_exit(pid)
         with module._lock:
             (
                 module._cached_at,
@@ -543,6 +587,11 @@ def test_system_pressure_actual_fork_replaces_lock_and_hysteresis() -> None:
                 module._last_oom,
                 module._last_scale_change,
             ) = previous
-    assert waited_pid == pid
     assert os.waitstatus_to_exitcode(status) == 0
     assert payload == "1.0:0.0:0:0:0.0:1"
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_system_pressure_actual_fork_replaces_lock_and_hysteresis() -> None:
+    """A fork child must not inherit a locked sampler or parent pressure history."""
+    run_isolated_python_probe(__file__, "_probe_system_pressure_actual_fork")

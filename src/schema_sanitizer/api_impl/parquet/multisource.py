@@ -1,4 +1,8 @@
-"""Native lazy multi-source execution for Parquet directory inputs."""
+"""Native lazy multi-source execution for Parquet directory inputs.
+
+It turns directory manifests into lazily opened per-file Arrow sources while preserving
+registry state, source spans, and close ownership.
+"""
 
 from __future__ import annotations
 
@@ -13,8 +17,6 @@ from .arrow_sources import (
     ParquetArrowSourceChunkProvider,
     parquet_arrow_sources_or_none,
 )
-
-_LAST_PARQUET_MULTISOURCE_ROUTE = "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,17 +39,6 @@ def parquet_multisource_manifest_from_data(data: Any) -> ParquetDirectorySourceM
     """Return an attached native Parquet multi-source manifest, if present."""
     manifest = getattr(data, "native_parquet_multisource_manifest", None)
     return manifest if isinstance(manifest, ParquetDirectorySourceManifest) else None
-
-
-def last_parquet_multisource_route() -> str:
-    """Return the route used by the most recent Parquet multi-source conversion."""
-    return _LAST_PARQUET_MULTISOURCE_ROUTE
-
-
-def _record_parquet_multisource_route(route: str) -> None:
-    """Record the most recently selected Parquet multi-source route."""
-    global _LAST_PARQUET_MULTISOURCE_ROUTE
-    _LAST_PARQUET_MULTISOURCE_ROUTE = route
 
 
 def parquet_arrow_source_inputs(
@@ -112,7 +103,6 @@ def _auto_registry_provider_sink(
             call_options,
             **sink_options,
         )
-        _record_parquet_multisource_route("native_arrow_source_chunk_provider_auto_registry")
         return raw
     except Exception:
         probe_provider.close()

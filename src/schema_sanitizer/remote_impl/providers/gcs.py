@@ -1,4 +1,8 @@
-"""Google Cloud Storage URI, discovery, and object operations."""
+"""Google Cloud Storage URI, discovery, and object operations.
+
+It handles authentication, JSON API listing and metadata, bounded download, and
+resumable publication for GCS objects.
+"""
 
 from __future__ import annotations
 
@@ -9,17 +13,20 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse
 
-from ...core_impl.async_scheduler import drain_ordered_iterable_results, retry_async
+from ...core_impl.async_scheduler import (
+    AsyncResultMemoryContract,
+    drain_ordered_iterable_results,
+    retry_async,
+)
 from ...core_impl.execution_policy import execution_policy
 from ...core_impl.governed_sort import governed_sort
 from ...core_impl.memory_budget import memory_budget
 from ...core_impl.temporary_storage import StreamingStorageReservation
-from ...core_impl.uris import content_type_for_uri, name_matches, normalize_extensions
+from ...core_impl.uris import content_type_for_uri, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
     current_directory_metadata_budget,
-    split_parent_child,
 )
 from ...sources.models import RemoteFile
 from ..gcs_resumable import upload_gcs_resumable_file
@@ -33,6 +40,12 @@ from ..transport import (
     write_response_to_file,
 )
 from ..upload_policy import remote_upload_policy
+from . import (
+    direct_child_items,
+    next_page_token,
+    requested_child_items,
+    requested_directory_groups,
+)
 from .gcs_objects import (
     GcsRef as GcsRef,
 )
@@ -43,8 +56,6 @@ from .gcs_objects import (
     remote_file_sort_key,
 )
 
-_remote_file_from_metadata = remote_file_from_metadata
-
 _GCS_JSON_API_ENDPOINT = "https://storage.googleapis.com"
 _GCS_READ_WRITE_SCOPE = "https://www.googleapis.com/auth/devstorage.read_write"
 _GCS_OBJECT_FIELDS = "name,size,updated,timeCreated,generation,metageneration,etag,crc32c"
@@ -54,7 +65,7 @@ class _TransientGcsError(RuntimeError):
     """A GCS response that is safe to retry with backoff."""
 
     def __init__(self, status: int, message: str, *, headers: Any = None) -> None:
-        """Initialize this helper."""
+        """Initialize a transient GCS error with optional retry guidance."""
         super().__init__(message)
         self.status, self.headers = status, headers
 
@@ -133,6 +144,12 @@ def media_url(uri: str, *, generation: str | None = None) -> str:
         params["generation"] = generation
         params["ifGenerationMatch"] = generation
     return f"{base}?{urlencode(params)}"
+
+
+def _directory_location(uri: str) -> tuple[tuple[str], str]:
+    """Return the stable grouping location and object name for a GCS URI."""
+    ref = parse_uri(uri)
+    return (ref.bucket,), ref.object_name
 
 
 async def download_bytes(session: Any, file: RemoteFile, *, maximum_bytes: int) -> bytes:
@@ -375,13 +392,12 @@ async def list_directory(
                 should_retry=_should_retry_gcs,
                 throttle_key="gcs",
             )
-            for item in payload.get("items", ()):
-                name = item.get("name")
-                if not isinstance(name, str):
-                    continue
-                relative = name[len(prefix) :] if name.startswith(prefix) else name
-                if not relative or "/" in relative or not name_matches(relative, suffixes):
-                    continue
+            for item, relative in direct_child_items(
+                payload.get("items", ()),
+                prefix,
+                suffixes,
+                "name",
+            ):
                 remote_file = remote_file_from_metadata(
                     ref.bucket,
                     item,
@@ -389,8 +405,8 @@ async def list_directory(
                 )
                 metadata_budget.charge_file(remote_file, associations=4)
                 files.append(remote_file)
-            page_token = payload.get("nextPageToken")
-            if not isinstance(page_token, str) or not page_token:
+            page_token = next_page_token(payload, "nextPageToken")
+            if page_token is None:
                 break
     governed_sort(files, key=remote_file_sort_key, stage="remote_discovery_sort")
     return files
@@ -410,18 +426,11 @@ async def directories_containing_files(
         uris,
         metadata_budget=metadata_budget,
     )
-    groups: dict[tuple[str, str], dict[str, list[str]]] = {}
-    for uri in uris:
-        ref = parse_uri(uri)
-        parsed = split_parent_child(ref.object_name)
-        if parsed is None:
-            continue
-        parent_prefix, child = parsed
-        bucket = ref.bucket
-        # pass63 proof anchor: metadata_budget.charge_group_associations()
-        discovery.publish_group_association(
-            lambda: groups.setdefault((bucket, parent_prefix), {}).setdefault(child, []).append(uri)
-        )
+    groups = requested_directory_groups(
+        uris,
+        discovery,
+        _directory_location,
+    )
 
     if not groups:
         return discovery.finish()
@@ -475,15 +484,13 @@ async def directories_containing_files(
                     should_retry=_should_retry_gcs,
                     throttle_key="gcs",
                 )
-                for item in payload.get("items", ()):
-                    name = item.get("name")
-                    if not isinstance(name, str) or not name.startswith(prefix):
-                        continue
-                    relative = name[len(prefix) :]
-                    child, separator, filename = relative.partition("/")
-                    child_uris = children.get(child) if separator else None
-                    if not child_uris or "/" in filename or not name_matches(filename, accepted):
-                        continue
+                for item, child_uris, filename in requested_child_items(
+                    payload.get("items", ()),
+                    prefix,
+                    children,
+                    accepted,
+                    "name",
+                ):
                     remote_file = remote_file_from_metadata(
                         bucket,
                         item,
@@ -491,8 +498,8 @@ async def directories_containing_files(
                     )
                     discovery.add(child_uris, remote_file)
 
-                page_token = payload.get("nextPageToken")
-                if not isinstance(page_token, str) or not page_token:
+                page_token = next_page_token(payload, "nextPageToken")
+                if page_token is None:
                     break
 
         async def scan_key(key: tuple[str, str]) -> None:
@@ -504,7 +511,7 @@ async def directories_containing_files(
             groups,
             scan_key,
             window=concurrency,
-            expected_retained_bytes=64,
+            memory_contract=AsyncResultMemoryContract(preflight_bytes=64),
         )
 
     return discovery.finish()

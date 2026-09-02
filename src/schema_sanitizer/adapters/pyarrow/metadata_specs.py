@@ -1,4 +1,8 @@
-"""Validation and schema helpers for PyArrow metadata columns."""
+"""Validation and schema helpers for PyArrow metadata columns.
+
+It validates metadata names and values against the source schema, rejects collisions,
+and constructs the resulting Arrow schema.
+"""
 
 from __future__ import annotations
 

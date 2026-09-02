@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Reproducible single-vs-multi benchmarks for inference, output, and pipelines."""
+"""Reproducible single-vs-multi benchmarks for inference, output, and pipelines.
+
+It creates fixtures, normalizes generated values, computes logical digests, and times
+inference, output, and pipeline cases.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +26,9 @@ import schema_sanitizer as ss
 from benchmarks.concurrency.threading.dimensions import (
     apply_cpu_quota,
     benchmark_argument_error,
+    benchmark_dimensions,
     nested_value,
+    validate_benchmark_case_results,
     write_pipeline_source,
 )
 from schema_sanitizer.adapters.pyarrow.csv_sink import write_csv_stream
@@ -85,7 +91,8 @@ def _logical_digest(path: Path) -> str:
     elif path.suffix == ".parquet":
         import pyarrow.parquet as pq
 
-        rows = pq.read_table(path).to_pylist()
+        with pq.ParquetFile(path) as parquet_file:
+            rows = parquet_file.read().to_pylist()
     else:
         raise ValueError(f"unsupported logical benchmark output: {path.suffix}")
 
@@ -110,29 +117,33 @@ def _time_case(
     verification: Callable[[Path], str] | None,
     equivalence_kind: str,
 ) -> dict[str, Any]:
-    """Measure both modes and verify the requested output equivalence."""
+    """Measure both modes and verify every corresponding output iteration."""
     measurements: dict[str, list[float]] = {"single": [], "multi": []}
-    digests: dict[str, str] = {}
+    digests: dict[str, list[str]] = {"single": [], "multi": []}
     sizes: dict[str, int] = {}
     for mode in ("single", "multi"):
         for iteration in range(warmups + repeats):
             path = directory / f"{name}-{mode}-{iteration}.{suffix}"
-            start = time.perf_counter()
-            run(mode, path)
-            elapsed = time.perf_counter() - start
-            if iteration >= warmups:
-                measurements[mode].append(elapsed)
-            if iteration == warmups + repeats - 1:
-                digests[mode] = verification(path) if verification is not None else ""
-                sizes[mode] = path.stat().st_size
-            path.unlink()
-            gc.collect()
+            try:
+                start = time.perf_counter()
+                run(mode, path)
+                elapsed = time.perf_counter() - start
+                if iteration >= warmups:
+                    measurements[mode].append(elapsed)
+                digest = verification(path) if verification is not None else ""
+                digests[mode].append(digest)
+                if iteration == warmups + repeats - 1:
+                    sizes[mode] = path.stat().st_size
+            finally:
+                path.unlink(missing_ok=True)
+                gc.collect()
+            if mode == "multi" and digests["single"][iteration] != digest:
+                raise RuntimeError(
+                    f"{name}: single and multi output differ at iteration {iteration} "
+                    f"under {equivalence_kind} verification"
+                )
 
-    equivalent = verification is None or digests["single"] == digests["multi"]
-    if not equivalent:
-        raise RuntimeError(
-            f"{name}: single and multi output differ under {equivalence_kind} verification"
-        )
+    equivalent = True
     single = statistics.median(measurements["single"])
     multi = statistics.median(measurements["multi"])
     return {
@@ -156,9 +167,9 @@ def _time_probe_case(
     warmups: int,
     repeats: int,
 ) -> dict[str, Any]:
-    """Measure isolated native inference and require exact probe equality."""
+    """Measure isolated native inference and verify every probe iteration."""
     measurements: dict[str, list[float]] = {"single": [], "multi": []}
-    digests: dict[str, str] = {}
+    digests: dict[str, list[str]] = {"single": [], "multi": []}
     for mode in ("single", "multi"):
         options = normalize_call_options(
             multi_threading=mode == "multi", memory_limit_bytes=memory_limit
@@ -169,17 +180,19 @@ def _time_probe_case(
             elapsed = time.perf_counter() - start
             if iteration >= warmups:
                 measurements[mode].append(elapsed)
-            if iteration == warmups + repeats - 1:
-                digest = hashlib.sha256()
-                digest.update(result.schema_payload)
-                digest.update(result.diagnostics.to_json().encode("utf-8"))
-                digests[mode] = digest.hexdigest()
+            digest = hashlib.sha256()
+            digest.update(result.schema_payload)
+            digest.update(result.diagnostics.to_json().encode("utf-8"))
+            digest_value = digest.hexdigest()
+            digests[mode].append(digest_value)
             del result
             gc.collect()
+            if mode == "multi" and digests["single"][iteration] != digest_value:
+                raise RuntimeError(
+                    f"{name}: single and multi schema probes differ at iteration {iteration}"
+                )
 
-    equivalent = digests["single"] == digests["multi"]
-    if not equivalent:
-        raise RuntimeError(f"{name}: single and multi schema probes differ")
+    equivalent = True
     single = statistics.median(measurements["single"])
     multi = statistics.median(measurements["multi"])
     return {
@@ -315,6 +328,7 @@ def run_benchmarks(args: argparse.Namespace) -> dict[str, Any]:
                 name = f"output_{format_name}_{shape}"
 
                 def run_output(mode: Mode, path: Path, *, table=table, writer=writer) -> None:
+                    """Measure the selected tabular output conversion and return its digest."""
                     writer(
                         _reader(table),
                         path,
@@ -349,6 +363,7 @@ def run_benchmarks(args: argparse.Namespace) -> dict[str, Any]:
                     table=table,
                     name=name,
                 ) -> None:
+                    """Measure Parquet publication and return its logical digest and route evidence."""
                     write_parquet_native_first_stream(
                         _reader(table),
                         path,
@@ -400,9 +415,16 @@ def run_benchmarks(args: argparse.Namespace) -> dict[str, Any]:
                     path: Path,
                     *,
                     converter=converter,
+                    format_name=format_name,
                     source=source,
                     input_mode=input_mode,
                 ) -> None:
+                    """Measure the end-to-end partition pipeline and return normalized output evidence."""
+                    output_options = (
+                        {"parquet_compression": args.parquet_compression}
+                        if format_name == "parquet"
+                        else {}
+                    )
                     result = converter(
                         source,
                         path,
@@ -410,6 +432,7 @@ def run_benchmarks(args: argparse.Namespace) -> dict[str, Any]:
                         input_mode=input_mode,
                         memory_limit_bytes=memory_limit,
                         multi_threading=mode == "multi",
+                        **output_options,
                     )
                     close = getattr(result, "close", None)
                     if callable(close):
@@ -426,10 +449,31 @@ def run_benchmarks(args: argparse.Namespace) -> dict[str, Any]:
                     equivalence_kind="logical_rows_without_generated_timestamps",
                 )
 
+    cases = validate_benchmark_case_results(
+        cases,
+        selection=args.only,
+        pipeline_shape=args.pipeline_shape,
+        pipeline_format=args.pipeline_format,
+    )
+
     effective_workers_multi = execution_policy(
         "multi", memory_limit, available_cpus=applied_cpu_quota
     ).effective_workers
     return {
+        "dimensions": benchmark_dimensions(
+            rows=args.rows,
+            memory_mib=args.memory_mib,
+            wide_columns=args.wide_columns,
+            nested_depth=args.nested_depth,
+            source_count=args.source_count,
+            parquet_compression=args.parquet_compression,
+            cpu_quota=args.cpu_quota,
+            warmups=args.warmups,
+            repeats=args.repeats,
+            selection=args.only,
+            pipeline_shape=args.pipeline_shape,
+            pipeline_format=args.pipeline_format,
+        ),
         "environment": {
             "platform": platform.platform(),
             "python": platform.python_version(),

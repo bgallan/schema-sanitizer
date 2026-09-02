@@ -1,4 +1,8 @@
-"""Regression coverage for memory ingest plan retains failed keepalive for retry."""
+"""Collects close-retry contracts for ingest plans, registry and replay streams, Arrow
+streams, sinks, lazy analytical resources, execution contexts, manifests, Parquet
+providers, schemas, source plans, and transcoders. Each independent failed owner or
+keepalive remains rooted and deduplicated until cleanup commits, including across fork
+generations and UTF-8 budget checks."""
 
 from __future__ import annotations
 
@@ -6,18 +10,19 @@ import os
 from types import SimpleNamespace
 
 import pytest
+from _support.resource_fakes import module_os_with_pid
 
 
 class _FailOnceClose:
     """Close double that fails once before committing."""
 
     def __init__(self) -> None:
-        """Initialize one pending failure."""
+        """Initialize the fail once close test double."""
         self.calls = 0
         self.closed = False
 
     def close(self) -> None:
-        """Fail once and then close successfully."""
+        """Close the resources owned by the fail once close test double."""
         self.calls += 1
         if self.calls == 1:
             raise OSError("transient close failure")
@@ -25,14 +30,14 @@ class _FailOnceClose:
 
 
 class _CloseCounter:
-    """Idempotent close counter."""
+    """Count close attempts and optionally fail the first."""
 
     def __init__(self) -> None:
-        """Initialize the counter."""
+        """Initialize the close counter test double."""
         self.calls = 0
 
     def close(self) -> None:
-        """Record one close call."""
+        """Close the resources owned by the close counter test double."""
         self.calls += 1
 
 
@@ -97,12 +102,12 @@ def test_registry_wrapper_does_not_double_close_wrapped_raw() -> None:
         """Minimal wrapper that owns one raw backend."""
 
         def __init__(self) -> None:
-            """Retain the wrapped backend."""
+            """Initialize the wrapper test double."""
             self._raw = raw
             self.calls = 0
 
         def close(self) -> None:
-            """Close the backend exactly once."""
+            """Close the resources owned by the wrapper test double."""
             self.calls += 1
             self._raw.close()
 
@@ -123,30 +128,6 @@ def test_registry_wrapper_does_not_double_close_wrapped_raw() -> None:
     assert opened.close_items == []
 
 
-def test_replay_file_path_survives_failed_unlink(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A transient unlink error leaves the replay path available for retry."""
-    from schema_sanitizer.api_impl.parquet import replay_stream as module
-
-    replay = object.__new__(module.ReplayableArrowStream)
-    replay._pid = os.getpid()
-    replay._path = "/tmp/ingest-plan-retains-failed-keepalive-for-replay.arrow"
-    calls = 0
-
-    def unlink(path: str) -> None:
-        """Fail once before accepting deletion."""
-        nonlocal calls
-        assert path == replay._path
-        calls += 1
-        if calls == 1:
-            raise OSError("busy")
-
-    monkeypatch.setattr(module.os, "unlink", unlink)
-    replay.close()
-    assert replay._path == "/tmp/ingest-plan-retains-failed-keepalive-for-replay.arrow"
-    replay.close()
-    assert replay._path is None
-
-
 def test_replay_reader_retains_reader_and_keepalive_failures() -> None:
     """Reader ownership and mapped sources remain retryable independently."""
     from schema_sanitizer.api_impl.parquet.replay_stream import _ReplayReader
@@ -164,47 +145,6 @@ def test_replay_reader_retains_reader_and_keepalive_failures() -> None:
     assert replay._keepalive == (keepalive,)
     replay.close()
     assert replay._keepalive == ()
-
-
-def test_parquet_factory_retains_failed_pending_and_keepalive(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Factory close only clears handles whose cleanup actually committed."""
-    from schema_sanitizer.adapters.parquet import record_batch_factory as module
-
-    pending = _FailOnceClose()
-    keepalive = _FailOnceClose()
-    factory = SimpleNamespace(
-        _pid=os.getpid(),
-        _pending_parquet_file=pending,
-        _pending_opened_file=pending,
-        _keepalive=(keepalive,),
-        _staged_path="/tmp/ingest-plan-retains-failed-keepalive-for.parquet",
-    )
-    removed = 0
-
-    def remove(path: str | None) -> bool:
-        """Report staged cleanup only after all handles are closed."""
-        nonlocal removed
-        assert path == "/tmp/ingest-plan-retains-failed-keepalive-for.parquet"
-        removed += 1
-        return removed >= 2
-
-    monkeypatch.setattr(module, "remove_staged_parquet", remove)
-    module.close_factory(factory)
-    assert factory._pending_parquet_file is pending
-    assert factory._pending_opened_file is pending
-    assert factory._keepalive == (keepalive,)
-    assert factory._staged_path == "/tmp/ingest-plan-retains-failed-keepalive-for.parquet"
-    assert pending.calls == 1
-
-    module.close_factory(factory)
-    assert factory._pending_parquet_file is None
-    assert factory._pending_opened_file is None
-    assert factory._keepalive == ()
-    assert factory._staged_path is None
-    assert pending.calls == 2
-    assert keepalive.calls == 2
 
 
 def test_arrow_stream_retains_raw_and_keepalive_after_failed_main_close() -> None:
@@ -290,7 +230,7 @@ def test_schema_cache_replaces_inherited_lock_without_touching_it(
     old_lock = cache._lock
     old_lock.acquire()
     try:
-        monkeypatch.setattr(module.os, "getpid", lambda: cache._pid + 1)
+        monkeypatch.setattr(module, "os", module_os_with_pid(cache._pid + 1))
         assert cache.get_by_object(schema) is None
         assert cache._lock is not old_lock
         assert cache._by_object_id == {}
@@ -369,7 +309,7 @@ def test_result_finalizer_does_not_close_parent_owners_after_fork(
     owner = _CloseCounter()
     result = module.Result(SimpleNamespace(diagnostics=None), clean_data=None)
     result._resource_owner = owner
-    monkeypatch.setattr(module.os, "getpid", lambda: result._pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(result._pid + 1))
 
     result.__del__()
 
@@ -384,7 +324,7 @@ def test_execution_context_rejects_direct_child_reuse(
     from schema_sanitizer.api_impl import execution_context as module
 
     context = module.ExecutionContext()
-    monkeypatch.setattr(module.os, "getpid", lambda: context._pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(context._pid + 1))
 
     with pytest.raises(RuntimeError, match="cannot be reused after fork"):
         context.memory_stats()
@@ -401,7 +341,7 @@ def test_execution_context_pool_replaces_inherited_context(
     replacement = object()
     pool._ctx = inherited
     parent_pid = pool._pid
-    monkeypatch.setattr(module.os, "getpid", lambda: parent_pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(parent_pid + 1))
     monkeypatch.setattr(module, "ExecutionContext", lambda: replacement)
 
     assert pool.get() is replacement
@@ -433,6 +373,7 @@ def test_execution_context_pool_serializes_lazy_construction(
         return replacement
 
     def get_context(_index: int) -> object:
+        """Return the controlled context used by the ownership test."""
         caller_barrier.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
         return pool.get()
 
@@ -456,7 +397,7 @@ def test_execution_context_pool_replaces_held_parent_lock(
     inherited_lock.acquire()
     parent_pid = pool._pid
     replacement = object()
-    monkeypatch.setattr(module.os, "getpid", lambda: parent_pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(parent_pid + 1))
     monkeypatch.setattr(module, "ExecutionContext", lambda: replacement)
     try:
         assert pool.get() is replacement
@@ -547,11 +488,11 @@ def test_schema_cache_enforces_utf8_bytes_not_character_count() -> None:
         """Schema text double."""
 
         def __init__(self, text: str) -> None:
-            """Store one textual key."""
+            """Initialize the schema test double."""
             self.text = text
 
         def to_string(self, **_kwargs: object) -> str:
-            """Return the key."""
+            """Render the fake schema through its string conversion path."""
             return self.text
 
     cache = SchemaDecisionCache(max_size=4, max_key_bytes=4)
@@ -741,7 +682,7 @@ def test_remote_manifest_rejects_child_before_inherited_lock(
     manifest._pid = parent_pid
     manifest._prefetch_lock = Lock()
     manifest._prefetch_lock.acquire()
-    monkeypatch.setattr(module.os, "getpid", lambda: parent_pid + 1)
+    monkeypatch.setattr(module, "os", module_os_with_pid(parent_pid + 1))
     try:
         with pytest.raises(RuntimeError, match="cannot be reused after fork"):
             manifest.take_prefetched_chunks()

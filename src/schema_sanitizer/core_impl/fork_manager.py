@@ -1,8 +1,7 @@
-"""Single bounded at-fork dispatcher for runtime-owned state.
+"""Dispatch runtime-owned state transitions through one bounded at-fork registry.
 
-Modules register handlers during normal import. Only this module registers with
-``os.register_at_fork``. The fixed registry prevents per-object callback leaks
-and avoids container growth inside fork callbacks.
+Modules register fixed handlers during normal import, while this module alone calls
+``os.register_at_fork`` to prevent callback leaks and fork-time container growth.
 """
 
 from __future__ import annotations
@@ -180,8 +179,6 @@ def _before() -> None:
         if handler is None:
             continue
         callback = handler.before
-        # pass50 compatibility breadcrumb: if handler.before is None and not handler.child_safe_without_prepare
-        # is represented by the prepared bit below rather than re-evaluated in child.
         if callback is None:
             if handler.mode == "child_safe" and handler.child_safe_without_prepare:
                 _FORK_PREPARED[index] = 1

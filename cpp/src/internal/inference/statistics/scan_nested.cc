@@ -1,4 +1,6 @@
 // Accumulates scalar and nested statistics using previously discovered shapes.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #include "internal/inference/statistics/scan_internal.hh"
 
@@ -159,6 +161,8 @@ sanitize::Status update_stats_value(InferenceContext *ctx, StatsNode *stats,
   return sanitize::Status::OK();
 }
 
+/// Updates stats object field from one observation while retaining existing
+/// inferred shape constraints.
 sanitize::Status update_stats_object_field(
     InferenceContext *ctx, StatsNode *parent, StrId key_id,
     std::string_view key_sv, const ValueView &child,

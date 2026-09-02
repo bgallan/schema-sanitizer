@@ -1,4 +1,8 @@
-"""PyArrow stream materialization helpers."""
+"""PyArrow stream materialization helpers.
+
+It converts Arrow C streams, readers, tables, and batch iterables into owned PyArrow
+tables or readers without losing keepalive resources.
+"""
 
 from __future__ import annotations
 

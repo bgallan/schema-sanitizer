@@ -1,3 +1,9 @@
+// Decodes decimal, temporal, integer, and other Parquet logical-type unions
+// from compact Thrift. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
+
+/// Returns the diagnostic Parquet logical-type label for a compact-Thrift field
+/// identifier.
 std::string logical_type_name(std::int16_t field_id) {
   switch (field_id) {
   case 1:
@@ -33,6 +39,7 @@ std::string logical_type_name(std::int16_t field_id) {
   }
 }
 
+/// Parses the compact-Thrift TimeUnit union into a stable unit label.
 sanitize::Result<std::string> read_time_unit(CompactReader &reader) {
   std::int16_t last_field_id = 0;
   std::string out;
@@ -71,6 +78,7 @@ sanitize::Result<std::string> read_time_unit(CompactReader &reader) {
   }
 }
 
+/// Parses scale and precision from a compact-Thrift DecimalType structure.
 sanitize::Result<LogicalTypeReadInfo>
 read_decimal_logical_type(CompactReader &reader, LogicalTypeReadInfo out) {
   std::int16_t last_field_id = 0;
@@ -101,6 +109,8 @@ read_decimal_logical_type(CompactReader &reader, LogicalTypeReadInfo out) {
   }
 }
 
+/// Parses UTC adjustment and units from a compact-Thrift time or timestamp
+/// annotation.
 sanitize::Result<LogicalTypeReadInfo>
 read_temporal_logical_type(CompactReader &reader, LogicalTypeReadInfo out) {
   std::int16_t last_field_id = 0;
@@ -130,6 +140,7 @@ read_temporal_logical_type(CompactReader &reader, LogicalTypeReadInfo out) {
   }
 }
 
+/// Parses bit width and signedness from a compact-Thrift IntType structure.
 sanitize::Result<LogicalTypeReadInfo>
 read_integer_logical_type(CompactReader &reader, LogicalTypeReadInfo out) {
   std::int16_t last_field_id = 0;

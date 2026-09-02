@@ -1,4 +1,6 @@
-// Resolves JSON text row representation and validates deferred raw rows.
+// Resolves JSON text row representation and validates deferred raw rows. The
+// pipeline preserves source offsets and ownership while enforcing plan order
+// and memory bounds.
 
 #pragma once
 
@@ -23,14 +25,13 @@ class JsonOnDemandDoc;
 [[nodiscard]] bool
 parallel_json_row_frontend_enabled(const sanitize::Options &options) noexcept;
 
-// Safety ceilings are operation-fatal even when row-level recovery is enabled.
-// This prevents skip_row/emit_null_row from turning resource-amplification
-// attacks into silently accepted input.
+/// Returns whether a JSON error represents an operation-fatal safety ceiling.
+/// Such errors bypass row-level recovery to prevent resource amplification.
 [[nodiscard]] bool
 json_error_exceeds_hard_safety_limit(const sanitize::Status &status) noexcept;
 
-// Derives the operation-wide top-level JSON token allowance from the single
-// public memory limit. The returned count is shared across validation packets.
+/// Derives the operation-wide top-level JSON token allowance from memory
+/// limits. The returned count is shared across validation packets.
 [[nodiscard]] std::size_t
 json_token_index_max_fields(std::int64_t memory_limit_bytes) noexcept;
 
@@ -52,9 +53,8 @@ struct JsonTextRowValidation {
   std::uint32_t field_count = 0;
 };
 
-// Validates one deferred JSON row. For top-level objects, optionally records a
-// compact immutable index of key/value spans. The token vector is rolled back
-// when the per-batch token budget cannot hold the complete row.
+/// Validates one deferred JSON row and can index top-level object field spans.
+/// Rolls back the token vector when its budget cannot hold the complete row.
 [[nodiscard]] sanitize::Result<JsonTextRowValidation> validate_json_text_row(
     JsonOnDemandDoc *doc, std::string_view raw, std::size_t base_offset,
     std::pmr::vector<JsonValidatedFieldToken> *tokens, std::size_t max_tokens,

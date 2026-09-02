@@ -1,4 +1,6 @@
-// Declares root-field filtering for materialized JSON text rows.
+// Declares root-field filtering for materialized JSON text rows. The pipeline
+// preserves source offsets and ownership while enforcing plan order and memory
+// bounds.
 
 #pragma once
 
@@ -21,13 +23,13 @@ class JsonRootFieldFilter {
 public:
   JsonRootFieldFilter();
 
-  // Rebinds optional cache allocations to the operation-wide memory pool.
+  /// Rebinds optional cache allocations to the operation-wide memory pool.
   void set_memory_pool(std::shared_ptr<void> pool) noexcept;
 
-  // Installs the compiled root layout and field-name policy.
+  /// Installs the compiled root layout and field-name policy.
   void reset(const CompiledPlan *plan, std::string_view field_name_policy);
 
-  // Returns whether a source key can address any planned root field.
+  /// Returns whether a source key can address any planned root field.
   [[nodiscard]] bool accepts(std::string_view key, uint64_t key_hash) const;
 
 private:
@@ -41,6 +43,8 @@ private:
                               std::equal_to<>>;
 
   struct CacheState {
+
+    /// Creates pool-backed caches for root-field lookups in one compiled plan.
     explicit CacheState(std::shared_ptr<void> pool)
         : resource(std::move(pool)), cache(&resource), cache_map(&resource) {}
 
@@ -49,6 +53,7 @@ private:
     CacheMap cache_map;
   };
 
+  /// Recreates empty pool-backed caches, disabling caching if allocation fails.
   void rebuild_cache() noexcept;
 
   const CompiledPlan *plan_ = nullptr;

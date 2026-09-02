@@ -1,4 +1,6 @@
-// Public entry points for private Arrow C Data batch building.
+// Provides public entry points for private Arrow C Data batch building. The
+// code converts validated rows into memory-accounted Arrow C Data batches for
+// ordered ingestion.
 
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/materialization/batch_appender_internal.hh"

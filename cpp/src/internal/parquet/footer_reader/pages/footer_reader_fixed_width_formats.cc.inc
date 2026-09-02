@@ -1,3 +1,8 @@
+// Resolves Parquet physical widths and Arrow formats for supported fixed-width
+// logical columns. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
+
+/// Returns the physical width required to decode a PLAIN Parquet value buffer.
 std::optional<std::int32_t>
 fixed_width_for_plain_values(const ColumnChunkInfo &column) {
   if (!column.has_physical_type) {
@@ -22,11 +27,15 @@ fixed_width_for_plain_values(const ColumnChunkInfo &column) {
   }
 }
 
+/// Tests a bounded byte span for a prefix without constructing a temporary
+/// string.
 bool starts_with(std::string_view value, std::string_view prefix) {
   return value.size() >= prefix.size() &&
          value.substr(0, prefix.size()) == prefix;
 }
 
+/// Parses positive 32-bit integer from bounded Parquet metadata and rejects
+/// malformed or oversized fields.
 std::optional<std::int32_t> parse_positive_i32(std::string_view value) {
   if (value.empty()) {
     return std::nullopt;
@@ -47,10 +56,12 @@ std::optional<std::int32_t> parse_positive_i32(std::string_view value) {
   return static_cast<std::int32_t>(out);
 }
 
+/// Reports whether an Arrow fixed-width format describes a decimal value.
 bool is_decimal_arrow_format(std::string_view format) {
   return starts_with(format, "d:");
 }
 
+/// Returns the fixed Arrow byte width encoded by a decimal format string.
 std::optional<std::int32_t> decimal_arrow_width_bytes(std::string_view format) {
   if (!is_decimal_arrow_format(format)) {
     return std::nullopt;
@@ -66,6 +77,8 @@ std::optional<std::int32_t> decimal_arrow_width_bytes(std::string_view format) {
   return *bits / 8;
 }
 
+/// Returns the physical Arrow value width selected for one supported column
+/// format.
 std::optional<std::int32_t>
 arrow_value_width_for_column(const ColumnChunkInfo &column) {
   const auto format = std::string_view(column.native_arrow_format);
@@ -92,10 +105,14 @@ arrow_value_width_for_column(const ColumnChunkInfo &column) {
   return fixed_width_for_plain_values(column);
 }
 
+/// Copies numeric value with bounds checks and the required Arrow physical
+/// representation.
 template <class T> void copy_numeric_value(std::uint8_t *target, T value) {
   std::memcpy(target, &value, sizeof(T));
 }
 
+/// Writes Arrow integer value to the output stream while propagating callback
+/// and allocation failures.
 sanitize::Status write_arrow_integer_value(std::uint8_t *target,
                                            const ColumnChunkInfo &column,
                                            std::int64_t value) {

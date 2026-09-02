@@ -1,4 +1,6 @@
 // Defines flat row batches emitted by text frontends.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #pragma once
 
@@ -20,11 +22,13 @@ inline constexpr std::size_t kMaxMaterializedFieldsPerRow = 65'536;
 // Lifetime: RowRef pointers are valid until the next reset().
 class FlatRowBatch {
 public:
+  /// Initializes a row batch whose views remain tied to the supplied owning
+  /// storage.
   explicit FlatRowBatch(
       std::pmr::memory_resource *resource = std::pmr::get_default_resource())
       : fields_(resource), rows_(resource) {}
 
-  // Clears the batch and reserves storage for an expected row count.
+  /// Clears the batch and reserves storage for an expected row count.
   void reset(int64_t capacity) {
     rows_.clear();
     fields_.clear();
@@ -39,7 +43,7 @@ public:
     }
   }
 
-  // Starts a row and records its raw input slice metadata.
+  /// Starts a row and records its raw input slice metadata.
   void start_row(std::string_view raw = {}, std::size_t base_offset = 0,
                  uint8_t flags = 0, const void *direct_ctx = nullptr,
                  std::string_view source_file = {}) {
@@ -52,10 +56,10 @@ public:
                                 .flags = flags});
   }
 
-  // Appends one field reference to the current row.
+  /// Appends one field reference to the current row.
   void push(FieldRef f) { fields_.push_back(f); }
 
-  // Replaces one field slot relative to the current row start.
+  /// Replaces one field slot relative to the current row start.
   [[nodiscard]] bool set_current_row_field(std::size_t index,
                                            FieldRef field) noexcept {
     if (rows_.empty() || index >= fields_.size() - rows_.back().field_offset) {
@@ -65,12 +69,12 @@ public:
     return true;
   }
 
-  // Returns the first field offset of the row currently being built.
+  /// Returns the first field offset of the row currently being built.
   [[nodiscard]] std::size_t current_row_offset() const noexcept {
     return rows_.empty() ? fields_.size() : rows_.back().field_offset;
   }
 
-  // Removes all fields appended since start_row() for the current row.
+  /// Removes all fields appended since start_row() for the current row.
   void truncate_current_row_fields() {
     if (!rows_.empty()) {
       fields_.erase(fields_.begin() +
@@ -79,14 +83,14 @@ public:
     }
   }
 
-  // Replaces the flags of the row currently being built.
+  /// Replaces the flags of the row currently being built.
   void set_current_row_flags(uint8_t flags) noexcept {
     if (!rows_.empty()) {
       rows_.back().flags = flags;
     }
   }
 
-  // Abandons the row currently being built and restores batch metadata.
+  /// Abandons the row currently being built and restores batch metadata.
   void abort_current_row() noexcept {
     if (rows_.empty() || rows_.back().complete) {
       return;
@@ -97,14 +101,14 @@ public:
     rows_.pop_back();
   }
 
-  // Finishes the current row.
+  /// Finishes the current row.
   void end_row() {
     auto &row = rows_.back();
     row.field_count = fields_.size() - row.field_offset;
     row.complete = true;
   }
 
-  // Exports stable row views backed by this batch.
+  /// Exports stable row views backed by this batch.
   void export_rows(std::vector<RowRef> *out) const {
     if (!out)
       return;

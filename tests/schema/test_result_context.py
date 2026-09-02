@@ -1,4 +1,8 @@
-"""Tests Result and ExecutionContext behavior."""
+"""Tests Result and ExecutionContext behavior.
+
+It covers finalized statistics, selector normalization, unknown options, stream
+exposure, explicit properties, and context construction behavior.
+"""
 
 from __future__ import annotations
 

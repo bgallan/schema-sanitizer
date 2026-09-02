@@ -1,4 +1,7 @@
-// Materializes one JSON text slice into a planned row batch.
+// Materializes one JSON text slice into a planned row batch. The pipeline
+// preserves source offsets and ownership while enforcing plan order and memory
+// bounds.
+
 #include "frontends/builtin_frontends.hh"
 #include "frontends/json/root_field_filter.hh"
 #include "frontends/json/text_batch_storage.hh"
@@ -29,6 +32,8 @@ namespace sanitize::internal {
 namespace {
 class JsonTextRows final {
 public:
+  /// Resolves JSON row validation and materialization policy from prepared
+  /// options.
   JsonTextRows(const Options &options, bool require_object_rows,
                bool line_delimited)
       : default_key_(options.default_key_name),
@@ -44,20 +49,27 @@ public:
         require_object_rows_(require_object_rows),
         token_index_max_fields_(
             json_token_index_max_fields(options.memory_limit_bytes)) {}
+
+  /// Refreshes JSON row filtering and materialization for the compiled plan.
   void set_plan(const CompiledPlan *plan) noexcept {
     plan_ = plan;
     refresh_policy();
     root_filter_.reset(plan_, field_name_policy_);
   }
+
+  /// Charges root-field filter storage to the supplied memory pool.
   void set_memory_pool(const std::shared_ptr<void> &pool) noexcept {
     root_filter_.set_memory_pool(pool);
     root_filter_.reset(plan_, field_name_policy_);
   }
+
+  /// Refreshes JSON row policy for the selected materialization mode.
   void set_materialization_mode(FrontendMaterializationMode mode) noexcept {
     mode_ = mode;
     refresh_policy();
   }
-  // Appends one JSON slice using the raw or materialized frontend path.
+
+  /// Appends one JSON slice using the raw or materialized frontend path.
   sanitize::Status append(JsonTextBatchStorage *storage,
                           const TextSlice &slice) const {
     const std::string_view probe = trim_leading_json_ws(slice.view);
@@ -108,6 +120,8 @@ public:
     storage->batch.end_row();
     return sanitize::Status::OK();
   }
+
+  /// Appends a null row at the failed slice's original source offset.
   void append_null_row(JsonTextBatchStorage *storage,
                        const TextSlice &slice) const {
     storage->keep_data_owner(slice.owner);
@@ -117,21 +131,33 @@ public:
                              slice.source_file);
     storage->batch.end_row();
   }
+
+  /// Records JSON row failures while honoring the configured diagnostic policy.
   [[nodiscard]] OnErrorPolicy on_error() const noexcept { return on_error_; }
+
+  /// Returns the field-count ceiling for retaining a validated JSON token
+  /// index.
   [[nodiscard]] std::size_t token_index_max_fields() const noexcept {
     return validate_raw_ ? token_index_max_fields_ : 0;
   }
+
+  /// Reports whether this row policy defers object materialization to a later
+  /// stage.
   [[nodiscard]] bool emits_deferred_raw_rows() const noexcept {
     const bool deferred_mode =
         mode_ == FrontendMaterializationMode::kDeferredValidationRaw ||
         mode_ == FrontendMaterializationMode::kWorkerAuthoritativeRaw;
     return deferred_mode && raw_only_ && !validate_raw_ && !plan_ordered_;
   }
+
+  /// Reports whether this row policy rejects non-object top-level JSON values.
   [[nodiscard]] bool requires_object_rows() const noexcept {
     return require_object_rows_;
   }
 
 private:
+  /// Derives row ordering and validation flags from the active plan and
+  /// frontend mode.
   void refresh_policy() noexcept {
     const auto policy =
         resolve_json_text_row_policy(plan_, line_delimited_, stop_on_error_,
@@ -146,6 +172,9 @@ private:
     const JsonTextRows *rows = nullptr;
     std::size_t emitted_fields = 0;
   };
+
+  /// Adds the slice's absolute offset when a parser message lacks its own byte
+  /// location.
   [[nodiscard]] static sanitize::Status
   prefixed_parse_error(const TextSlice &slice, std::string_view message) {
     if (message.find(" at byte ") != std::string_view::npos) {
@@ -156,6 +185,8 @@ private:
         std::to_string(static_cast<int64_t>(slice.base_offset)) + ": " +
         std::string(message));
   }
+
+  /// Removes JSON whitespace preceding the first value byte.
   [[nodiscard]] static std::string_view
   trim_leading_json_ws(std::string_view value) noexcept {
     while (!value.empty() && is_ws(static_cast<unsigned char>(value.front()))) {
@@ -163,6 +194,9 @@ private:
     }
     return value;
   }
+
+  /// Appends one accepted object field while enforcing the per-row field
+  /// ceiling.
   static sanitize::Status emit_object_field(void *raw_ctx, std::string_view key,
                                             uint64_t key_hash,
                                             ValueView value) {
@@ -181,10 +215,15 @@ private:
     ++ctx->emitted_fields;
     return sanitize::Status::OK();
   }
+
+  /// Tests a source key against the cached compiled root-field filter.
   [[nodiscard]] bool matches_root_field(std::string_view key,
                                         uint64_t key_hash) const {
     return root_filter_.accepts(key, key_hash);
   }
+
+  /// Enumerates a top-level object into the current row and contextualizes
+  /// parse failures.
   sanitize::Status append_object_fields(JsonTextBatchStorage *storage,
                                         const TextSlice &slice) const {
     ObjectEmitContext ctx{
@@ -196,6 +235,9 @@ private:
     }
     return sanitize::Status::OK();
   }
+
+  /// Reports whether the configured fallback key is represented by the active
+  /// plan.
   [[nodiscard]] bool accepts_default_key() const noexcept {
     if (!plan_) {
       return true;
@@ -205,6 +247,8 @@ private:
            matches_planned_field(plan_->root_layout, key, default_key_hash_,
                                  field_name_policy_);
   }
+
+  /// Parses a non-object value and appends it under the accepted fallback key.
   sanitize::Status append_default_value(JsonTextBatchStorage *storage,
                                         const TextSlice &slice) const {
     if (!accepts_default_key()) {
@@ -219,6 +263,8 @@ private:
                                  .value = *parsed});
     return sanitize::Status::OK();
   }
+
+  /// Dispatches a JSON slice to object-field or fallback-value materialization.
   sanitize::Status append_materialized_slice(JsonTextBatchStorage *storage,
                                              const TextSlice &slice) const {
     const std::string_view probe = trim_leading_json_ws(slice.view);
@@ -247,6 +293,8 @@ private:
 // Streams JSON text slices into row batches.
 class JsonTextFrontend final {
 public:
+  /// Creates a streaming JSON scanner configured for array, object, or JSONL
+  /// framing.
   JsonTextFrontend(ChunkSourcePtr src, const Options &options,
                    bool require_top_level_array = false,
                    bool require_object_rows = false,
@@ -261,17 +309,24 @@ public:
         src_, chunk_bytes_, require_top_level_array, line_delimited);
     reset_status_ = scanner_->Reset();
   }
+
+  /// Forwards the compiled plan to the JSON row decoder.
   void set_plan(const CompiledPlan *plan) noexcept { rows_.set_plan(plan); }
+
+  /// Updates row policy and scanner framing for the materialization mode.
   void set_materialization_mode(FrontendMaterializationMode mode) noexcept {
     rows_.set_materialization_mode(mode);
     scanner_->set_worker_authoritative_framing(
         mode == FrontendMaterializationMode::kWorkerAuthoritativeRaw);
   }
+
+  /// Charges scanner and row-batch allocations to the supplied memory pool.
   void set_memory_pool(std::shared_ptr<void> pool) noexcept {
     memory_pool_ = std::move(pool);
     rows_.set_memory_pool(memory_pool_);
   }
-  // Rewinds JSON scanning and clears completion state.
+
+  /// Rewinds JSON scanning and clears completion state.
   void reset() noexcept {
     done_ = false;
     if (scanner_) {
@@ -280,7 +335,9 @@ public:
       reset_status_ = src_->Reset();
     }
   }
-  // Returns the next batch.
+
+  /// Reads and materializes the next bounded row batch from the JSON text
+  /// frontend.
   sanitize::Result<RowBatch> next_batch(int64_t capacity) {
     RowBatch out;
     if (capacity <= 0 || done_) {
@@ -347,6 +404,8 @@ private:
   std::shared_ptr<void> memory_pool_;
 };
 struct JsonArrayGroupBatchStorage {
+
+  /// Creates storage that keeps every constituent array-document batch alive.
   JsonArrayGroupBatchStorage(std::shared_ptr<void> pool,
                              std::shared_ptr<PoolResource> resource)
       : pool_keepalive(std::move(pool)),
@@ -362,30 +421,39 @@ FrontendHandle make_json_array_element_frontend(ChunkSourcePtr json,
                                                 bool require_object_rows);
 class JsonArrayGroupFrontend final {
 public:
+  /// Initializes ordered traversal across a group of JSON array documents.
   JsonArrayGroupFrontend(std::vector<std::string> paths,
                          std::vector<std::string> source_names, Options options,
                          bool require_object_rows)
       : paths_(std::move(paths)), source_names_(std::move(source_names)),
         options_(std::move(options)),
         require_object_rows_(require_object_rows) {}
+
+  /// Rewinds grouped traversal and discards the current per-file frontend.
   void reset() noexcept {
     index_ = 0;
     done_ = paths_.empty();
     current_ = FrontendHandle{};
     open_status_ = sanitize::Status::OK();
   }
+
+  /// Applies the compiled plan to the current and all future file frontends.
   void set_plan(const CompiledPlan *plan) noexcept {
     plan_ = plan;
     if (current_) {
       current_.set_plan(plan_);
     }
   }
+
+  /// Shares the supplied memory pool with current and future file frontends.
   void set_memory_pool(std::shared_ptr<void> pool) noexcept {
     memory_pool_ = std::move(pool);
     if (current_) {
       current_.set_memory_pool(memory_pool_);
     }
   }
+
+  /// Concatenates the next bounded rows while preserving input-file order.
   sanitize::Result<RowBatch> next_batch(int64_t capacity) {
     RowBatch out;
     if (capacity <= 0 || done_) {
@@ -431,6 +499,8 @@ public:
   }
 
 private:
+  /// Lazily opens the current array-document path and applies shared runtime
+  /// state.
   sanitize::Status open_current() {
     if (index_ >= paths_.size()) {
       done_ = true;
@@ -464,25 +534,40 @@ private:
   sanitize::Status open_status_ = sanitize::Status::OK();
   std::shared_ptr<void> memory_pool_;
 };
+
+/// Rewinds the JSON text frontend to its initial input position and clears
+/// per-pass state.
 static void json_reset(void *self) noexcept {
   static_cast<JsonTextFrontend *>(self)->reset();
 }
+
+/// Reads and materializes the next bounded row batch from the JSON text
+/// frontend.
 static sanitize::Result<RowBatch> json_next_batch(void *self,
                                                   int64_t capacity) {
   return static_cast<JsonTextFrontend *>(self)->next_batch(capacity);
 }
+
+/// Forwards a compiled plan through the JSON text frontend callback table.
 static void json_set_plan(void *self, const CompiledPlan *plan) noexcept {
   static_cast<JsonTextFrontend *>(self)->set_plan(plan);
 }
+
+/// Forwards the materialization mode through the JSON text callback table.
 static void
 json_set_materialization_mode(void *self,
                               FrontendMaterializationMode mode) noexcept {
   static_cast<JsonTextFrontend *>(self)->set_materialization_mode(mode);
 }
+
+/// Forwards memory-pool ownership through the JSON text callback table.
 static void json_set_memory_pool(void *self,
                                  std::shared_ptr<void> pool) noexcept {
   static_cast<JsonTextFrontend *>(self)->set_memory_pool(std::move(pool));
 }
+
+/// Destroys the heap-owned JSON text frontend state after its final callback
+/// completes.
 static void json_destroy(void *self) noexcept {
   delete static_cast<JsonTextFrontend *>(self);
 }
@@ -493,6 +578,9 @@ static const FrontendVTable kJsonVTable{
     .destroy = &json_destroy,
     .set_memory_pool = &json_set_memory_pool,
     .set_materialization_mode = &json_set_materialization_mode};
+
+/// Creates a JSON frontend that treats one array document as an ordered element
+/// stream.
 FrontendHandle make_json_array_element_frontend(ChunkSourcePtr json,
                                                 const Options &options,
                                                 bool require_object_rows) {
@@ -500,22 +588,36 @@ FrontendHandle make_json_array_element_frontend(ChunkSourcePtr json,
       new JsonTextFrontend(std::move(json), options, true, require_object_rows);
   return {fe, &kJsonVTable};
 }
+
+/// Rewinds the JSON text frontend to its initial input position and clears
+/// per-pass state.
 static void json_array_group_reset(void *self) noexcept {
   static_cast<JsonArrayGroupFrontend *>(self)->reset();
 }
+
+/// Reads and materializes the next bounded row batch from the JSON text
+/// frontend.
 static sanitize::Result<RowBatch>
 json_array_group_next_batch(void *self, int64_t capacity) {
   return static_cast<JsonArrayGroupFrontend *>(self)->next_batch(capacity);
 }
+
+/// Forwards a compiled plan through the grouped-array JSON callback table.
 static void json_array_group_set_plan(void *self,
                                       const CompiledPlan *plan) noexcept {
   static_cast<JsonArrayGroupFrontend *>(self)->set_plan(plan);
 }
+
+/// Forwards memory-pool ownership through the grouped-array JSON callback
+/// table.
 static void
 json_array_group_set_memory_pool(void *self,
                                  std::shared_ptr<void> pool) noexcept {
   static_cast<JsonArrayGroupFrontend *>(self)->set_memory_pool(std::move(pool));
 }
+
+/// Destroys the heap-owned JSON text frontend state after its final callback
+/// completes.
 static void json_array_group_destroy(void *self) noexcept {
   delete static_cast<JsonArrayGroupFrontend *>(self);
 }

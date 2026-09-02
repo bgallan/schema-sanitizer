@@ -1,4 +1,6 @@
 // Parses nested JSON value slices for on-demand iterators.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/json/ondemand/document.hh"
 

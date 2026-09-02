@@ -1,4 +1,6 @@
 // Implements shared logical-type helpers for the schema-registry engine.
+// Equality, display names, semantic variant labels, and source paths use one
+// recursive representation across merge and JSON units.
 
 #include "schema_registry/schema_registry_internal.hh"
 

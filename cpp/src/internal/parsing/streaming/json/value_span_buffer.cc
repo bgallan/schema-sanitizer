@@ -1,4 +1,6 @@
 // Buffers and materializes JSON values that span multiple input chunks.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/streaming/json/value_span_scanner.hh"
 

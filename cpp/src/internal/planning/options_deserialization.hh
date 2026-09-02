@@ -1,4 +1,7 @@
-// Internal option-field deserialization contract.
+// Declares the internal option-field deserialization contract. The helpers
+// normalize private planning state without leaking wire or layout details into
+// public APIs.
+
 #pragma once
 
 #include <cstddef>

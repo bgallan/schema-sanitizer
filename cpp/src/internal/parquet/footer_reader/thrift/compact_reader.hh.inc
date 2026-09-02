@@ -1,7 +1,11 @@
-// Declares the bounded Thrift compact reader used by Parquet footer parsing.
+// Declares the bounded compact-Thrift reader used for Parquet footer and page
+// metadata. This fragment is included by the consolidated footer reader inside
+// its private implementation namespace.
 
 class CompactReader {
 public:
+  /// Initializes a bounded compact-Thrift cursor over the supplied metadata
+  /// bytes.
   explicit CompactReader(std::string_view data,
                          std::size_t materialized_limit = 0)
       : data_(data),
@@ -11,6 +15,7 @@ public:
                 : std::min(metadata_materialization_limit(data.size()),
                            materialized_limit)) {}
 
+  /// Reads one byte from the bounded compact-Thrift input.
   sanitize::Result<std::uint8_t> read_byte();
   sanitize::Result<std::uint64_t> read_varint();
   sanitize::Result<std::int16_t> read_i16();
@@ -26,7 +31,9 @@ public:
   sanitize::Status read_list_header(std::uint8_t *element_type,
                                     std::uint64_t *size);
 
+  /// Returns the current byte offset in the compact Thrift input.
   [[nodiscard]] std::size_t position() const noexcept { return pos_; }
+  /// Returns the unread byte count without advancing the compact Thrift cursor.
   [[nodiscard]] std::size_t remaining_bytes() const noexcept {
     return pos_ <= data_.size() ? data_.size() - pos_ : 0;
   }

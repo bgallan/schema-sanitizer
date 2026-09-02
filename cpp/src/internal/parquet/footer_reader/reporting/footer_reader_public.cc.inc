@@ -1,8 +1,12 @@
+// Defines footer-reading, projection, Arrow stream construction, and preflight
+// entry points. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
 
 sanitize::Status project_footer_row_group_columns(
     FooterInfo *info, const std::vector<std::string> &projected_columns,
     const std::vector<LeafLevelInfo> &leaves);
 
+/// Opens a Parquet file and parses its bounded compact-Thrift footer metadata.
 sanitize::Result<FooterInfo>
 read_footer_metadata_impl(const std::string &path,
                           const std::vector<std::string> &projected_columns,
@@ -70,6 +74,8 @@ read_footer_metadata_impl(const std::string &path,
   return info;
 }
 
+/// Parses footer metadata, page indexes, and page headers needed by public
+/// diagnostics.
 sanitize::Result<FooterInfo>
 read_footer_info_impl(const std::string &path,
                       const std::vector<std::string> &projected_columns) {
@@ -93,10 +99,12 @@ read_footer_info_impl(const std::string &path,
   return info;
 }
 
+/// Reads and validates complete footer metadata from a Parquet file.
 sanitize::Result<FooterInfo> read_footer_info(const std::string &path) {
   return read_footer_info_impl(path, {});
 }
 
+/// Reads a projected Parquet footer and serializes its metadata as JSON.
 sanitize::Result<std::string>
 read_footer_info_json(const std::string &path,
                       const std::vector<std::string> &projected_columns) {
@@ -123,6 +131,7 @@ read_footer_info_json(const std::string &path,
   return out;
 }
 
+/// Applies a top-level projection to every row group's physical leaf columns.
 sanitize::Status project_footer_row_group_columns(
     FooterInfo *info, const std::vector<std::string> &projected_columns,
     const std::vector<LeafLevelInfo> &leaves) {
@@ -163,6 +172,7 @@ sanitize::Status project_footer_row_group_columns(
   return {};
 }
 
+/// Opens a validated native-writer Parquet file as an owned Arrow array stream.
 sanitize::Result<ArrowArrayStream *>
 make_arrow_stream(const std::string &path,
                   const std::vector<std::string> &projected_columns,
@@ -229,6 +239,8 @@ make_arrow_stream(const std::string &path,
   return stream;
 }
 
+/// Summarizes whether every projected column is supported by the bounded native
+/// stream reader.
 NativeReadinessInfo
 bounded_stream_preflight_readiness(NativeParquetStreamState *state) {
   NativeReadinessInfo readiness;
@@ -311,6 +323,7 @@ bounded_stream_preflight_readiness(NativeParquetStreamState *state) {
   return readiness;
 }
 
+/// Serializes per-row-group native readiness and projected buffer estimates.
 void append_stream_preflight_row_groups_json(std::string &out, bool &first,
                                              const FooterInfo &info) {
   json_encoding::append_key(out, first, "row_groups");
@@ -335,6 +348,8 @@ void append_stream_preflight_row_groups_json(std::string &out, bool &first,
   out.push_back(']');
 }
 
+/// Runs projected native-stream preflight and serializes readiness diagnostics
+/// as JSON.
 sanitize::Result<std::string>
 read_stream_preflight_json(const std::string &path,
                            const std::vector<std::string> &projected_columns,

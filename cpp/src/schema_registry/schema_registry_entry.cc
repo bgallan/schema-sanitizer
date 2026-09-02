@@ -1,4 +1,7 @@
-// Public schema-registry merge orchestration.
+// Orchestrates the public native schema-registry merge operation.
+// It validates inputs, loads or normalizes prior canonical state, applies
+// strict or additive evolution, and publishes schema, drift, and registry
+// results.
 
 #include "sanitize/schema_registry/schema_registry.hh"
 
@@ -24,6 +27,7 @@ schema_registry_has_canonical_schema(std::string_view registry_json) {
   return schema && !schema->fields.empty();
 }
 
+/// Merges inferred fields against optional decoded canonical schema state.
 Result<SchemaRegistryMergeResult> merge_schema_registry_with_previous(
     const SchemaRegistryMergeInput &input,
     std::optional<LogicalSchema> previous_schema) {

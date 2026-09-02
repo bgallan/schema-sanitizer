@@ -1,5 +1,8 @@
-// Fast bounded row-group sizing for flat, non-null Arrow columns.
+// Estimates encoded row cost and selects row-group boundaries within configured
+// byte limits. This fragment is included by the consolidated writer to isolate
+// format-specific details.
 
+/// Returns the exact byte span for an eligible flat primitive Arrow row window.
 std::optional<std::size_t>
 flat_primitive_value_bytes(const ParquetNode &node, const ArrowArray &array,
                            std::int64_t row_offset,
@@ -64,6 +67,7 @@ flat_primitive_value_bytes(const ParquetNode &node, const ArrowArray &array,
                              saturating_size_multiply(rows, 4U));
 }
 
+/// Estimates checked encoded bytes for a flat row-group interval.
 std::optional<std::size_t>
 flat_row_group_bytes(const ParquetNode &root,
                      const std::vector<LeafColumn> &leafs,
@@ -95,6 +99,7 @@ flat_row_group_bytes(const ParquetNode &root,
   return total;
 }
 
+/// Selects a fast-path flat row-group size from checked per-row byte estimates.
 std::optional<std::int64_t> determine_flat_bounded_row_group_count(
     const ParquetNode &root, const std::vector<LeafColumn> &leafs,
     const ArrowArray &array, std::int64_t row_offset,

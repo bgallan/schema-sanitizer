@@ -1,4 +1,8 @@
-"""Regression coverage for memory process lease amount is immutable and ledger authoritative."""
+"""Tests immutable process-lease amounts alongside mutable retry keys, cancellation
+durations, guardian or dispatcher lock boundaries, callback ownership, shared shutdown
+deadlines, snapshots, fork behavior, and native metrics. The ledger remains
+authoritative, cleanup workers retain failed owners, and child or runtime shutdown
+cannot rebuild unsafe dynamic state."""
 
 from __future__ import annotations
 
@@ -7,9 +11,16 @@ import threading
 from pathlib import Path
 
 import pytest
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    run_isolated_python_probe,
+    wait_for_process_exit,
+)
 
 
 def test_process_lease_amount_is_immutable_and_ledger_authoritative() -> None:
+    """Verify process lease amount is immutable and ledger authoritative."""
     from schema_sanitizer.core_impl.process_resources import _Governor
 
     governor = _Governor(2, "process-lease-amount-is-immutable-and")
@@ -31,16 +42,20 @@ def test_process_lease_amount_is_immutable_and_ledger_authoritative() -> None:
 
 
 def test_mutable_hash_retry_key_can_be_cancelled_and_pruned() -> None:
+    """Verify mutable hash retry key can be cancelled and pruned."""
     from schema_sanitizer.core_impl.retry_scheduler import _RetryScheduler
 
     class MutableHash:
         def __init__(self) -> None:
+            """Initialize the mutable hash test double."""
             self.value = 1
 
         def __hash__(self) -> int:
+            """Return the mutable hash selected by the retry-key test."""
             return self.value
 
         def __eq__(self, other: object) -> bool:
+            """Compare mutable-hash identities for the retry-key test."""
             return self is other
 
     scheduler = _RetryScheduler()
@@ -56,6 +71,7 @@ def test_mutable_hash_retry_key_can_be_cancelled_and_pruned() -> None:
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -1.0, True])
 def test_operation_cancellation_rejects_invalid_durations(value: object) -> None:
+    """Verify operation cancellation rejects invalid durations."""
     from schema_sanitizer.core_impl.cancellation import operation_cancellation
 
     with pytest.raises((TypeError, ValueError)):
@@ -66,6 +82,7 @@ def test_operation_cancellation_rejects_invalid_durations(value: object) -> None
 def test_guardian_reads_owner_metadata_outside_its_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify guardian reads owner metadata outside its lock."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     entered = threading.Event()
@@ -76,11 +93,13 @@ def test_guardian_reads_owner_metadata_outside_its_lock(
     class Owner:
         @property
         def reserved_bytes(self) -> int:
+            """Fail the first cleanup attempt, then signal a successful retry."""
             entered.set()
-            assert resume.wait(2)
+            assert resume.wait(SCHEDULER_TIMEOUT_SECONDS)
             return 1024
 
         def release(self) -> None:
+            """Release the resource held by the owner test double."""
             return None
 
     monkeypatch.setattr(temporary_storage, "TemporaryStorageLease", Owner)
@@ -88,11 +107,13 @@ def test_guardian_reads_owner_metadata_outside_its_lock(
 
     class FailOnContentionCondition(threading.Condition):
         def __enter__(self) -> FailOnContentionCondition:
+            """Enter the context managed by the fail on contention condition test double."""
             if not self.acquire(blocking=False):
                 raise AssertionError("guardian snapshot waited on owner metadata")
             return self
 
         def __exit__(self, *_args: object) -> None:
+            """Exit the context managed by the fail on contention condition test double and run cleanup."""
             self.release()
 
     guardian._condition = FailOnContentionCondition()
@@ -101,16 +122,16 @@ def test_guardian_reads_owner_metadata_outside_its_lock(
         target=lambda: guardian.adopt(Owner(), retained_bytes=128), daemon=True
     )
     thread.start()
-    assert entered.wait(1)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     try:
         guardian.snapshot()
     finally:
         resume.set()
-    thread.join(1)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
 
 
 def test_cleanup_dispatcher_retries_instead_of_dropping_failed_owner() -> None:
+    """Verify cleanup dispatcher retries instead of dropping failed owner."""
     from schema_sanitizer.core_impl.cleanup_dispatcher import _CleanupDispatcher
 
     dispatcher = _CleanupDispatcher()
@@ -118,6 +139,7 @@ def test_cleanup_dispatcher_retries_instead_of_dropping_failed_owner() -> None:
     attempts = 0
 
     def cleanup() -> None:
+        """Signal the metadata read, wait for release, and report 1 KiB reserved."""
         nonlocal attempts
         attempts += 1
         if attempts == 1:
@@ -125,7 +147,7 @@ def test_cleanup_dispatcher_retries_instead_of_dropping_failed_owner() -> None:
         completed.set()
 
     assert dispatcher.submit(cleanup, retained_bytes=256)
-    assert completed.wait(3)
+    assert completed.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert attempts == 2
     assert dispatcher.close(deadline_seconds=2.0)
 
@@ -133,6 +155,7 @@ def test_cleanup_dispatcher_retries_instead_of_dropping_failed_owner() -> None:
 def test_cleanup_close_retains_pending_callback_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cleanup close retains pending callback owner."""
     from schema_sanitizer.core_impl.cleanup_dispatcher import _CleanupDispatcher
 
     dispatcher = _CleanupDispatcher()
@@ -149,6 +172,7 @@ def test_cleanup_close_retains_pending_callback_owner(
 def test_runtime_registry_closes_services_with_one_shared_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify runtime registry closes services with one shared deadline."""
     from schema_sanitizer.core_impl import runtime_registry as module
 
     monkeypatch.setattr(module, "remaining_seconds", lambda _deadline_ns: 0.75)
@@ -158,6 +182,7 @@ def test_runtime_registry_closes_services_with_one_shared_deadline(
 
     class Service:
         def close(self, *, deadline_seconds: float) -> bool:
+            """Close the resources owned by the service test double."""
             calls.append(deadline_seconds)
             return True
 
@@ -173,6 +198,7 @@ def test_runtime_registry_closes_services_with_one_shared_deadline(
 
 
 def test_debug_snapshot_covers_integral_runtime() -> None:
+    """Verify debug snapshot covers integral runtime."""
     from schema_sanitizer.core_impl.runtime_diagnostics import (
         concurrency_runtime_debug_snapshot,
     )
@@ -192,8 +218,8 @@ def test_debug_snapshot_covers_integral_runtime() -> None:
         assert key in snapshot
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
-def test_post_fork_child_cannot_reinitialize_retry_runtime() -> None:
+def _probe_post_fork_child_cannot_reinitialize_retry_runtime() -> None:
+    """Exercise retry-runtime poisoning in a disposable process."""
     from schema_sanitizer.core_impl.retry_scheduler import _RetryScheduler
 
     scheduler = _RetryScheduler()
@@ -204,13 +230,19 @@ def test_post_fork_child_cannot_reinitialize_retry_runtime() -> None:
         except RuntimeError:
             os._exit(0)
         os._exit(3)
-    waited, status = os.waitpid(pid, 0)
-    assert waited == pid
+    status = wait_for_process_exit(pid)
     assert os.waitstatus_to_exitcode(status) == 0
     assert scheduler.close(deadline_seconds=1.0)
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_post_fork_child_cannot_reinitialize_retry_runtime() -> None:
+    """Verify post fork child cannot reinitialize retry runtime."""
+    run_isolated_python_probe(__file__, "_probe_post_fork_child_cannot_reinitialize_retry_runtime")
+
+
 def test_native_shutdown_path_uses_preallocated_detached_metrics() -> None:
+    """Verify native shutdown path uses preallocated detached metrics."""
     source = Path("cpp/src/internal/runtime/operation_task_arena.cc").read_text()
     assert "std::unordered_map" not in source
     assert "std::function<void()> mark_detached" not in source

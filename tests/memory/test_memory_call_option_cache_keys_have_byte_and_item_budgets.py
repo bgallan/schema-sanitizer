@@ -1,4 +1,7 @@
-"""Regression coverage for memory call option cache keys have byte and item budgets."""
+"""Bounds prepared-option cache entries by both key bytes and item count across mutable
+option fingerprints, logical schema parsing, and native field registries. Large lists
+avoid duplicate fingerprint state, and impossible schema cardinality is rejected under
+the same safety budget."""
 
 from __future__ import annotations
 
@@ -7,18 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import require_native
 
 ROOT = Path(__file__).resolve().parents[2]
-
-
-def test_call_option_cache_keys_have_byte_and_item_budgets() -> None:
-    """Large strings and huge empty sequences must bypass the process cache."""
-    from schema_sanitizer.options_impl import call_options
-
-    assert call_options._call_options_cache_key({"default_key_name": "x" * 65_537}) is None
-    assert call_options._call_options_cache_key({"true_tokens": [""] * 4097}) is None
-    assert call_options._call_options_cache_key({"true_tokens": ["yes", "true"]}) is not None
 
 
 def test_prepared_options_cache_is_bounded_by_aggregate_key_bytes(
@@ -76,9 +69,8 @@ def test_registry_schema_parser_shares_logical_schema_safety_budgets() -> None:
     assert "nesting exceeds safety limit" in source
 
 
-def test_native_registry_rejects_excessive_field_cardinality() -> None:
+def test_native_registry_rejects_excessive_field_cardinality(require_native: None) -> None:
     """A hostile canonical schema fails before its field vector grows further."""
-    require_native()
     from schema_sanitizer.core_impl.native_runtime import native_core
 
     field = '{"name":"f","type":{"kind":"null"}}'

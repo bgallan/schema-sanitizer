@@ -1,4 +1,6 @@
 // Builds field-name lookup metadata for compiled struct plans.
+// Small layouts use sorted vectors, while larger layouts use bounded
+// open-addressing tables plus deterministic flattened and variant aliases.
 
 #include "internal/planning/struct_layout.hh"
 
@@ -17,6 +19,7 @@
 namespace sanitize::internal {
 namespace {
 
+/// Builds the bounded open-addressing lookup table for unique field keys.
 void build_dispatch_table(StructLayout::DispatchTable *table,
                           const std::vector<StructLayout::KeyEntry> &entries) {
   if (!table)
@@ -49,6 +52,7 @@ void build_dispatch_table(StructLayout::DispatchTable *table,
 
 } // namespace
 
+/// Creates exact and alias lookup metadata for one struct schema.
 StructLayout make_struct_layout(const std::vector<LogicalField> &fields) {
   constexpr std::size_t kSortedThreshold = 32;
   constexpr std::size_t kMaxDispatchEntries =

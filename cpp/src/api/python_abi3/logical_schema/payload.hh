@@ -1,4 +1,6 @@
-// Declares ABI3 conversion helpers for native logical-schema payloads.
+// Declares ABI3 conversion helpers for native logical-schema payloads. The
+// bridge validates required fields and transfers Arrow schema ownership back to
+// Python safely.
 
 #pragma once
 

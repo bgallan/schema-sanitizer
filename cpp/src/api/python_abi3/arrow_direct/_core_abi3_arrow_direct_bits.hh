@@ -1,9 +1,10 @@
 /*
- * Inline Arrow C Data bitmap and primitive access helpers.
+ * Declares inline Arrow C Data bitmap and primitive access helpers.
  *
  * These helpers are shared by Arrow direct value extraction units and keep the
  * ABI3 implementation away from repeated local bitmap arithmetic.
  */
+
 #pragma once
 
 #include <cstdint>
@@ -12,12 +13,12 @@
 
 namespace core_abi3_internal {
 
-// Returns one bit from a packed Arrow bitmap.
+/// Returns one bit from a packed Arrow bitmap.
 inline bool bit_at(const uint8_t *bitmap, int64_t index) noexcept {
   return bitmap && (((bitmap[index >> 3] >> (index & 7)) & 1U) != 0);
 }
 
-// Returns whether a row slot is null according to the Arrow validity bitmap.
+/// Returns whether a row slot is null according to the Arrow validity bitmap.
 inline bool is_null_at(const ArrowArray *array, int64_t row) noexcept {
   if (!array || array->null_count == 0) {
     return false;
@@ -30,7 +31,7 @@ inline bool is_null_at(const ArrowArray *array, int64_t row) noexcept {
   return !bit_at(bitmap, bit_index);
 }
 
-// Returns the primitive values buffer with the requested type.
+/// Returns the primitive values buffer with the requested type.
 template <typename T> inline const T *values_buffer(const ArrowArray *array) {
   if (!array || !array->buffers || !array->buffers[1]) {
     return nullptr;
@@ -38,7 +39,7 @@ template <typename T> inline const T *values_buffer(const ArrowArray *array) {
   return static_cast<const T *>(array->buffers[1]);
 }
 
-// Returns one primitive Arrow value at a logical row index.
+/// Returns one primitive Arrow value at a logical row index.
 template <typename T>
 inline T primitive_at(const ArrowArray *array, int64_t row) {
   const auto *values = values_buffer<T>(array);

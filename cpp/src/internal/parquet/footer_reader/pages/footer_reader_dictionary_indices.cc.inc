@@ -1,5 +1,9 @@
-// Decodes dictionary indices and materializes dictionary-backed data pages.
+// Decodes hybrid RLE/bit-packed dictionary indexes and resolves bounded value
+// previews. This fragment is included by the consolidated footer reader inside
+// its private implementation namespace.
 
+/// Returns a decoded dictionary preview or a stable placeholder for an
+/// unpreviewed index.
 std::string dictionary_preview_value(const DictionaryPageState &dictionary,
                                      std::uint32_t index) {
   if (index < dictionary.preview.size()) {
@@ -8,6 +12,8 @@ std::string dictionary_preview_value(const DictionaryPageState &dictionary,
   return std::string("@dict[") + std::to_string(index) + "]";
 }
 
+/// Reads one little-endian 32-bit dictionary value from a previously validated
+/// payload span.
 sanitize::Result<std::uint32_t> read_little_u32_value(std::string_view data,
                                                       std::size_t *offset,
                                                       std::uint8_t bit_width) {
@@ -33,6 +39,8 @@ sanitize::Result<std::uint32_t> read_little_u32_value(std::string_view data,
   return value;
 }
 
+/// Decodes hybrid RLE/bit-packed dictionary indexes and resolves preview
+/// values.
 sanitize::Result<std::int32_t> decode_rle_dictionary_indices(
     std::string_view values, const DictionaryPageState &dictionary,
     std::int32_t expected_values, std::vector<std::string> *preview,

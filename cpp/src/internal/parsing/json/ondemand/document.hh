@@ -1,4 +1,6 @@
 // Declares on-demand JSON document and nested value views.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #pragma once
 
@@ -14,12 +16,8 @@
 
 namespace sanitize::internal {
 
-// Skip a single JSON value starting at `start` (after optional whitespace) and
-// return the index immediately after the value. Validates nested structures and
-// strings.
-//
-// This is used by DOM-less row streams to slice top-level arrays without
-// building a DOM.
+/// Validates and skips one JSON value, returning the first following byte
+/// index.
 sanitize::Result<std::size_t> json_skip_value(std::string_view text,
                                               std::size_t start,
                                               std::size_t base_offset = 0);
@@ -58,13 +56,11 @@ public:
   using FlatObjectEachFn = sanitize::Status (*)(void *, std::string_view,
                                                 FlatValue);
 
-  // `upstream` must be non-null. The ingest pipeline carries a PoolResource
-  // backed by Arrow's MemoryPool; we intentionally do not silently fall back
-  // to new/delete.
+  /// Initializes arena-backed JSON parsing with a required upstream memory
+  /// resource.
   explicit JsonOnDemandDoc(std::pmr::memory_resource *upstream);
 
-  // Release all arena allocations (decoded strings / object+array wrappers).
-  // Safe to call between row parses to bound memory growth.
+  /// Releases decoded strings and wrapper allocations between row parses.
   void Reset() noexcept { arena_.release(); }
 
   // Lightweight wrappers allocated in this doc's arena.
@@ -72,104 +68,100 @@ public:
   struct OdObject;
   struct OdArray;
 
-  // Parse a JSON value from `text` and return a ValueView referencing either:
-  // - primitives (stored inline), or
-  // - object/array wrappers stored in this doc's arena.
-  //
-  // `base_offset` is used for error messages (byte offset of `text` within the
-  // original source).
+  /// Parses one JSON value into inline scalars or arena-backed container
+  /// wrappers.
   sanitize::Result<ValueView> ParseValue(std::string_view text,
                                          std::size_t base_offset = 0);
 
-  // Iterate fields of a JSON object (the text must start with '{' after
-  // optional whitespace). Calls `fn(ctx, key, key_hash, value)` for each field.
+  /// Parses a JSON object and emits each field key, hash, and value to a
+  /// callback.
   sanitize::Status ForEachObjectFieldC(std::string_view text, void *ctx,
                                        ValueView::ObjectEachFn fn,
                                        std::size_t base_offset = 0);
 
-  // Internal flat-inference visitor. It validates one root object while
-  // avoiding key hashing and duplicate primitive-token scans. Numeric values
-  // retain the exact int64-versus-float classification of ParseValue().
+  /// Validates a flat root object and emits lexically classified fields without
+  /// hashing keys.
   sanitize::Status ForEachFlatObjectFieldC(std::string_view text, void *ctx,
                                            FlatObjectEachFn fn,
                                            std::size_t base_offset = 0);
 
-  // Iterate elements of a JSON array (the text must start with '[' after
-  // optional whitespace).
+  /// Parses a JSON array and emits each element to a callback.
   sanitize::Status ForEachArrayElementC(std::string_view text, void *ctx,
                                         ValueView::ArrayEachFn fn,
                                         std::size_t base_offset = 0);
 
-  // Helpers used by vtables.
+  /// Iterates an arena-backed object wrapper through the public object visitor.
   sanitize::Status ForEachObjectFieldImpl(const OdObject *obj, void *ctx,
                                           ValueView::ObjectEachFn fn) const;
-  // Iterates an arena-backed array wrapper through the public array visitor.
+  /// Iterates an arena-backed array wrapper through the public array visitor.
   sanitize::Status ForEachArrayElementImpl(const OdArray *arr, void *ctx,
                                            ValueView::ArrayEachFn fn) const;
 
 private:
-  // Arena allocation helpers.
+  /// Allocates aligned storage from the document arena.
   void *ArenaAlloc(std::size_t n, std::size_t align);
-  // Allocates storage for decoded characters in the document arena.
+  /// Allocates storage for decoded characters in the document arena.
   char *ArenaAllocChars(std::size_t n);
 
-  // Error helper.
+  /// Creates a parse error at the supplied absolute JSON offset.
   static sanitize::Status ParseError(std::string_view msg, std::size_t offset);
-  // Creates a JSON cursor over a source slice.
+  /// Creates a JSON cursor over a source slice.
   static json_scan::Cursor MakeCursor(std::string_view text,
                                       std::size_t base_offset) noexcept;
-  // Verifies that a top-level JSON value consumed the whole slice.
+  /// Verifies that a top-level JSON value consumed the whole slice.
   static sanitize::Status ExpectEnd(json_scan::Cursor &cursor);
-  // Parses one JSON literal and returns the supplied typed value.
+  /// Parses one JSON literal and returns the supplied typed value.
   static sanitize::Result<ValueView>
   ParseLiteralValue(json_scan::Cursor &cursor, const char *literal,
                     std::size_t literal_size, ValueView value);
-  // Parses one JSON string token and decodes escapes when needed.
+  /// Parses one JSON string token and decodes escapes when needed.
   sanitize::Result<ValueView> ParseStringValue(json_scan::Cursor &cursor,
                                                std::string_view text,
                                                std::size_t base_offset);
-  // Parses one JSON object token into an on-demand object wrapper.
+  /// Parses one JSON object token into an on-demand object wrapper.
   sanitize::Result<ValueView> ParseObjectValue(json_scan::Cursor &cursor,
                                                std::string_view text,
                                                std::size_t base_offset);
-  // Parses one JSON array token into an on-demand array wrapper.
+  /// Parses one JSON array token into an on-demand array wrapper.
   sanitize::Result<ValueView> ParseArrayValue(json_scan::Cursor &cursor,
                                               std::string_view text,
                                               std::size_t base_offset);
-  // Parses one JSON number token into an integer or floating scalar.
+  /// Parses one JSON number token into an integer or floating scalar.
   sanitize::Result<ValueView> ParseNumberValue(json_scan::Cursor &cursor,
                                                std::string_view text,
                                                std::size_t base_offset);
-  // Parses one JSON object key token.
+  /// Parses one JSON object key token.
   sanitize::Result<std::string_view> ParseObjectKey(json_scan::Cursor &cursor,
                                                     std::string_view text,
                                                     std::size_t base_offset);
-  // Parses the current object field or array element value slice.
+  /// Parses the current object field or array element value slice.
   sanitize::Result<ValueView> ParseChildValue(json_scan::Cursor &cursor,
                                               std::string_view text,
                                               std::size_t base_offset);
-  // Parses and emits the current object field to a caller callback.
+  /// Parses and emits the current object field to a caller callback.
   sanitize::Status EmitObjectField(json_scan::Cursor &cursor,
                                    std::string_view text, void *ctx,
                                    ValueView::ObjectEachFn fn,
                                    std::size_t base_offset);
+  /// Parses one scalar or validated nested value from a flat-object cursor.
   sanitize::Result<FlatValue> ParseFlatChildValue(json_scan::Cursor &cursor,
                                                   std::string_view text,
                                                   std::size_t base_offset);
+  /// Parses one flat object field and emits its key and classified value.
   sanitize::Status EmitFlatObjectField(json_scan::Cursor &cursor,
                                        std::string_view text, void *ctx,
                                        FlatObjectEachFn fn,
                                        std::size_t base_offset);
-  // Enters a JSON object iterator and reports whether the object is empty.
+  /// Enters a JSON object iterator and reports whether the object is empty.
   static sanitize::Status EnterObjectIterator(json_scan::Cursor &cursor,
                                               bool *done);
-  // Enters a JSON array iterator and reports whether the array is empty.
+  /// Enters a JSON array iterator and reports whether the array is empty.
   static sanitize::Status EnterArrayIterator(json_scan::Cursor &cursor,
                                              bool *done);
-  // Advances an object iterator past ',' or '}'.
+  /// Advances an object iterator past ',' or '}'.
   static sanitize::Status AdvanceObjectIterator(json_scan::Cursor &cursor,
                                                 bool *done);
-  // Advances an array iterator past ',' or ']'.
+  /// Advances an array iterator past ',' or ']'.
   static sanitize::Status AdvanceArrayIterator(json_scan::Cursor &cursor,
                                                bool *done);
 

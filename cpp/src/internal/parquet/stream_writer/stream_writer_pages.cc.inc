@@ -1,5 +1,9 @@
-// Selects, writes, estimates, and slices native Parquet pages.
+// Selects page encodings, slices row ranges, and writes bounded Parquet page
+// payloads. This fragment is included by the consolidated writer to isolate
+// format-specific implementation details.
 
+/// Chooses the smallest valid plain or dictionary representation for one page
+/// payload.
 sanitize::Result<PreparedPagePayload>
 choose_page_payload(const LeafColumn &column, const ColumnPageData &page_data,
                     CompressionCodec codec, int gzip_level,
@@ -83,7 +87,7 @@ choose_page_payload(const LeafColumn &column, const ColumnPageData &page_data,
   return std::move(*best);
 }
 
-// Writes one column data page and returns its file offsets and sizes.
+/// Writes one column data page and returns its file offsets and sizes.
 sanitize::Result<PageInfo>
 write_column_page(CountingOutput &out, const LeafColumn &column,
                   const ColumnPageData &page_data, CompressionCodec codec,
@@ -169,6 +173,8 @@ write_column_page(CountingOutput &out, const LeafColumn &column,
   return info;
 }
 
+/// Returns the staged byte width for a fixed-width Parquet leaf, when
+/// applicable.
 std::size_t fixed_value_width_for_leaf(const LeafColumn &column) {
   if (leaf_value_kind(column) == jsonl::JsonlKind::kBool) {
     return 0;
@@ -177,6 +183,8 @@ std::size_t fixed_value_width_for_leaf(const LeafColumn &column) {
       .value_or(0);
 }
 
+/// Returns a conservative column page data bytes estimate capped to prevent
+/// overflow and unbounded worker admission.
 std::size_t estimate_column_page_data_bytes(const ColumnPageData &page_data) {
   auto total = saturating_size_add(page_data.values.size(),
                                    page_data.bool_values.size());
@@ -188,6 +196,8 @@ std::size_t estimate_column_page_data_bytes(const ColumnPageData &page_data) {
                                       sizeof(std::int16_t)));
 }
 
+/// Returns one byte-array item's checked exclusive offset from the Parquet
+/// length-prefix stream.
 std::size_t byte_array_item_end(std::string_view values,
                                 std::size_t offset) noexcept {
   if (offset > values.size() ||
@@ -207,11 +217,14 @@ struct PageSliceIndex {
   std::size_t fixed_width = 0;
 };
 
+/// Builds page slice index from validated internal state and returns ownership
+/// only after completion.
 PageSliceIndex build_page_slice_index(const LeafColumn &column) {
   return PageSliceIndex{.kind = leaf_value_kind(column),
                         .fixed_width = fixed_value_width_for_leaf(column)};
 }
 
+/// Creates a page-local view of staged values and levels for one row interval.
 ColumnPageData slice_column_page_data(
     const LeafColumn &column, const ColumnPageData &page_data,
     const PageSliceIndex &index, std::size_t begin, std::size_t end,
@@ -261,6 +274,8 @@ ColumnPageData slice_column_page_data(
   return out;
 }
 
+/// Returns the additional staged bytes caused by extending a page through one
+/// more row.
 std::size_t page_row_incremental_bytes(const LeafColumn &column,
                                        const ColumnPageData &page_data,
                                        const PageSliceIndex &index,
@@ -312,6 +327,8 @@ struct ColumnPageRange {
   std::size_t byte_end = 0;
 };
 
+/// Partitions staged column rows into bounded page intervals without splitting
+/// nested values.
 std::vector<ColumnPageRange> split_column_page_ranges(
     const LeafColumn &column, const ColumnPageData &page_data,
     const PageSliceIndex &index, std::int64_t target_page_bytes) {
@@ -374,6 +391,8 @@ std::vector<ColumnPageRange> split_column_page_ranges(
   return ranges;
 }
 
+/// Accumulates page sizes, counts, encodings, and statistics into column
+/// metadata.
 void merge_page_info(PageInfo &target, const PageInfo &page) {
   if (target.num_values == 0) {
     target = page;
@@ -409,7 +428,7 @@ void merge_page_info(PageInfo &target, const PageInfo &page) {
   target.max_value.reset();
 }
 
-// Writes all pages for one column chunk.
+/// Writes all pages for one column chunk.
 sanitize::Result<ColumnChunkInfo>
 write_column_pages(CountingOutput &out, const LeafColumn &column,
                    const ColumnPageData &page_data, CompressionCodec codec,
@@ -452,7 +471,8 @@ write_column_pages(CountingOutput &out, const LeafColumn &column,
   return chunk;
 }
 
-// Validates that a record batch has a root struct array with expected children.
+/// Validates that a record batch has a root struct array with expected
+/// children.
 sanitize::Status validate_batch(const ParquetNode &root,
                                 const ArrowArray &array) {
   if (array.length < 0) {

@@ -1,4 +1,6 @@
-// Parses strict floating-point scalar text values.
+// Parses strict floating-point scalar text values without locale ambiguity.
+// The normalization path validates grouping, fractions, exponents, finite
+// results, and complete input consumption before publishing a value.
 
 #include "sanitize/core/primitives.hh"
 
@@ -16,8 +18,10 @@
 namespace sanitize {
 namespace {
 
+/// Returns whether one byte is an ASCII decimal digit.
 bool is_digit(char c) noexcept { return c >= '0' && c <= '9'; }
 
+/// Normalizes the integer portion and validates thousands-group boundaries.
 bool append_integer_part(std::string_view s, std::size_t *pos,
                          char decimal_separator, char thousands_separator,
                          std::string *normalized, bool *saw_digit) {
@@ -55,6 +59,7 @@ bool append_integer_part(std::string_view s, std::size_t *pos,
   return true;
 }
 
+/// Appends an optional fractional portion using the canonical decimal point.
 bool append_fraction(std::string_view s, std::size_t *pos,
                      char decimal_separator, std::string *normalized,
                      bool *saw_digit) {
@@ -71,6 +76,7 @@ bool append_fraction(std::string_view s, std::size_t *pos,
   return true;
 }
 
+/// Appends an optional exponent and requires at least one exponent digit.
 bool append_exponent(std::string_view s, std::size_t *pos,
                      std::string *normalized) {
   if (*pos >= s.size() || (s[*pos] != 'e' && s[*pos] != 'E')) {
@@ -90,6 +96,8 @@ bool append_exponent(std::string_view s, std::size_t *pos,
   return *pos > digit_start;
 }
 
+/// Parses a finite floating value through locale-independent character
+/// conversion.
 template <typename Float>
 bool parse_ascii_float_from_chars(std::string_view s, Float *out) {
   if constexpr (requires(const char *first, const char *last, Float &value) {
@@ -111,6 +119,7 @@ bool parse_ascii_float_from_chars(std::string_view s, Float *out) {
   return false;
 }
 
+/// Parses a finite ASCII double with the classic locale as a portable fallback.
 bool parse_ascii_float_classic_locale(std::string_view s, double *out) {
   std::istringstream stream{std::string(s)};
   stream.imbue(std::locale::classic());

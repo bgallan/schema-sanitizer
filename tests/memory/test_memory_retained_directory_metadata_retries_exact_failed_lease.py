@@ -1,4 +1,8 @@
-"""Regression coverage for memory retained directory metadata retries exact failed lease."""
+"""Combines retryable directory-metadata leases with provider insertion faults, Azure
+credential construction, remote waiters or footprints, governed local descriptors,
+runtime capabilities, cgroup resolution, cross-process reconciliation, and native
+backpressure. Metadata and transport capacity are reserved once before constructors;
+exact leases bridge Python and native ownership while bounded gates prevent starvation."""
 
 from __future__ import annotations
 
@@ -7,7 +11,12 @@ import threading
 from pathlib import Path
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.source_contracts import package_source_text
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    wait_event_or_fail,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
@@ -15,20 +24,19 @@ CPP = ROOT / "cpp/src"
 CPP_TESTS = ROOT / "cpp/tests"
 
 
-def _source(relative: str) -> str:
-    return (SRC / relative).read_text(encoding="utf-8")
-
-
 def test_retained_directory_metadata_retries_exact_failed_lease() -> None:
+    """Verify retained directory metadata retries exact failed lease."""
     from schema_sanitizer.input_impl.directory_metadata_budget import RetainedDirectoryMetadata
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.fail = True
             self.calls = 0
             self.reserved_bytes = 777
 
         def close(self) -> None:
+            """Close the resources owned by the lease test double."""
             self.calls += 1
             if self.fail:
                 raise RuntimeError("lease close failed")
@@ -50,33 +58,40 @@ def test_retained_directory_metadata_retries_exact_failed_lease() -> None:
 def test_provider_client_insertion_failure_keeps_preallocated_cleanup_escrow(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify provider client insertion failure keeps preallocated cleanup escrow."""
     from schema_sanitizer.remote_impl import provider_session_pool as module
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     class Client:
         def __init__(self) -> None:
+            """Initialize the client test double."""
             self.fail_close = True
             self.closes = 0
 
         async def close(self) -> None:
+            """Close the resources owned by the client test double."""
             self.closes += 1
             if self.fail_close:
                 raise RuntimeError("client close failed")
 
     class ExplodingDict(dict):
         def __setitem__(self, key, value) -> None:  # type: ignore[no-untyped-def]
+            """Store the requested value in the exploding dict test double."""
             raise MemoryError("publish failed")
 
     descriptor = Lease()
     control_leases: list[Lease] = []
 
     def memory_lease(*_a, **_k):  # type: ignore[no-untyped-def]
+        """Create the exact memory lease tracked by the test."""
         lease = Lease()
         control_leases.append(lease)
         return lease
@@ -86,6 +101,7 @@ def test_provider_client_insertion_failure_keeps_preallocated_cleanup_escrow(
     client = Client()
 
     async def run() -> None:
+        """Force client publication failure and verify escrowed close retry."""
         pool = module.RemoteProviderSessionPool()
         await pool.__aenter__()
         pool._entries = ExplodingDict()
@@ -109,21 +125,26 @@ def test_provider_client_insertion_failure_keeps_preallocated_cleanup_escrow(
 def test_provider_manager_partial_enter_stays_owned_until_exit_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify provider manager partial enter stays owned until exit retry."""
     from schema_sanitizer.remote_impl import provider_session_pool as module
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             return None
 
     class Manager:
         def __init__(self) -> None:
+            """Initialize the manager test double."""
             self.exit_fail = True
             self.exit_calls = 0
 
         async def __aenter__(self):
+            """Enter the asynchronous context managed by the manager test double."""
             raise RuntimeError("partial enter")
 
         async def __aexit__(self, *_exc):
+            """Exit the asynchronous context managed by the manager test double and run cleanup."""
             self.exit_calls += 1
             if self.exit_fail:
                 raise RuntimeError("rollback exit failed")
@@ -133,6 +154,7 @@ def test_provider_manager_partial_enter_stays_owned_until_exit_retry(
     manager = Manager()
 
     async def run() -> None:
+        """Fail manager rollback, then retry exit until its escrow slot is free."""
         pool = module.RemoteProviderSessionPool()
         await pool.__aenter__()
         with pytest.raises(RuntimeError, match="rollback exit failed"):
@@ -149,7 +171,8 @@ def test_provider_manager_partial_enter_stays_owned_until_exit_retry(
 
 
 def test_azure_credential_terminal_slot_is_reserved_before_constructor() -> None:
-    source = _source("remote_impl/providers/azure.py")
+    """Verify azure credential terminal slot is reserved before constructor."""
+    source = package_source_text("remote_impl/providers/azure.py")
     start = source.index("async def _open_service_unpooled")
     body = source[start : source.index("\n\nasync def", start + 10)]
     reserve = body.index("reservation = _reserve_azure_rollback_slot()")
@@ -162,15 +185,18 @@ def test_azure_credential_terminal_slot_is_reserved_before_constructor() -> None
 def test_remote_io_waiter_self_expires_at_operation_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify remote I/O waiter self expires at operation deadline."""
     from schema_sanitizer.core_impl import cancellation as cancellation_module
     from schema_sanitizer.errors import SchemaSanitizerCancelledError
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     class StepClock:
         def __init__(self) -> None:
+            """Initialize the step clock test double."""
             self.reads = 0
 
         def __call__(self) -> float:
+            """Invoke the step clock test double."""
             self.reads += 1
             return 0.0 if self.reads <= 4 else 2.0
 
@@ -178,6 +204,7 @@ def test_remote_io_waiter_self_expires_at_operation_deadline(
     monkeypatch.setattr(cancellation_module, "monotonic", clock)
 
     async def run() -> tuple[int, int]:
+        """Expire a queued waiter at its deadline and return cancellation metrics."""
         governor = RemoteIoPermitGovernor(capacity=1)
         first = await governor.acquire(1, operation_id="holder")
         try:
@@ -198,9 +225,11 @@ def test_remote_io_waiter_self_expires_at_operation_deadline(
 def test_sync_and_async_remote_waiters_share_one_process_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify sync and async remote waiters share one process authority."""
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     async def run() -> None:
+        """Coordinate synchronous and asynchronous waiters under one permit authority."""
         governor = RemoteIoPermitGovernor(capacity=1)
         first = await governor.acquire(1, operation_id="async-holder")
         acquired = threading.Event()
@@ -210,6 +239,7 @@ def test_sync_and_async_remote_waiters_share_one_process_authority(
         original_enqueue = governor._enqueue_waiter_locked
 
         def observe_enqueue(waiter: object) -> None:
+            """Record observe enqueue for the enclosing assertion."""
             original_enqueue(waiter)  # type: ignore[arg-type]
             if getattr(waiter, "sync_event", None) is not None:
                 enqueued.set()
@@ -217,10 +247,11 @@ def test_sync_and_async_remote_waiters_share_one_process_authority(
         monkeypatch.setattr(governor, "_enqueue_waiter_locked", observe_enqueue)
 
         def worker() -> None:
+            """Run the worker side of the synchronization scenario."""
             try:
                 permit = governor.acquire_sync(1, operation_id="sync-waiter")
                 acquired.set()
-                release.wait(timeout=1.0)
+                wait_event_or_fail(release)
                 permit.release()
             except BaseException as exc:
                 errors.append(exc)
@@ -235,8 +266,7 @@ def test_sync_and_async_remote_waiters_share_one_process_authority(
         first.release()
         assert await asyncio.to_thread(acquired.wait, SCHEDULER_TIMEOUT_SECONDS)
         release.set()
-        thread.join(timeout=SCHEDULER_TIMEOUT_SECONDS)
-        assert not thread.is_alive()
+        join_thread_or_fail(thread)
         assert not errors
 
     asyncio.run(run())
@@ -245,15 +275,18 @@ def test_sync_and_async_remote_waiters_share_one_process_authority(
 def test_remote_footprint_separates_logical_network_and_local_fd_weights(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify remote footprint separates logical network and local FD weights."""
     from schema_sanitizer.remote_impl import io_footprint as module
 
     acquired: list[int] = []
 
     class Lease:
         def __enter__(self):
+            """Enter the context managed by the lease test double."""
             return self
 
         def __exit__(self, *_exc):
+            """Exit the context managed by the lease test double and run cleanup."""
             return None
 
     monkeypatch.setattr(
@@ -277,15 +310,17 @@ def test_remote_footprint_separates_logical_network_and_local_fd_weights(
 
 
 def test_async_provider_pool_charges_transport_capacity_once_not_per_operation() -> None:
-    context = _source("api_impl/operation_context.py")
-    coordinator = _source("remote_impl/io_coordinator.py")
+    """Verify async provider pool charges transport capacity once not per operation."""
+    context = package_source_text("api_impl/operation_context.py")
+    coordinator = package_source_text("remote_impl/io_coordinator.py")
     assert "default_descriptor_weight=max(1, self.policy.async_concurrency)" in context
     assert "RemoteIoFootprint(remote_weight=permit_weight, network_fds=0)" in coordinator
-    transport = _source("remote_impl/transport.py")
+    transport = package_source_text("remote_impl/transport.py")
     assert "descriptor_weight=max" not in transport
 
 
 def test_simple_remote_uploads_consume_pre_admitted_local_fd_credit() -> None:
+    """Verify simple remote uploads consume pre admitted local FD credit."""
     paths = [
         "remote_impl/providers/s3.py",
         "remote_impl/providers/s3_sync.py",
@@ -297,58 +332,99 @@ def test_simple_remote_uploads_consume_pre_admitted_local_fd_credit() -> None:
         "remote_impl/sync_http.py",
     ]
     for relative in paths:
-        source = _source(relative)
+        source = package_source_text(relative)
         assert "open_remote_local_file" in source, relative
 
 
 def test_python_local_user_file_streams_use_governed_open() -> None:
+    """Verify Python local user file streams use governed open."""
     for relative in (
         "input_impl/selection.py",
         "input_impl/directory_inputs.py",
         "api_impl/output_diagnostics.py",
     ):
-        source = _source(relative)
+        source = package_source_text(relative)
         assert "open_governed_file" in source, relative
 
 
 def test_python_fd_lease_bridges_to_native_process_authority(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Python FD lease bridges to native process authority."""
     from schema_sanitizer.core_impl import native_runtime, process_resources
 
     class NativeFdApi:
+        class Receipt:
+            def __init__(self, amount: int) -> None:
+                """Initialize the receipt test double."""
+                self.receipt_id = 1
+                self.generation = 1
+                self.amount = amount
+                self.opened = 0
+
         def __init__(self) -> None:
+            """Initialize the native FD API test double."""
             self.acquires: list[tuple[int, int]] = []
-            self.releases: list[int] = []
+            self.resize_targets: list[int] = []
 
-        def process_file_descriptor_permits_acquire(self, desired: int, minimum: int) -> int:
+        def process_file_descriptor_permit_lease_acquire_wait(
+            self, desired: int, minimum: int, timeout_ms: int
+        ):
+            """Record the descriptor range and issue an exact native receipt."""
+            del timeout_ms
             self.acquires.append((desired, minimum))
-            return desired
+            return self.Receipt(desired), desired
 
-        def process_file_descriptor_permits_release(self, amount: int) -> None:
-            self.releases.append(amount)
+        def process_file_descriptor_permit_lease_metadata(self, receipt: Receipt):
+            """Return metadata for the exact FD permit lease."""
+            return receipt.receipt_id, receipt.generation, receipt.amount, receipt.opened
+
+        @staticmethod
+        def process_file_descriptor_permits_snapshot() -> tuple[int, int, int, int, int, int]:
+            """Return the current FD permit ledger snapshot."""
+            return (1024, 0, 0, 0, 0, 0)
+
+        @staticmethod
+        def process_resident_memory_stats() -> tuple[int, int, int]:
+            """Return the controlled resident-memory statistics."""
+            return (1 << 40, 0, 0)
+
+        def process_file_descriptor_permit_lease_resize(
+            self, receipt: Receipt, target: int, generation: int
+        ):
+            """Record and apply a receipt resize while advancing its generation."""
+            assert generation == receipt.generation
+            self.resize_targets.append(target)
+            receipt.amount = target
+            receipt.generation += 1
+            return receipt.generation, receipt.amount, receipt.opened
 
     fake = NativeFdApi()
     monkeypatch.setattr(native_runtime, "native_core", fake)
     lease = process_resources.acquire_file_descriptors(1, timeout_seconds=0.1)
     lease.release()
     assert fake.acquires[-1] == (1, 1)
-    assert fake.releases[-1] == 1
+    assert fake.resize_targets[-1] == 0
 
 
 def test_native_fd_abi_and_raii_cover_user_data_file_handles() -> None:
+    """Verify native FD ABI and RAII cover user data file handles."""
     header = (CPP / "internal/runtime/process_fd_governor.hh").read_text(encoding="utf-8")
     arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
-    methods = (CPP / "internal/abi/python_abi3/methods.hh").read_text(encoding="utf-8")
+    catalog = (CPP / "internal/abi/python_abi3/method_catalog.inc").read_text(encoding="utf-8")
     module = (CPP / "api/python_abi3/_core_abi3_module.cc").read_text(encoding="utf-8")
     assert "class ProcessFdPermitLease" in header
     assert "acquire_process_file_descriptor_permits" in arena
-    assert "process_file_descriptor_permits_acquire" in methods
-    assert "process_file_descriptor_permits_acquire" in module
+    assert "process_file_descriptor_permit_lease_acquire_wait" in catalog
+    assert 'include "internal/abi/python_abi3/method_catalog.inc"' in module
+
+    secure_file = (CPP / "ingest/secure_read_only_file.hh").read_text(encoding="utf-8")
+    assert "ProcessFdPermitLease" in secure_file
+    for relative in ("ingest/chunk_source_file.cc", "ingest/transcoding/chunk_source.cc"):
+        source = (CPP / relative).read_text(encoding="utf-8")
+        assert "SecureReadOnlyFile" in source, relative
 
     for relative in (
-        "ingest/chunk_source_file.cc",
-        "ingest/transcoding/chunk_source.cc",
         "internal/parquet/footer_reader/footer_reader.cc",
         "api/python_abi3/json/output_adapters/output_adapters.cc",
         "api/python_abi3/csv/_core_abi3_csv_writer.cc",
@@ -369,7 +445,8 @@ def test_native_fd_abi_and_raii_cover_user_data_file_handles() -> None:
     assert parquet_public.count("ProcessFdPermitLease") >= 4
 
 
-def test_externally_governed_results_reject_boolean_proofs_and_require_capability() -> None:
+def test_externally_governed_results_require_runtime_capability() -> None:
+    """Verify externally governed results require runtime capability."""
     from schema_sanitizer.core_impl.async_scheduler import (
         AsyncResultMemoryContract,
         AsyncResultOwnershipMode,
@@ -377,13 +454,12 @@ def test_externally_governed_results_reject_boolean_proofs_and_require_capabilit
     )
     from schema_sanitizer.core_impl.memory_budget import no_retained_result_ownership_capability
 
-    forged = AsyncResultMemoryContract(
+    missing = AsyncResultMemoryContract(
         preflight_bytes=1,
         ownership_mode=AsyncResultOwnershipMode.EXTERNALLY_GOVERNED,
-        external_ownership_proof=lambda _value: True,
     )
-    with pytest.raises(RuntimeError, match="runtime-issued"):
-        _assert_async_result_ownership(object(), forged)
+    with pytest.raises(RuntimeError, match="authenticated ownership capability"):
+        _assert_async_result_ownership(object(), missing)
 
     authenticated = AsyncResultMemoryContract(
         preflight_bytes=1,
@@ -396,20 +472,22 @@ def test_externally_governed_results_reject_boolean_proofs_and_require_capabilit
 def test_cgroup_resolver_prefers_complete_root_mount_over_subtree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cgroup resolver prefers complete root mount over subtree."""
     from schema_sanitizer.core_impl import cgroup_view
 
     lines = [
-        "25 1 0:20 /tenant /sys/fs/cgroup/sub rw - cgroup2 cgroup rw",
+        "25 1 0:20 /slice /sys/fs/cgroup/sub rw - cgroup2 cgroup rw",
         "26 1 0:21 / /sys/fs/cgroup rw - cgroup2 cgroup rw",
     ]
     monkeypatch.setattr(cgroup_view, "_iter_bounded_proc_lines", lambda *_a, **_k: iter(lines))
-    view = cgroup_view._resolve_linux_cgroup_view_once(("/tenant", {}))
+    view = cgroup_view._resolve_linux_cgroup_view_once(("/slice", {}))
     assert view.version == 2
     assert view.hierarchy_complete
-    assert view.root == Path("/sys/fs/cgroup/tenant")
+    assert view.root == Path("/sys/fs/cgroup/slice")
 
 
 def test_cgroup_small_value_reader_rejects_truncation(tmp_path: Path) -> None:
+    """Verify cgroup small value reader rejects truncation."""
     from schema_sanitizer.core_impl.cgroup_view import _read_text_path
 
     path = tmp_path / "memory.max"
@@ -419,7 +497,8 @@ def test_cgroup_small_value_reader_rejects_truncation(tmp_path: Path) -> None:
 
 
 def test_empty_cross_process_reconciliation_failure_rebases_without_losing_owner() -> None:
-    source = _source("core_impl/cross_process_memory.py")
+    """Verify empty cross process reconciliation failure rebases without losing owner."""
+    source = package_source_text("core_impl/cross_process_memory.py")
     start = source.index("def _get_process_coordinator")
     body = source[start : source.index("\n\ndef acquire_cross_process_memory", start)]
     assert "coordinator.reconcile_pending()" in body
@@ -428,6 +507,7 @@ def test_empty_cross_process_reconciliation_failure_rebases_without_losing_owner
 
 
 def test_native_backpressure_uses_independent_ticket_bank_and_bounded_bypass() -> None:
+    """Verify native backpressure uses independent ticket bank and bounded bypass."""
     source = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     header = (CPP / "internal/runtime/operation_task_arena.hh").read_text(encoding="utf-8")
     assert "ProducerWaiterCapacity" in source
@@ -439,7 +519,8 @@ def test_native_backpressure_uses_independent_ticket_bank_and_bounded_bypass() -
 
 
 def test_provider_key_gates_are_bounded_and_memory_charged() -> None:
-    source = _source("remote_impl/provider_session_pool.py")
+    """Verify provider key gates are bounded and memory charged."""
+    source = package_source_text("remote_impl/provider_session_pool.py")
     assert "_MAX_PENDING_KEY_GATES = 1024" in source
     assert "provider_pending_key_gates" in source
     assert 'acquire_operation_memory(512, stage="remote_provider_key_gate")' in source
@@ -447,6 +528,7 @@ def test_provider_key_gates_are_bounded_and_memory_charged() -> None:
 
 
 def test_native_probe_contains_starvation_prevention_case() -> None:
+    """Verify native probe contains starvation prevention case."""
     source = (CPP_TESTS / "ordered_executor_tsan.cc").read_text(encoding="utf-8")
     assert "run_arena_backpressure_starvation_round" in source
     assert 'selected_case == "arena_backpressure_starvation"' in source

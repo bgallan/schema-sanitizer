@@ -1,4 +1,8 @@
-"""No-throw exception summaries and bounded cleanup notes."""
+"""Create no-throw exception summaries and bounded cleanup notes.
+
+Objects are described without invoking unsafe representations, and cleanup context is attached
+while tracebacks and oversized details are discarded.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ _DEFAULT_MAX_CHARS = 512
 
 
 def _safe_type_name(value: object) -> str:
+    """Return the safe type name."""
     try:
         name = type(value).__name__
     except BaseException:

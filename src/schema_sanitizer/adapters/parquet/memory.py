@@ -1,4 +1,8 @@
-"""Memory policy for Parquet batch decoding."""
+"""Memory policy for Parquet batch decoding.
+
+It derives safe decode batch sizes and direct-ingest eligibility from the operation
+memory limit and estimated row width.
+"""
 
 from __future__ import annotations
 

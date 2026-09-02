@@ -1,4 +1,6 @@
-"""Regression coverage for registry metadata-stream memory-limit propagation."""
+"""Ensures that registry wrappers preserve the caller's explicit memory limit through
+public Parquet conversion. Metadata budgeting and conversion atomicity share the same
+operation boundary, preventing generated schemas from escaping the budget."""
 
 from __future__ import annotations
 
@@ -7,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import require_native
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 _MEMORY_LIMIT_BYTES = 1 << 20
 _METADATA_LIMIT_BYTES = _MEMORY_LIMIT_BYTES // 8
@@ -19,7 +22,6 @@ def test_registry_metadata_wrapper_preserves_explicit_memory_limit(
     source_kind: str,
 ) -> None:
     """Every source-selected registry wrapper must keep the caller's budget."""
-    require_native()
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
     from schema_sanitizer.core_impl.native_symbols import PARQUET_STREAM_WRITE
     from schema_sanitizer.options_impl.call_options import normalize_call_options
@@ -73,7 +75,6 @@ def test_public_parquet_conversion_keeps_metadata_budget_and_atomicity(
     tmp_path: Path,
 ) -> None:
     """The public path preserves the low budget and removes staged output."""
-    require_native()
     import schema_sanitizer as ss
 
     source = tmp_path / ("source-" + "x" * 120 + ".jsonl")

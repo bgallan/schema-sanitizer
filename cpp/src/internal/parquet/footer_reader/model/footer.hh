@@ -1,4 +1,6 @@
-// Row-group and footer metadata exposed by the bounded Parquet reader.
+// Declares row-group and footer metadata exposed by the bounded Parquet reader.
+// These definitions support the internal pipeline without expanding its public
+// interface.
 
 #pragma once
 

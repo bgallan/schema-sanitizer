@@ -1,4 +1,6 @@
 // Implements Arrow temporal and interval text formatting helpers.
+// These routines provide deterministic representations shared by the native
+// JSON and CSV output paths.
 
 #include "internal/arrow_text/formatters.hh"
 
@@ -12,7 +14,7 @@
 namespace sanitize::internal::arrow_format {
 namespace {
 
-/// Multiplies an int64 timestamp by a positive factor with saturation.
+/// Multiplies a signed 64-bit timestamp by a positive factor with saturation.
 int64_t saturating_multiply(int64_t value, int64_t factor) noexcept {
   if (factor <= 1) {
     return value;
@@ -120,11 +122,14 @@ std::string month_interval_to_string(int32_t months) {
   return "months=" + std::to_string(months);
 }
 
+/// Formats Arrow day-time interval components into the writer's stable
+/// diagnostic text form.
 std::string day_time_interval_to_string(int32_t days, int32_t milliseconds) {
   return "days=" + std::to_string(days) +
          ",milliseconds=" + std::to_string(milliseconds);
 }
 
+/// Formats Arrow month-day-nanosecond components into stable diagnostic text.
 std::string month_day_nano_interval_to_string(int32_t months, int32_t days,
                                               int64_t nanoseconds) {
   return "months=" + std::to_string(months) + ",days=" + std::to_string(days) +

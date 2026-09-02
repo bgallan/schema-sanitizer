@@ -1,24 +1,27 @@
 /*
- * Python ABI3 sink wrapper entry points.
+ * Implements Python ABI3 sink wrapper entry points.
  *
  * This file converts Python Arrow C Stream inputs into native context-to-sink
- * calls and wraps the resulting Arrow C Stream capsules. Text/path/reader
- * inputs are handled by the source-selected wrapper.
+ * calls and wraps the resulting Arrow C Stream capsules.
+ *
+ * Text/path/reader inputs are handled by the source-selected wrapper.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 
 #include <exception>
 #include <string_view>
 #include <utility>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
 
 namespace core_abi3_internal {
 
+/// Runs a Python Arrow stream through a native sink and packs stream
+/// diagnostics.
 PyObject *py_context_to_sink_arrow_stream(PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;
   const char *sink_name = nullptr;
@@ -52,10 +55,6 @@ PyObject *py_context_to_sink_arrow_stream(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  ArrowArrayStream *main_stream = nullptr;
-  schema_sanitizer_diagnostics *diagnostics = nullptr;
-  char *err = nullptr;
-
   try {
     sanitize::LogicalSchema input_schema;
     auto frontend_r = make_arrow_frontend(
@@ -64,8 +63,7 @@ PyObject *py_context_to_sink_arrow_stream(PyObject *, PyObject *args) {
             .timestamp_precision = prepared_options->spec.timestamp_precision,
             .memory_limit_bytes = prepared_options->spec.memory_limit_bytes});
     if (!frontend_r.ok()) {
-      raise_status_error(code_for_status(frontend_r.status()),
-                         dup_cstr(frontend_r.status().ToString()));
+      raise_status_error(frontend_r.status());
       return nullptr;
     }
     auto frontend = std::move(frontend_r).ValueOrDie();
@@ -73,8 +71,7 @@ PyObject *py_context_to_sink_arrow_stream(PyObject *, PyObject *args) {
     auto final_schema_r =
         finalize_direct_arrow_schema(input_schema, *prepared_options);
     if (!final_schema_r.ok()) {
-      raise_status_error(code_for_status(final_schema_r.status()),
-                         dup_cstr(final_schema_r.status().ToString()));
+      raise_status_error(final_schema_r.status());
       return nullptr;
     }
     auto final_schema = std::move(final_schema_r).ValueOrDie();
@@ -83,20 +80,18 @@ PyObject *py_context_to_sink_arrow_stream(PyObject *, PyObject *args) {
         ingest_direct_arrow_stream(std::move(frontend), std::move(final_schema),
                                    std::move(prepared_options), ctx->ctx);
     if (!out_r.ok()) {
-      raise_status_error(code_for_status(out_r.status()),
-                         dup_cstr(out_r.status().ToString()));
+      raise_status_error(out_r.status());
       return nullptr;
     }
 
-    SinkOutputs outputs{.stream = &main_stream, .diagnostics = &diagnostics};
-    int rc = ingest_stream_to_streams(
-        std::move(out_r).ValueOrDie(), outputs, &err,
-        "schema_sanitizer_context_to_sink_arrow_stream");
-    if (rc != SCHEMA_SANITIZER_STATUS_OK) {
-      release_sink_outputs(main_stream, diagnostics);
-      raise_status_error(rc, err);
+    auto sink = native_sink_from_ingest_stream(std::move(out_r).ValueOrDie());
+    if (!sink.ok()) {
+      raise_status_error(sink.status());
       return nullptr;
     }
+    auto output = std::move(sink).ValueOrDie();
+    return pack_stream_and_diagnostics(stream_obj, output.stream.release(),
+                                       output.diagnostics.release());
   } catch (const std::bad_alloc &) {
     PyErr_NoMemory();
     return nullptr;
@@ -108,7 +103,7 @@ PyObject *py_context_to_sink_arrow_stream(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  return pack_stream_and_diagnostics(stream_obj, main_stream, diagnostics);
+  return nullptr;
 }
 
 } // namespace core_abi3_internal

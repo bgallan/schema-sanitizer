@@ -1,4 +1,6 @@
 // Implements temporal JSON serialization for Arrow values.
+// The code validates Arrow layouts and emits deterministic JSON with correct
+// null and logical-type semantics.
 
 #include "internal/json_output/jsonl_value_writer_parts.hh"
 
@@ -10,6 +12,8 @@
 namespace sanitize::internal::jsonl_stream_writer {
 namespace {
 
+/// Returns the typed Arrow values buffer after verifying that the buffer
+/// pointer is available.
 template <typename T> const T *data_buffer(const ArrowArray &array) {
   if (!array.buffers || !array.buffers[1]) {
     return nullptr;
@@ -17,6 +21,8 @@ template <typename T> const T *data_buffer(const ArrowArray &array) {
   return static_cast<const T *>(array.buffers[1]);
 }
 
+/// Performs mathematical floor division so negative temporal offsets normalize
+/// correctly.
 int64_t floor_div(int64_t value, int64_t divisor) {
   int64_t q = value / divisor;
   int64_t r = value % divisor;
@@ -26,6 +32,7 @@ int64_t floor_div(int64_t value, int64_t divisor) {
   return q;
 }
 
+/// Returns a nonnegative remainder paired with mathematical floor division.
 int64_t floor_mod(int64_t value, int64_t divisor) {
   int64_t r = value % divisor;
   if (r < 0) {
@@ -34,6 +41,8 @@ int64_t floor_mod(int64_t value, int64_t divisor) {
   return r;
 }
 
+/// Converts a Unix-epoch day offset to a proleptic Gregorian year, month, and
+/// day.
 void civil_from_days(int64_t z, int *year, unsigned *month, unsigned *day) {
   z += 719468;
   const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
@@ -50,6 +59,7 @@ void civil_from_days(int64_t z, int *year, unsigned *month, unsigned *day) {
   *day = d;
 }
 
+/// Appends an integer padded with leading zeroes to the requested width.
 void append_padded_int(TextBuffer &out, int value, int width) {
   std::array<char, 32> buffer{};
   auto [ptr, ec] =
@@ -65,6 +75,7 @@ void append_padded_int(TextBuffer &out, int value, int width) {
   out.append(buffer.data(), static_cast<std::size_t>(len));
 }
 
+/// Formats a Unix-epoch day offset as an ISO 8601 calendar date.
 void append_iso_date(TextBuffer &out, int64_t days_since_epoch) {
   int year = 1970;
   unsigned month = 1;
@@ -77,6 +88,7 @@ void append_iso_date(TextBuffer &out, int64_t days_since_epoch) {
   append_padded_int(out, static_cast<int>(day), 2);
 }
 
+/// Formats seconds since midnight and optional nanoseconds as an ISO 8601 time.
 void append_iso_time(TextBuffer &out, int64_t seconds_since_midnight,
                      int64_t nanos) {
   const int hour = static_cast<int>(seconds_since_midnight / 3600);
@@ -135,6 +147,7 @@ sanitize::Status append_timestamp_value(TextBuffer &out,
   return sanitize::Status::OK();
 }
 
+/// Serializes one Arrow Date32 day count as quoted ISO 8601 text.
 sanitize::Status append_date32_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row, bool quote) {
   const int32_t *values = data_buffer<int32_t>(array);
@@ -151,6 +164,7 @@ sanitize::Status append_date32_value(TextBuffer &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
+/// Serializes one Arrow Date64 millisecond count as quoted ISO 8601 text.
 sanitize::Status append_date64_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row, bool quote) {
   const int64_t *values = data_buffer<int64_t>(array);
@@ -167,6 +181,7 @@ sanitize::Status append_date64_value(TextBuffer &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
+/// Serializes one second-resolution Arrow Time32 value as quoted ISO 8601 text.
 sanitize::Status append_time32s_value(TextBuffer &out, const ArrowArray &array,
                                       int64_t row, bool quote) {
   const int32_t *values = data_buffer<int32_t>(array);
@@ -183,6 +198,8 @@ sanitize::Status append_time32s_value(TextBuffer &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
+/// Serializes one millisecond-resolution Arrow Time32 value as quoted ISO 8601
+/// text.
 sanitize::Status append_time32ms_value(TextBuffer &out, const ArrowArray &array,
                                        int64_t row, bool quote) {
   const int32_t *values = data_buffer<int32_t>(array);
@@ -202,6 +219,7 @@ sanitize::Status append_time32ms_value(TextBuffer &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
+/// Serializes one microsecond- or nanosecond-resolution Arrow Time64 value.
 sanitize::Status append_time64_value(TextBuffer &out, const ArrowArray &array,
                                      int64_t row, int64_t units_per_second,
                                      bool quote) {

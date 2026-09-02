@@ -1,0 +1,15 @@
+{
+  "compiler_version": "19.44.35228.0",
+  "format": "schema-sanitizer-windows-toolchain-v1",
+  "generator": "Visual Studio 17 2022",
+  "generator_instance": "C:/Program Files/Microsoft Visual Studio/2022/Enterprise",
+  "redistributable_version": "14.44.35112",
+  "sdk_version": "10.0.26100.0",
+  "toolset": "v143,host=x64,version=14.44.35207",
+  "vc_tools_version": "14.44.35207",
+  "wheel_runtime_dlls": {
+    "schema_sanitizer.libs/msvcp140-0f885b509a685d2bbfa652fed26b5fb3.dll": "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9",
+    "schema_sanitizer.libs/msvcp140_1-7e212947b1f925e56788338fc201a67c.dll": "e114d8939749422a1ec01ab9cbbdce7edcb0b70121de20e30b589050e65581a4",
+    "schema_sanitizer.libs/msvcp140_atomic_wait-4cdcefc123380c8f46116e92310a3e8c.dll": "502e2e987d351b2bea771de8d7d9417401e9c5ae8534d1246e17531891820f1c"
+  }
+}

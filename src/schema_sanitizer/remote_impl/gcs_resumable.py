@@ -1,4 +1,8 @@
-"""Google Cloud Storage resumable-upload protocol with offset reconciliation."""
+"""Google Cloud Storage resumable-upload protocol with offset reconciliation.
+
+It creates resumable sessions, uploads bounded ranges, reconciles committed offsets
+after ambiguous responses, and aborts terminal failures.
+"""
 
 from __future__ import annotations
 
@@ -16,30 +20,19 @@ from .transport import (
     read_bounded_response_text,
 )
 from .upload_policy import (
+    TransientGcsUploadError as _TransientGcsUploadError,
+)
+from .upload_policy import (
+    gcs_resumable_next_offset,
     read_upload_range,
     release_upload_payload,
     remote_upload_policy,
 )
 
 
-class TransientGcsUploadError(RuntimeError):
-    """A GCS upload response or transport failure that may be retried."""
-
-
-def _committed_end(response: Any) -> int:
-    """Return the final committed byte ordinal from a resumable response."""
-    raw = response.headers.get("Range") if hasattr(response, "headers") else None
-    if not isinstance(raw, str) or not raw.startswith("bytes=0-"):
-        return -1
-    try:
-        return int(raw.removeprefix("bytes=0-"))
-    except ValueError:
-        return -1
-
-
 def _retryable(exc: Exception) -> bool:
     """Return whether one protocol or transport error is safe to retry."""
-    if isinstance(exc, (TransientGcsUploadError, TimeoutError, ConnectionError, OSError)):
+    if isinstance(exc, (_TransientGcsUploadError, TimeoutError, ConnectionError, OSError)):
         return True
     return exc.__class__.__module__.split(".", 1)[0] == "aiohttp"
 
@@ -49,30 +42,42 @@ async def _status(session: Any, upload_url: str, *, total_bytes: int) -> int:
     headers = {"Content-Length": "0", "Content-Range": f"bytes */{total_bytes}"}
     async with session.put(upload_url, headers=headers, data=b"") as response:
         if response.status == 308:
-            await read_bounded_response_bytes(
+            body = await read_bounded_response_bytes(
                 response,
                 maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
                 stage="remote_control_response",
             )
-            return _committed_end(response) + 1
+            return gcs_resumable_next_offset(
+                response.status,
+                response.headers,
+                body,
+                operation="status",
+                total_bytes=total_bytes,
+            )
         if response.status in {200, 201}:
-            await read_bounded_response_bytes(
+            body = await read_bounded_response_bytes(
                 response,
                 maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
                 stage="remote_control_response",
             )
-            return total_bytes
-        body = await read_bounded_response_text(
+            return gcs_resumable_next_offset(
+                response.status,
+                response.headers,
+                body,
+                operation="status",
+                total_bytes=total_bytes,
+            )
+        error_body = await read_bounded_response_text(
             response,
             maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
             stage="remote_error_response",
         )
-        if response.status == 429 or 500 <= response.status <= 599:
-            raise TransientGcsUploadError(
-                f"GCS resumable status failed: status={response.status}, body={body[:1000]!r}"
-            )
-        raise RuntimeError(
-            f"GCS resumable status failed: status={response.status}, body={body[:1000]!r}"
+        return gcs_resumable_next_offset(
+            response.status,
+            response.headers,
+            error_body,
+            operation="status",
+            total_bytes=total_bytes,
         )
 
 
@@ -93,39 +98,34 @@ async def _send_range(
         "Content-Range": f"bytes {start}-{end}/{total_bytes}",
     }
     async with session.put(upload_url, headers=headers, data=payload) as response:
-        if response.status in {200, 201}:
-            await read_bounded_response_bytes(
+        if response.status in {200, 201, 308}:
+            body = await read_bounded_response_bytes(
                 response,
                 maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
                 stage="remote_control_response",
             )
-            if end != total_bytes - 1:
-                raise RuntimeError("GCS finalized a resumable upload before the final byte")
-            return total_bytes
-        if response.status == 308:
-            await read_bounded_response_bytes(
-                response,
-                maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
-                stage="remote_control_response",
+            return gcs_resumable_next_offset(
+                response.status,
+                response.headers,
+                body,
+                operation="chunk",
+                total_bytes=total_bytes,
+                start=start,
+                end=end,
             )
-            next_offset = _committed_end(response) + 1
-            if not start <= next_offset <= end + 1:
-                raise RuntimeError(
-                    "GCS resumable upload returned an invalid committed range: "
-                    f"start={start}, end={end}, next={next_offset}"
-                )
-            return next_offset
-        body = await read_bounded_response_text(
+        error_body = await read_bounded_response_text(
             response,
             maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
             stage="remote_error_response",
         )
-        if response.status == 429 or 500 <= response.status <= 599:
-            raise TransientGcsUploadError(
-                f"GCS resumable chunk failed: status={response.status}, body={body[:1000]!r}"
-            )
-        raise RuntimeError(
-            f"GCS resumable chunk failed: status={response.status}, body={body[:1000]!r}"
+        return gcs_resumable_next_offset(
+            response.status,
+            response.headers,
+            error_body,
+            operation="chunk",
+            total_bytes=total_bytes,
+            start=start,
+            end=end,
         )
 
 
@@ -239,7 +239,7 @@ async def upload_gcs_resumable_file(
                 stage="remote_error_response",
             )
             if response.status == 429 or 500 <= response.status <= 599:
-                raise TransientGcsUploadError(
+                raise _TransientGcsUploadError(
                     "GCS resumable initiation failed: "
                     f"status={response.status}, body={body[:1000]!r}"
                 )
@@ -288,4 +288,4 @@ async def upload_gcs_resumable_file(
         raise OSError("remote upload spool changed before GCS publication completed")
 
 
-__all__ = ["TransientGcsUploadError", "upload_gcs_resumable_file"]
+__all__ = ["upload_gcs_resumable_file"]

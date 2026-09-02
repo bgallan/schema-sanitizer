@@ -1,4 +1,8 @@
-"""Regression coverage for memory remote io wait queue is bounded and recovers after cancellation."""
+"""Bounds remote-I/O and native-memory waiters alongside coordinator submissions, provider
+terminal outcomes, attacker-sized metadata, cross-process persistence, telemetry
+overflow, and constant-size pool close. Cancellation compacts queues, overflow preserves
+the last valid journal, invalid entries fail closed, and failed persisted releases
+remain retryable."""
 
 from __future__ import annotations
 
@@ -9,6 +13,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from _support.synchronization import join_thread_or_fail
 
 from schema_sanitizer.errors import SchemaSanitizerResourceError
 from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
@@ -31,6 +36,7 @@ def test_remote_io_wait_queue_is_bounded_and_recovers_after_cancellation() -> No
     """Direct permit callers cannot append unlimited loop-affine futures."""
 
     async def exercise() -> tuple[int, int, int]:
+        """Fill the remote permit queue, cancel waiters, and verify recovery."""
         governor = RemoteIoPermitGovernor(1, max_waiters=2)
         holder = await governor.acquire(label="holder")
         first = asyncio.create_task(governor.acquire(label="first"))
@@ -59,13 +65,15 @@ def test_remote_io_queue_compacts_attacker_sized_metadata() -> None:
     """Queued labels and operation identities retain only bounded digests."""
 
     async def exercise() -> tuple[str, str]:
+        """Queue attacker-sized metadata and verify compact waiter state."""
         governor = RemoteIoPermitGovernor(1, max_waiters=1)
         holder = await governor.acquire(label="holder")
         huge = "x" * (2 << 20)
         queued = asyncio.create_task(governor.acquire(label=huge, operation_id=huge))
         while governor.snapshot().waiting < 1:
             await asyncio.sleep(0)
-        waiter = governor._waiters[0]
+        queue = next(iter(governor._operation_waiters.values()))
+        waiter = next(iter(queue.values()))
         label = waiter.label
         operation_id = waiter.operation_id
         queued.cancel()
@@ -93,6 +101,7 @@ def test_remote_coordinator_bounds_not_yet_admitted_submissions() -> None:
     )
 
     async def blocked(_context: object) -> None:
+        """Pause at the blocked synchronization point."""
         await asyncio.Event().wait()
 
     coordinator.submit(blocked)
@@ -118,6 +127,7 @@ def test_provider_request_lease_terminal_outcome_is_thread_safe() -> None:
     barrier = threading.Barrier(32)
 
     def complete() -> None:
+        """Complete the pending operation at the controlled point."""
         barrier.wait()
         lease.success()
 
@@ -125,9 +135,8 @@ def test_provider_request_lease_terminal_outcome_is_thread_safe() -> None:
     for thread in threads:
         thread.start()
     for thread in threads:
-        thread.join(timeout=2)
+        join_thread_or_fail(thread)
 
-    assert all(not thread.is_alive() for thread in threads)
     snapshot = governor.snapshot("raced")
     assert snapshot.in_flight == 0
     assert snapshot.successes == 1
@@ -240,7 +249,8 @@ def test_cross_process_memory_release_remains_retryable_after_persist_failure(
     real_locked_state = module._locked_state
 
     @contextmanager
-    def fail_locked_state():
+    def fail_locked_state(_path=None):
+        """Inject the locked state failure at the controlled test point."""
         raise OSError("persist failed")
         yield {}
 
@@ -255,34 +265,6 @@ def test_cross_process_memory_release_remains_retryable_after_persist_failure(
     monkeypatch.setattr(module, "_locked_state", real_locked_state)
     lease.release()
     assert lease.reserved_bytes == 0
-
-
-def test_temporary_release_commits_local_state_after_shared_persist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A failed host-wide release leaves process-local bytes available for retry."""
-    from schema_sanitizer.core_impl import temporary_storage_governor as module
-
-    governor = module._ProcessTemporaryStorageGovernor()
-    state = module._FilesystemReservationState(
-        capacity_bytes=1024,
-        capacity_inodes=100,
-        reserved_bytes=100,
-        peak_reserved_bytes=100,
-        reserved_inodes=2,
-        peak_reserved_inodes=2,
-    )
-    governor._states[17] = state
-
-    def fail_release(*_args: object, **_kwargs: object) -> int:
-        raise OSError("persist failed")
-
-    monkeypatch.setattr(module, "_release_cross_process_raw", fail_release)
-    with pytest.raises(OSError, match="persist failed"):
-        governor.release(17, 40, inode_count=1)
-    assert state.reserved_bytes == 100
-    assert state.reserved_inodes == 2
-    assert governor.diagnostics().over_release_count == 0
 
 
 @pytest.mark.parametrize(

@@ -1,4 +1,8 @@
-"""Strict, side-effect-free normalization for runtime durations and deadlines."""
+"""Normalize runtime durations and deadlines without side effects.
+
+Boolean, nonfinite, and negative inputs are rejected before timeouts are converted to monotonic
+deadlines and bounded remaining-wait values.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ def _validated_builtin_duration(
     allow_none: bool,
     allow_zero: bool,
 ) -> int | float | None:
+    """Validate and normalize a built-in numeric duration."""
     if value is None:
         if allow_none:
             return None
@@ -72,7 +77,8 @@ def deadline_ns_from_timeout(
     validated = _validated_builtin_duration(
         value, name=name, allow_none=False, allow_zero=allow_zero
     )
-    assert validated is not None
+    if validated is None:
+        raise AssertionError("required deadline duration cannot be absent")
     now = monotonic_ns()
     remaining_ns = max(0, _MAX_DEADLINE_NS - now)
     if type(validated) is int:
@@ -100,7 +106,8 @@ def deadline_from_timeout(
         allow_zero=allow_zero,
         saturate_seconds=_MAX_DURATION_SECONDS,
     )
-    assert seconds is not None
+    if seconds is None:
+        raise AssertionError("required monotonic duration cannot be absent")
     return min(float(_MAX_DEADLINE_NS), monotonic() + seconds)
 
 

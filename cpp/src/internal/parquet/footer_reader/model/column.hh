@@ -1,4 +1,6 @@
-// Parquet column-chunk metadata and native-read state.
+// Declares Parquet column-chunk metadata and native-read state. These
+// definitions support the internal pipeline without expanding its public
+// interface.
 
 #pragma once
 

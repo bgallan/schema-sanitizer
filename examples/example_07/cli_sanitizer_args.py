@@ -1,4 +1,8 @@
-"""schema-sanitizer conversion argument builders for example 07."""
+"""schema-sanitizer conversion argument builders for example 07.
+
+It defines validated conversion, memory, concurrency, schema, and cleaning options
+passed to schema-sanitizer.
+"""
 
 from __future__ import annotations
 

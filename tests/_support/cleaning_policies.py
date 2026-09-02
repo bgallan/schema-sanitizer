@@ -1,4 +1,8 @@
-"""Shared inputs and execution helpers for cleaning-policy tests."""
+"""Define representative public inputs and execution helpers for cleaning-policy tests.
+
+The utilities run identical policies through Python, JSON, and JSONL sources so callers can
+compare normalized schemas and rows.
+"""
 
 from __future__ import annotations
 

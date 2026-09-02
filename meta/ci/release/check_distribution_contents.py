@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
-"""Validate release archives from a downstream-consumer perspective."""
+"""Validate release archives from a downstream-consumer perspective.
+
+It inspects wheel and source archives for required files, safe paths, deterministic
+timestamps, metadata identity, and scratch artifacts.
+"""
 
 from __future__ import annotations
 
 import argparse
+import base64
+import csv
 import gzip
+import hashlib
+import io
 import os
+import stat
 import tarfile
 import zipfile
 from email.message import Message
@@ -23,6 +32,7 @@ RELEASE_WHEEL_PLATFORM_TAGS = {
 }
 
 _SCRATCH_PARTS = {
+    ".work",
     ".mypy_cache",
     ".pytest_cache",
     ".ruff_cache",
@@ -74,7 +84,10 @@ _SDIST_REQUIRED = {
     "meta/VERSION",
     "meta/ci/README.md",
     "meta/ci/fuzz/check_fuzz_corpus.py",
+    "meta/ci/fuzz/corpus_io.py",
+    "meta/ci/fuzz/pack_fuzz_regressions.py",
     "meta/ci/fuzz/run_fuzz_regressions.py",
+    "meta/ci/fuzz/run_fuzz_regressions.sh",
     "meta/ci/native/check_cpp_documentation.py",
     "meta/ci/native/check_no_arrow_cpp.sh",
     "meta/ci/native/check_no_libarrow_linkage.sh",
@@ -84,11 +97,15 @@ _SDIST_REQUIRED = {
     "meta/ci/quality/check_detect_secrets_report.py",
     "meta/ci/quality/check_primary_cleanup.py",
     "meta/ci/quality/report_risk_coverage.py",
+    "meta/ci/requirements/build-tools.txt",
     "meta/ci/requirements/platform-tests.txt",
     "meta/ci/requirements/downstream.txt",
+    "meta/ci/requirements/pre-commit-hooks.txt",
     "meta/ci/requirements/quality.txt",
+    "meta/ci/requirements/release-verification.txt",
     "meta/ci/release/check_distribution_contents.py",
     "meta/ci/release/check_downstream_install.py",
+    "meta/ci/release/check_downstream_install.sh",
     "meta/ci/release/check_github_release_state.py",
     "meta/ci/release/check_pypi_version.py",
     "meta/ci/release/downstream_smoke.py",
@@ -101,6 +118,18 @@ _SDIST_REQUIRED = {
     "pyproject.toml",
     "src/schema_sanitizer/py.typed",
 }
+_SDIST_EXCLUDED_PREFIXES = (".github/", "benchmarks/", "examples/", "fuzz/corpus/")
+_SDIST_EXCLUDED_SUFFIXES = (".sha1.zip",)
+_SDIST_GENERATED_FILES = frozenset(
+    {
+        "PKG-INFO",
+        "src/schema_sanitizer.egg-info/PKG-INFO",
+        "src/schema_sanitizer.egg-info/SOURCES.txt",
+        "src/schema_sanitizer.egg-info/dependency_links.txt",
+        "src/schema_sanitizer.egg-info/requires.txt",
+        "src/schema_sanitizer.egg-info/top_level.txt",
+    }
+)
 
 
 def _source_date_epoch() -> int | None:
@@ -141,14 +170,60 @@ def _validate_archive_timestamps(path: Path) -> None:
 
 
 def _members(path: Path) -> list[str]:
-    """Return file members from a supported distribution archive."""
+    """Return stable regular members after rejecting unsafe archive entries."""
+    if path.is_symlink() or not path.is_file():
+        raise AssertionError(f"release artifact must be a regular file: {path}")
     if path.name.endswith((".tar.gz", ".tgz")):
         with tarfile.open(path, "r:gz") as archive:
-            return [member.name for member in archive.getmembers() if member.isfile()]
+            members = archive.getmembers()
+            _validate_member_names(path, [member.name for member in members])
+            unsafe = sorted(
+                member.name for member in members if not member.isfile() and not member.isdir()
+            )
+            if unsafe:
+                raise AssertionError(
+                    f"{path.name}: contains non-regular archive entries: {unsafe[:20]}"
+                )
+            return sorted(member.name for member in members if member.isfile())
     if path.suffix == ".whl":
         with zipfile.ZipFile(path) as archive:
-            return [item.filename for item in archive.infolist() if not item.is_dir()]
+            members = archive.infolist()
+            # ZipInfo.filename normalizes backslashes on Windows; the original
+            # central-directory spelling is the security boundary being checked.
+            _validate_member_names(path, [member.orig_filename for member in members])
+            unsafe = sorted(
+                member.filename
+                for member in members
+                if stat.S_ISLNK(member.external_attr >> 16) or member.flag_bits & 0x1
+            )
+            if unsafe:
+                raise AssertionError(f"{path.name}: contains unsafe ZIP entries: {unsafe[:20]}")
+            return sorted(member.filename for member in members if not member.is_dir())
     raise ValueError(f"unsupported distribution type: {path}")
+
+
+def _validate_member_names(path: Path, names: list[str]) -> None:
+    """Reject duplicate, absolute, traversing, or non-canonical member names."""
+    if len(names) != len(set(names)):
+        raise AssertionError(f"{path.name}: archive member names must be unique")
+    unsafe: list[str] = []
+    for name in names:
+        candidate = name[:-1] if name.endswith("/") else name
+        member = PurePosixPath(candidate)
+        if (
+            not candidate
+            or "\\" in candidate
+            or "\0" in candidate
+            or member.is_absolute()
+            or member.as_posix() != candidate
+            or any(part in {".", ".."} for part in member.parts)
+            or ":" in member.parts[0]
+        ):
+            unsafe.append(name)
+    if unsafe:
+        raise AssertionError(
+            f"{path.name}: contains unsafe archive member names: {sorted(unsafe)[:20]}"
+        )
 
 
 def _strip_sdist_root(names: Iterable[str]) -> set[str]:
@@ -192,10 +267,51 @@ def _validate_sdist(path: Path, names: list[str]) -> None:
         preview = scratch[:20]
         raise AssertionError(f"{path.name}: contains scratch/build files: {preview}")
 
+    bulky = sorted(
+        name
+        for name in relative
+        if name.startswith(_SDIST_EXCLUDED_PREFIXES) or name.endswith(_SDIST_EXCLUDED_SUFFIXES)
+    )
+    if bulky:
+        raise AssertionError(f"{path.name}: contains repository-only assets: {bulky[:20]}")
+
     if not any(name.startswith("cpp/src/") for name in relative):
         raise AssertionError(f"{path.name}: native sources are missing")
     if not any(name.startswith("tests/") for name in relative):
         raise AssertionError(f"{path.name}: test inputs are missing")
+
+
+def _source_manifest_entries(path: Path) -> set[str]:
+    """Read one NUL-delimited Git source manifest without path ambiguity."""
+    if path.is_symlink() or not path.is_file():
+        raise AssertionError(f"source manifest must be a regular file: {path}")
+    payload = path.read_bytes()
+    if payload and not payload.endswith(b"\0"):
+        raise AssertionError(f"source manifest must be NUL terminated: {path}")
+    try:
+        names = [item.decode("utf-8") for item in payload.split(b"\0") if item]
+    except UnicodeDecodeError as exc:
+        raise AssertionError(f"source manifest must contain UTF-8 paths: {path}") from exc
+    _validate_member_names(path, names)
+    return {
+        name
+        for name in names
+        if not name.startswith(_SDIST_EXCLUDED_PREFIXES)
+        and not name.endswith(_SDIST_EXCLUDED_SUFFIXES)
+    }
+
+
+def validate_sdist_source_manifest(path: Path, source_manifest: Path) -> None:
+    """Require the sdist to match every release-eligible tracked source exactly."""
+    relative = _strip_sdist_root(_members(path))
+    expected = _source_manifest_entries(source_manifest)
+    missing = sorted(expected - relative)
+    extra = sorted(relative - expected - _SDIST_GENERATED_FILES)
+    if missing or extra:
+        raise AssertionError(
+            f"{path.name}: sdist/source manifest mismatch; "
+            f"missing={missing[:20]}, extra={extra[:20]}"
+        )
 
 
 def _validate_wheel(path: Path, names: list[str]) -> None:
@@ -209,6 +325,92 @@ def _validate_wheel(path: Path, names: list[str]) -> None:
     scratch = _scratch_entries(wheel_names)
     if scratch:
         raise AssertionError(f"{path.name}: contains scratch/build files: {scratch[:20]}")
+
+    _validate_wheel_control_files(path, wheel_names)
+
+
+def _wheel_dist_info_root(path: Path) -> str:
+    """Return the canonical dist-info directory encoded by a wheel filename."""
+    return PurePosixPath(_metadata_member(path)).parent.as_posix()
+
+
+def _wheel_message(path: Path, member: str) -> Message:
+    """Parse one unique wheel control file as an RFC-style message."""
+    with zipfile.ZipFile(path) as archive:
+        if archive.namelist().count(member) != 1:
+            raise AssertionError(f"{path.name}: expected exactly one {member}")
+        message = BytesParser(policy=compat32).parsebytes(archive.read(member))
+    if message.defects:
+        raise AssertionError(f"{path.name}: malformed {member}: {message.defects!r}")
+    return message
+
+
+def _record_digest(payload: bytes) -> str:
+    """Return the canonical URL-safe SHA-256 value used by wheel RECORD files."""
+    encoded = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(b"=")
+    return f"sha256={encoded.decode('ascii')}"
+
+
+def _validate_wheel_record(path: Path, names: set[str], record_member: str) -> None:
+    """Require RECORD to cover and authenticate every wheel member exactly once."""
+    with zipfile.ZipFile(path) as archive:
+        try:
+            text = archive.read(record_member).decode("utf-8")
+            rows = list(csv.reader(io.StringIO(text), strict=True))
+        except (UnicodeDecodeError, csv.Error) as exc:
+            raise AssertionError(f"{path.name}: malformed wheel RECORD") from exc
+        if any(len(row) != 3 for row in rows):
+            raise AssertionError(f"{path.name}: wheel RECORD rows must have three fields")
+        recorded = [row[0] for row in rows]
+        if len(recorded) != len(set(recorded)) or set(recorded) != names:
+            raise AssertionError(f"{path.name}: wheel RECORD member inventory mismatch")
+        for member, digest, size in rows:
+            if member == record_member:
+                if digest or size:
+                    raise AssertionError(f"{path.name}: RECORD must not authenticate itself")
+                continue
+            payload = archive.read(member)
+            if digest != _record_digest(payload) or size != str(len(payload)):
+                raise AssertionError(f"{path.name}: invalid RECORD entry for {member}")
+
+
+def _validate_wheel_control_files(path: Path, names: set[str]) -> None:
+    """Cross-check native payload, WHEEL tags, and authenticated RECORD inventory."""
+    from packaging.utils import parse_wheel_filename
+
+    dist_info = _wheel_dist_info_root(path)
+    wheel_member = f"{dist_info}/WHEEL"
+    record_member = f"{dist_info}/RECORD"
+    required = {wheel_member, record_member}
+    missing = sorted(required - names)
+    if missing:
+        raise AssertionError(f"{path.name}: missing wheel control files: {missing}")
+    extensions = sorted(
+        name
+        for name in names
+        if PurePosixPath(name).parent.as_posix() == "schema_sanitizer"
+        and PurePosixPath(name).name.startswith("_core_abi3.")
+        and name.endswith((".so", ".pyd"))
+    )
+    if len(extensions) != 1:
+        raise AssertionError(
+            f"{path.name}: expected one schema_sanitizer/_core_abi3 native extension, "
+            f"found {extensions}"
+        )
+
+    message = _wheel_message(path, wheel_member)
+    if _unique_metadata_value(message, "Wheel-Version", path) != "1.0":
+        raise AssertionError(f"{path.name}: Wheel-Version must be exactly 1.0")
+    if _unique_metadata_value(message, "Root-Is-Purelib", path).lower() != "false":
+        raise AssertionError(f"{path.name}: native wheel cannot be purelib")
+    _name, _version, _build, filename_tags = parse_wheel_filename(path.name)
+    wheel_tags = set(message.get_all("Tag", []))
+    expected_tags = {str(tag) for tag in filename_tags}
+    if wheel_tags != expected_tags:
+        raise AssertionError(
+            f"{path.name}: WHEEL tags {sorted(wheel_tags)} != filename tags {sorted(expected_tags)}"
+        )
+    _validate_wheel_record(path, names, record_member)
 
 
 def _metadata_member(path: Path) -> str:
@@ -394,7 +596,7 @@ def validate_release_set(
     expected_version: str | None = None,
 ) -> str:
     """Validate every archive and return the release-set version."""
-    artifacts = sorted(paths)
+    artifacts = sorted(paths, key=lambda path: (path.name, path.as_posix()))
     for artifact in artifacts:
         validate(artifact)
     return validate_release_filenames(
@@ -411,13 +613,23 @@ def main() -> None:
         action="store_true",
         help="also require one sdist and the four supported, version-consistent wheels",
     )
+    parser.add_argument(
+        "--source-manifest",
+        type=Path,
+        help="NUL-delimited tracked-file inventory to compare with one sdist",
+    )
     parser.add_argument("artifacts", nargs="+", type=Path)
     args = parser.parse_args()
     if args.release_set:
         validate_release_set(args.artifacts)
     else:
-        for artifact in args.artifacts:
+        for artifact in sorted(args.artifacts, key=lambda path: path.as_posix()):
             validate(artifact)
+    if args.source_manifest is not None:
+        sdists = [path for path in args.artifacts if path.name.endswith((".tar.gz", ".tgz"))]
+        if len(sdists) != 1:
+            raise AssertionError("--source-manifest requires exactly one source distribution")
+        validate_sdist_source_manifest(sdists[0], args.source_manifest)
 
 
 if __name__ == "__main__":

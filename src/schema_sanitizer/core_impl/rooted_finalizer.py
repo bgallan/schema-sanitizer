@@ -1,10 +1,8 @@
-"""Pre-rooted finalizer authorities for allocation-free GC handoff.
+"""Keep finalizer authority pre-rooted for allocation-free garbage-collection handoff.
 
-A :class:`RootedFinalizerAuthority` is deliberately separate from the Python
-wrapper whose ``__del__`` arms it.  The escrow may therefore keep cleanup
-authority strongly rooted without keeping the wrapper alive.  The wrapper's
-GC tail performs only a non-blocking arm/publication; exact slot retirement
-remains a normal safe-point/explicit-release operation.
+Separating :class:`RootedFinalizerAuthority` from its Python wrapper lets escrow retain
+cleanup authority without keeping the wrapper alive. Collection only arms and publishes
+non-blockingly; safe-point or explicit release performs exact slot retirement.
 """
 
 from __future__ import annotations
@@ -32,12 +30,12 @@ class RootedFinalizerAuthority:
         "arg10",
         "arg11",
         "ticket",
-        "_escrow_armed",
         "_escrow_armed_ticket",
         "_ack_only",
     )
 
     def __init__(self, callback: Callable[["RootedFinalizerAuthority"], object]) -> None:
+        """Initialize the rooted finalizer authority and its owned runtime state."""
         if not callable(callback):
             raise TypeError("rooted finalizer callback must be callable")
         self.callback = callback
@@ -54,19 +52,17 @@ class RootedFinalizerAuthority:
         self.arg10: object | None = None
         self.arg11: object | None = None
         self.ticket = 0
-        self._escrow_armed = False
-        # The generation, not a process-global boolean, is the durable arm
-        # authority.  ``_escrow_armed`` remains as a compatibility mirror for
-        # older focused doubles/source contracts.
         self._escrow_armed_ticket = 0
         self._ack_only = False
 
     def run(self) -> object | None:
+        """Execute the configured operation."""
         if self._ack_only:
             return None
         return self.callback(self)
 
     def clear(self) -> None:
+        """Clear values and ownership retained by this rooted finalizer authority."""
         self.arg0 = None
         self.arg1 = None
         self.arg2 = None
@@ -83,7 +79,6 @@ class RootedFinalizerAuthority:
     def make_ack_only(self) -> None:
         """Irreversibly disarm primary cleanup before secondary bookkeeping."""
         self._ack_only = True
-        self._escrow_armed = False
         self._escrow_armed_ticket = 0
 
     def arm_for_ticket(self, ticket: int) -> None:
@@ -92,17 +87,16 @@ class RootedFinalizerAuthority:
         if exact <= 0:
             raise ValueError("rooted finalizer arm ticket must be positive")
         self._escrow_armed_ticket = exact
-        self._escrow_armed = True
 
     def disarm_ticket(self, ticket: int | None = None) -> None:
-        """Disarm the matching generation without affecting a newer arm."""
+        """Disarm cleanup authority for the matching ownership ticket."""
         if ticket is not None and self._escrow_armed_ticket != int(ticket):
             return
         self._escrow_armed_ticket = 0
-        self._escrow_armed = False
 
     def is_armed_for(self, ticket: int) -> bool:
-        return bool(self._escrow_armed and self._escrow_armed_ticket == int(ticket))
+        """Return whether cleanup is armed for the supplied ownership ticket."""
+        return self._escrow_armed_ticket == int(ticket)
 
 
 class FinalizerReplayCapability:
@@ -117,6 +111,7 @@ class FinalizerReplayCapability:
     __slots__ = ("released",)
 
     def __init__(self) -> None:
+        """Initialize the finalizer replay capability and its owned runtime state."""
         self.released = False
 
 
@@ -125,7 +120,7 @@ def reserve_rooted_finalizer_authority(
     callback: Callable[[RootedFinalizerAuthority], object],
 ) -> tuple[int, RootedFinalizerAuthority]:
     """Reserve and root a separate cleanup authority before wrapper exposure."""
-    # Allocate the owner first.  Once reserve_ticket commits, no allocation is
+    # Allocate the owner first. Once reserve_rooted commits, no allocation is
     # required to establish the escrow's physical ownership of this authority.
     authority = RootedFinalizerAuthority(callback)
     try:

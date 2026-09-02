@@ -4,37 +4,64 @@ description: Build and exercise the full extension under GCC ThreadSanitizer.
 runs:
   using: composite
   steps:
-    - name: Install GCC 14 and build dependencies
+    - name: Require GCC 14 and install Python build dependencies
+      env:
+        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: |
-        sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
-          -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-        sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
-          -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-          install -y gcc-14 g++-14
-        python -m pip install pip==26.1.2 ninja==1.13.0 cmake==4.3.4 \
-          pytest==9.1.1 pyarrow==25.0.1
+        set -euo pipefail
+        [[ "$(command -v gcc-14)" == '/usr/bin/gcc-14' ]]
+        [[ "$(command -v g++-14)" == '/usr/bin/g++-14' ]]
+        [[ "$(gcc-14 -dumpfullversion -dumpversion)" == '14.2.0' ]]
+        [[ "$(g++-14 -dumpfullversion -dumpversion)" == '14.2.0' ]]
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --packages ninja cmake pytest pyarrow
     - name: Configure and build the fully instrumented extension
       shell: bash
       run: |
-        cmake -S . -B build/tsan -G Ninja \
+        set -euo pipefail
+        rm -rf -- .work/build/tsan .work/bin/python-tsan .work/sanitizer-evidence
+        mkdir -p .work/sanitizer-evidence
+        cmake -S . -B .work/build/tsan -G Ninja \
           -DCMAKE_BUILD_TYPE=RelWithDebInfo \
           -DCMAKE_C_COMPILER=gcc-14 \
           -DCMAKE_CXX_COMPILER=g++-14 \
           -DPython3_EXECUTABLE="$(command -v python)" \
           -DSCHEMA_SANITIZER_ENABLE_LTO=OFF \
+          -DSCHEMA_SANITIZER_ENABLE_PCH=OFF \
           -DSCHEMA_SANITIZER_SANITIZER=tsan \
           -DSCHEMA_SANITIZER_BUILD_FUZZERS=ON \
           -DSCHEMA_SANITIZER_FUZZ_ENGINE=standalone \
           -DSCHEMA_SANITIZER_ZLIB_PROVIDER=bundled \
           -DSCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
           -DSCHEMA_SANITIZER_ENABLE_WERROR=ON
-        cmake --build build/tsan --parallel 4
+        CMAKE_BUILD_PARALLEL_LEVEL="$(
+          python -c 'from meta.ci.quality.record_runner_environment import bounded_build_parallelism; print(bounded_build_parallelism())'
+        )"
+        [[ "${CMAKE_BUILD_PARALLEL_LEVEL}" =~ ^[1-4]$ ]]
+        export CMAKE_BUILD_PARALLEL_LEVEL
+        cmake --build .work/build/tsan
     - name: Run TSan fuzz regressions and mutation campaigns
+      env:
+        ASAN_OPTIONS: ''
+        LSAN_OPTIONS: ''
+        TSAN_OPTIONS: halt_on_error=1:history_size=7:second_deadlock_stack=1
+        UBSAN_OPTIONS: ''
       shell: bash
       run: >-
-        python meta/ci/fuzz/run_fuzz_regressions.py
-        --build-root build/tsan/fuzz
+        python meta/ci/sanitizers/run_with_watchdog.py
+        --certificate .work/sanitizer-evidence/watchdog-tsan-thread-Linux-X64-fuzz.json
+        --environment "ASAN_OPTIONS=${ASAN_OPTIONS}"
+        --environment "LSAN_OPTIONS=${LSAN_OPTIONS}"
+        --environment "TSAN_OPTIONS=${TSAN_OPTIONS}"
+        --environment "UBSAN_OPTIONS=${UBSAN_OPTIONS}"
+        --label Linux-X64-tsan-thread-fuzz
+        --timeout 900
+        -- bash meta/ci/fuzz/run_fuzz_regressions.sh
+        --build-root .work/build/tsan/fuzz
         --campaign-runs 1000
         --seed 15172026
         --max-len 262144
@@ -42,22 +69,62 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        mkdir -p .work/bin
         read -r -a python_embed_cflags <<< "$(python3-config --embed --cflags)"
         read -r -a python_embed_ldflags <<< "$(python3-config --embed --ldflags)"
         g++-14 -std=c++17 -fsanitize=thread \
           -fno-omit-frame-pointer \
           "${python_embed_cflags[@]}" \
           meta/ci/sanitizers/tsan_python_launcher.cc \
-          -o python-tsan \
+          -o .work/bin/python-tsan \
           "${python_embed_ldflags[@]}"
-    - name: Require capacity for complete TSan concurrency coverage
-      shell: bash
-      run: >-
-        build/tsan/schema_sanitizer_sanitized_ordered_executor
-        --require-cpu-capacity 3
     - name: Run the executor and all full-extension TSan domains
+      env:
+        ASAN_OPTIONS: ''
+        LSAN_OPTIONS: ''
+        TSAN_OPTIONS: halt_on_error=1:history_size=7:second_deadlock_stack=1
+        UBSAN_OPTIONS: ''
       shell: bash
       run: >-
         meta/ci/sanitizers/run_tsan_extension_suite.sh
-        build/tsan ./python-tsan 2
-        "$(python -c 'import site; print(site.getsitepackages()[0])')"
+        .work/build/tsan .work/bin/python-tsan 2
+    - name: Certify the completed ThreadSanitizer workload
+      env:
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        RUNNER_SYSTEM: ${{ runner.os }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        certificate=".work/sanitizer-evidence/sanitizer-run-${RUNNER_SYSTEM}-${RUNNER_ARCHITECTURE}-tsan.json"
+        python meta/ci/sanitizers/certify_sanitizer_run.py create \
+          --certificate "${certificate}" \
+          --evidence-directory .work/sanitizer-evidence \
+          --sanitizer tsan \
+          --mode thread \
+          --runner-os "${RUNNER_SYSTEM}" \
+          --runner-arch "${RUNNER_ARCHITECTURE}" \
+          --github-sha "${GITHUB_SHA}" \
+          --github-run-id "${GITHUB_RUN_ID}" \
+          --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+        cat "${certificate}"
+    - name: Upload ThreadSanitizer evidence
+      id: upload-thread-sanitizer-evidence
+      continue-on-error: true
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-tsan
+        path: .work/sanitizer-evidence/*.json
+        if-no-files-found: error
+        retention-days: 7
+        compression-level: 0
+        overwrite: true
+    - name: Retry ThreadSanitizer evidence upload
+      if: ${{ always() && steps.upload-thread-sanitizer-evidence.outcome == 'failure' }}
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      with:
+        name: sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-tsan
+        path: .work/sanitizer-evidence/*.json
+        if-no-files-found: error
+        retention-days: 7
+        compression-level: 0
+        overwrite: true

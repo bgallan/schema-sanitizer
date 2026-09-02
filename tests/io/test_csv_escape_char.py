@@ -1,4 +1,8 @@
-"""Opt-in escaped-quote CSV dialect coverage."""
+"""Opt-in escaped-quote CSV dialect coverage.
+
+It validates explicit escape-character configuration and confirms escaped quotes remain
+correct across heterogeneous CSV directories.
+"""
 
 from __future__ import annotations
 

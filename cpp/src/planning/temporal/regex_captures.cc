@@ -1,4 +1,6 @@
-// Parses user-supplied temporal regex capture groups.
+// Parses user-supplied temporal regex capture groups into bounded fields.
+// Digit, sign, timezone, and width validation is kept independent from the
+// higher-level mapping of configured captures onto temporal parts.
 
 #include "internal/planning/temporal/parts.hh"
 
@@ -8,8 +10,10 @@
 namespace sanitize::internal {
 namespace {
 
+/// Returns whether one byte is an ASCII decimal digit.
 bool is_digit(char c) noexcept { return c >= '0' && c <= '9'; }
 
+/// Parses an exact number of decimal digits and advances the input position.
 bool parse_n_digits(std::string_view value, std::size_t *position, int count,
                     int *out) {
   if (!position || !out || count < 0 || *position > value.size() ||
@@ -29,6 +33,7 @@ bool parse_n_digits(std::string_view value, std::size_t *position, int count,
   return true;
 }
 
+/// Parses a UTC marker or signed timezone offset into total seconds.
 bool parse_tz_offset(std::string_view timezone, int *out_seconds) {
   if (!out_seconds || timezone.empty()) {
     return false;

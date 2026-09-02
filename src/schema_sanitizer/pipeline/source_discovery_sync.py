@@ -1,4 +1,8 @@
-"""Strict blocking source discovery used by threading_mode='single'."""
+"""Strict blocking source discovery used by threading_mode='single'.
+
+It performs provider listing and existence checks inline on the caller thread while
+preserving the same ordering and diagnostic contract as multi mode.
+"""
 
 from __future__ import annotations
 

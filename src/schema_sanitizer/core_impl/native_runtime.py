@@ -1,4 +1,8 @@
-"""Load the package-owned ABI3 extension without scanning arbitrary paths."""
+"""Load the package-owned ABI3 extension without scanning arbitrary paths.
+
+Only package and build candidates are considered; compatibility is verified, Windows DLL search
+directories are registered, and missing-runtime failures include actionable diagnostics.
+"""
 
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ from contextlib import suppress
 from typing import Any
 
 _NATIVE_MODULE_NAME = "schema_sanitizer._core_abi3"
+_IS_WINDOWS = os.name == "nt"
 _WINDOWS_DLL_DIRECTORY_HANDLES: list[Any] = []
 _WINDOWS_DLL_DIRECTORIES: set[pathlib.Path] = set()
 
@@ -58,9 +63,47 @@ def _process_exports(symbol: str) -> bool:
     return False
 
 
+def _windows_asan_runtime_is_loaded(build_dir: pathlib.Path) -> bool:
+    """Require the build-adjacent MSVC ASan DLL to be loaded with its init export."""
+    if build_dir.is_symlink() or not build_dir.is_dir():
+        return False
+    candidates = tuple(
+        path
+        for path in build_dir.glob("clang_rt.asan_dynamic-*.dll")
+        if not path.is_symlink() and path.is_file()
+    )
+    if len(candidates) != 1:
+        return False
+    expected = candidates[0].resolve()
+    try:
+        kernel32 = getattr(ctypes, "WinDLL")("kernel32", use_last_error=True)
+        get_module_handle = kernel32.GetModuleHandleW
+        get_module_handle.argtypes = (ctypes.c_wchar_p,)
+        get_module_handle.restype = ctypes.c_void_p
+        handle = get_module_handle(expected.name)
+        if not handle:
+            return False
+        get_module_filename = kernel32.GetModuleFileNameW
+        get_module_filename.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32)
+        get_module_filename.restype = ctypes.c_uint32
+        loaded_path = ctypes.create_unicode_buffer(32_768)
+        length = get_module_filename(handle, loaded_path, len(loaded_path))
+        if length == 0 or length >= len(loaded_path):
+            return False
+        get_proc_address = kernel32.GetProcAddress
+        get_proc_address.argtypes = (ctypes.c_void_p, ctypes.c_char_p)
+        get_proc_address.restype = ctypes.c_void_p
+        exports_init = bool(get_proc_address(handle, b"__asan_init"))
+        return pathlib.Path(loaded_path.value).resolve() == expected and exports_init
+    except (AttributeError, OSError, TypeError, ValueError):
+        return False
+
+
 def _build_runtime_is_compatible(build_dir: pathlib.Path) -> bool:
     """Reject sanitizer builds when their runtime was not linked first."""
     sanitizer = _configured_sanitizer(build_dir)
+    if _IS_WINDOWS and sanitizer in {"asan", "asan-ubsan"}:
+        return _windows_asan_runtime_is_loaded(build_dir)
     required_symbol = {
         "tsan": "__tsan_init",
         "asan": "__asan_init",
@@ -101,7 +144,7 @@ def _ordered_build_dirs(
 def _build_candidate_dirs() -> list[pathlib.Path]:
     """Return compatible checkout builds with configured/fresh builds first."""
     repo_root = pathlib.Path(__file__).resolve().parents[3]
-    build_dirs = _ordered_build_dirs((repo_root / "build", repo_root.parent / "build"))
+    build_dirs = _ordered_build_dirs((repo_root / ".work" / "build",))
     candidate_dirs: list[pathlib.Path] = []
     for build_dir in build_dirs:
         candidate_dirs.extend((build_dir, build_dir / "schema_sanitizer"))
@@ -120,7 +163,7 @@ def _native_candidate_dirs() -> list[pathlib.Path]:
 def _register_windows_dll_directories(package_dir: pathlib.Path) -> None:
     """Retain approved wheel DLL directories when loading from a source tree."""
     add_dll_directory = getattr(os, "add_dll_directory", None)
-    if os.name != "nt" or add_dll_directory is None:
+    if not _IS_WINDOWS or add_dll_directory is None:
         return
     dependency_dirs = (
         package_dir,

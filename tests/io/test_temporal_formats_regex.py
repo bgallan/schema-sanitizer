@@ -1,12 +1,18 @@
-"""Custom temporal regex parsing tests."""
+"""Custom temporal regex parsing tests.
+
+It covers opt-in inference and coercion, precision controls, custom date and time
+patterns, regex validation, time zones, and overflow rejection.
+"""
 
 from __future__ import annotations
 
 import pytest
-from conftest import read_test_csv, read_test_python, require_native
+from conftest import read_test_csv, read_test_python
 
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
 from schema_sanitizer.options_impl.call_options import normalize_call_options
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 
 def _read_python_with_contract(rows, *, schema_contract, **options):
@@ -20,8 +26,7 @@ def _read_python_with_contract(rows, *, schema_contract, **options):
 
 
 def test_iso_temporal_strings_are_used_for_opt_in_strict_coercion() -> None:
-    """Verify enabled ISO parsers support strict temporal coercion."""
-    require_native()
+    """Verify iso temporal strings are used for opt in strict coercion."""
     pa = pytest.importorskip("pyarrow")
 
     result = _read_python_with_contract(
@@ -48,8 +53,7 @@ def test_iso_temporal_strings_are_used_for_opt_in_strict_coercion() -> None:
 
 
 def test_iso_temporal_strings_remain_strings_by_default() -> None:
-    """Verify ISO-looking strings are not parsed without explicit opt-in."""
-    require_native()
+    """Verify iso temporal strings remain strings by default."""
     pa = pytest.importorskip("pyarrow")
 
     result = read_test_python([{"ts": "2024-01-02T03:04:05Z", "d": "2024-01-02", "t": "03:04:05"}])
@@ -60,8 +64,7 @@ def test_iso_temporal_strings_remain_strings_by_default() -> None:
 
 
 def test_iso_temporal_strings_are_used_for_opt_in_inference() -> None:
-    """Verify each enabled ISO parser participates in schema inference."""
-    require_native()
+    """Verify iso temporal strings are used for opt in inference."""
     pa = pytest.importorskip("pyarrow")
 
     result = read_test_python(
@@ -88,9 +91,7 @@ def test_iso_temporal_strings_are_used_for_opt_in_inference() -> None:
 def test_timestamp_precision_controls_arrow_timestamp_unit(
     timestamp_precision: str, unit: str
 ) -> None:
-    """Verify timestamp precision controls output Arrow timestamp unit."""
-    require_native()
-
+    """Verify timestamp precision controls arrow timestamp unit."""
     result = read_test_python(
         [{"ts": "2024-01-02T03:04:05.123456789Z"}],
         timestamp_precision=timestamp_precision,
@@ -101,9 +102,7 @@ def test_timestamp_precision_controls_arrow_timestamp_unit(
 
 
 def test_invalid_timestamp_precision_is_rejected() -> None:
-    """Verify invalid timestamp precision fails fast."""
-    require_native()
-
+    """Verify invalid timestamp precision is rejected."""
     with pytest.raises(ValueError, match="timestamp_precision"):
         read_test_python(
             [{"ts": "2024-01-02T03:04:05Z"}],
@@ -113,7 +112,6 @@ def test_invalid_timestamp_precision_is_rejected() -> None:
 
 def test_custom_temporal_patterns_are_used_for_infer_and_coerce(tmp_path) -> None:
     """Verify custom temporal patterns are used for infer and coerce."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     csv_text = "ts,d,t\n2024/01/02 03:04:05,2024-01-02,03|04|05\n"
@@ -133,7 +131,6 @@ def test_custom_temporal_patterns_are_used_for_infer_and_coerce(tmp_path) -> Non
 
 def test_custom_temporal_patterns_with_fraction_and_timezone_are_used(tmp_path) -> None:
     """Verify custom temporal patterns with fraction and timezone are used."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     csv_text = "ts,d,t\n2024/01/02 03:04:05.123456789+0130,2024-01-02,03|04|05\n"
@@ -154,8 +151,7 @@ def test_custom_temporal_patterns_with_fraction_and_timezone_are_used(tmp_path) 
 
 
 def test_custom_timestamp_pattern_with_z_timezone_is_used(tmp_path) -> None:
-    """Verify custom timestamp patterns with literal UTC Z are used."""
-    require_native()
+    """Verify custom timestamp pattern with z timezone is used."""
     pa = pytest.importorskip("pyarrow")
 
     path = tmp_path / "rows.csv"
@@ -171,8 +167,6 @@ def test_custom_timestamp_pattern_with_z_timezone_is_used(tmp_path) -> None:
 
 def test_invalid_temporal_pattern_fails_fast(tmp_path) -> None:
     """Verify invalid temporal pattern fails fast."""
-    require_native()
-
     path = tmp_path / "rows.csv"
     path.write_text("ts\n2024-01-02T03:04:05\n", encoding="utf-8")
     with pytest.raises(Exception, match="invalid timestamp_regexps regex"):
@@ -181,7 +175,6 @@ def test_invalid_temporal_pattern_fails_fast(tmp_path) -> None:
 
 def test_no_capture_temporal_regex_does_not_infer_unparseable_temporal_type() -> None:
     """Verify no capture temporal regex does not infer unparseable temporal type."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     result = read_test_python([{"d": "2024/01/02"}], custom_date_patterns=(r"\d{4}/\d{2}/\d{2}",))
@@ -192,7 +185,6 @@ def test_no_capture_temporal_regex_does_not_infer_unparseable_temporal_type() ->
 
 def test_custom_temporal_patterns_reject_invalid_calendar_dates() -> None:
     """Verify custom temporal patterns reject invalid calendar dates."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     with pytest.raises(Exception, match="failed to coerce string to date32"):
@@ -207,7 +199,6 @@ def test_custom_temporal_patterns_reject_invalid_calendar_dates() -> None:
 
 def test_custom_timestamp_patterns_reject_int64_overflow() -> None:
     """Verify custom timestamp patterns reject int64 overflow."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     with pytest.raises(Exception, match="failed to coerce string to timestamp"):

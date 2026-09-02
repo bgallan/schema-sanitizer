@@ -1,4 +1,8 @@
-"""Open one prepared analytical input as a native registry stream."""
+"""Open one prepared analytical input as a native registry stream.
+
+It selects the direct, single-source, or multi-source registry route and returns one
+owned stream with complete diagnostics.
+"""
 
 from __future__ import annotations
 
@@ -13,13 +17,14 @@ from ..input_impl.selection import _Source
 from ..options_impl.call_options import unwrap_options
 from ..options_impl.options import memory_limit_bytes_or_none
 from .input.directory_preparation import prepare_single_parquet_file
-from .parquet.direct_routes import parquet_direct_registry_sink_raw_or_none
+from .parquet.direct_routes import parquet_direct_registry_sink
 from .parquet.errors import unsupported_direct_parquet_ingestion
 from .source_plan.attached import source_plan_from_data
 from .source_plan.registry import (
     OpenedSourcePlanRegistryStream,
     open_source_plan_registry_stream,
 )
+from .streams import patch_input_route_diagnostics
 
 
 def open_single_source_registry_stream(
@@ -34,7 +39,7 @@ def open_single_source_registry_stream(
 ) -> OpenedSourcePlanRegistryStream:
     """Open a native registry stream with generated metadata already injected."""
     if prepared_input.format == "parquet":
-        raw = parquet_direct_registry_sink_raw_or_none(
+        direct_outcome = parquet_direct_registry_sink(
             raw_ctx,
             prepared_input.data,
             source=cast(_Source, prepared_input.source),
@@ -44,7 +49,13 @@ def open_single_source_registry_stream(
             field_name_policy=field_name_policy,
             schema_mode=schema_mode,
         )
+        raw = direct_outcome.raw
         if raw is not None:
+            patch_input_route_diagnostics(
+                raw,
+                source_route="arrow",
+                parquet_route=direct_outcome.route,
+            )
             observe_successful_input_runtime_stage("parquet")
             return OpenedSourcePlanRegistryStream(
                 stream=None,
@@ -79,6 +90,12 @@ def open_single_source_registry_stream(
         if opened is None:
             fallback.close()
             raise unsupported_direct_parquet_ingestion()
+        patch_input_route_diagnostics(
+            opened.diagnostics,
+            parquet_fallback_reason=(
+                direct_outcome.route if direct_outcome.route != "none" else None
+            ),
+        )
         opened.close_items.append(fallback)
         observe_successful_input_runtime_stage("parquet")
         return opened
@@ -97,6 +114,7 @@ def open_single_source_registry_stream(
             row_span_columns={},
             timestamp_columns={INGESTION_TIMESTAMP_COLUMN: ingestion_timestamp_micros},
         )
+        patch_input_route_diagnostics(raw, source_route=prepared_input.source)
         observe_successful_input_runtime_stage("python")
         return OpenedSourcePlanRegistryStream(
             stream=None,
@@ -138,6 +156,7 @@ def open_single_source_registry_stream(
             prepared_input.data,
         ),
     )
+    patch_input_route_diagnostics(raw, source_route=prepared_input.source)
     observe_successful_input_runtime_stage(prepared_input.public_format or prepared_input.format)
     return OpenedSourcePlanRegistryStream(
         stream=None,

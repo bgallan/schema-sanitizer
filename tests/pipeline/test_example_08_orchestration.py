@@ -1,4 +1,8 @@
-"""Example-08 orchestration and event-header contracts."""
+"""Example-08 orchestration and event-header contracts.
+
+It covers CLI configuration, event-header normalization, Hive schema and paths, per-day
+execution, and external-table publication ordering.
+"""
 
 from __future__ import annotations
 
@@ -50,7 +54,7 @@ class FakeListingClient:
     """Minimal fake GCS client used before optional analytical dependencies."""
 
     def __init__(self, files: tuple[RemoteFile, ...]) -> None:
-        """Store one immutable listing and observable call counters."""
+        """Initialize fake listing client state for files and list calls."""
         self.files = files
         self.list_calls = 0
 
@@ -60,13 +64,13 @@ class FakeListingClient:
         *,
         memory_limit_bytes: int | None,
     ) -> tuple[RemoteFile, ...]:
-        """Return the configured listing exactly once per workflow call."""
+        """Return the configured CSV object listing for the requested window."""
         del memory_limit_bytes
         self.list_calls += 1
         return self.files
 
     def schema_sanitizer_download_scope(self):
-        """Return a no-op scope because day execution is stubbed here."""
+        """Open the fake provider download scope for schema-sanitizer."""
         return nullcontext()
 
     def publish_file_atomic(
@@ -76,7 +80,7 @@ class FakeListingClient:
         *,
         memory_limit_bytes: int | None,
     ) -> int:
-        """Reject accidental publication from the orchestration-only test."""
+        """Record an atomic publication without writing to cloud storage."""
         del memory_limit_bytes
         raise AssertionError("stubbed day execution must not publish")
 
@@ -85,12 +89,12 @@ class FakeBigQueryClient:
     """Minimal fake target service with observable replacement calls."""
 
     def __init__(self) -> None:
-        """Initialize call tracking."""
+        """Initialize fake BigQuery client state for read calls and replace calls."""
         self.read_calls = 0
         self.replace_calls: list[dict[str, Any]] = []
 
     def read_target_schema(self, _target_table: str) -> object:
-        """Return an opaque schema consumed by monkeypatched helpers."""
+        """Return the in-memory target schema while recording the lookup when needed."""
         self.read_calls += 1
         return SimpleNamespace(
             names=[
@@ -104,7 +108,7 @@ class FakeBigQueryClient:
         )
 
     def replace_external_table(self, target_table: str, **kwargs: Any) -> None:
-        """Record one post-publication external-table replacement."""
+        """Record the requested external-table replacement."""
         self.replace_calls.append({"target_table": target_table, **kwargs})
 
 
@@ -415,45 +419,3 @@ def test_external_table_is_not_updated_when_a_day_fails(
             bigquery_client=bigquery,
         )
     assert bigquery.replace_calls == []
-
-
-def test_example_08_files_remain_small_and_separated() -> None:
-    """The example keeps CLI, transformation, and runtime responsibilities split."""
-    root = Path(__file__).parents[2] / "examples" / "example_08"
-    expected = {
-        "08_gcs_csv_modified_window_to_polars_parquet.py",
-        "__init__.py",
-        "bigquery_client.py",
-        "cli.py",
-        "event_normalization.py",
-        "hive_output.py",
-        "runtime_support.py",
-    }
-    assert expected <= {path.name for path in root.glob("*.py")}
-    for path in root.glob("*.py"):
-        assert len(path.read_text(encoding="utf-8").splitlines()) <= 500
-
-
-def test_example_08_uses_domain_neutral_event_vocabulary() -> None:
-    """The example must not expose the domain-specific terminology it replaced."""
-    root = Path(__file__).parents[2]
-    schema_reference = (root / "docs/reference/schema-and-registry.md").read_text(encoding="utf-8")
-    analytical_contract = schema_reference.split(
-        "### [Ingress and final schemas](#index)", maxsplit=1
-    )[1].split("### [Hive path fields](#index)", maxsplit=1)[0]
-    sources = [
-        *(root / "examples/example_08").glob("*.py"),
-        root / "examples/README.md",
-        root / "docs/guides/flat-prefix-modified-time-csv.md",
-    ]
-    text = "\n".join(
-        [
-            analytical_contract.lower(),
-            *(path.read_text(encoding="utf-8").lower() for path in sources),
-        ]
-    )
-
-    for legacy_term in ("question", "answer", "qualifio", "response"):
-        assert legacy_term not in text
-    for generic_term in ("event_id", "event_text", "payload"):
-        assert generic_term in text

@@ -1,11 +1,13 @@
-"""Regression coverage for memory parquet footer rejects impossible list before reserve."""
+"""Hardens Parquet footer decoding against impossible or unknown lists and maps,
+overflowing varints, stop-typed collections, allocator-header attacks, and retained-byte
+overflow. Validation and ownership claims precede iteration or header access, and
+counters saturate instead of wrapping."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 
 def _write_parquet_footer(path: Path, footer: bytes) -> None:
@@ -23,9 +25,10 @@ def _compact_varint(value: int) -> bytes:
     return bytes(out)
 
 
-def test_parquet_footer_rejects_impossible_list_before_reserve(tmp_path: Path) -> None:
+def test_parquet_footer_rejects_impossible_list_before_reserve(
+    tmp_path: Path, require_native: None
+) -> None:
     """Declared metadata lists must fit in the remaining bytes before allocation."""
-    require_native()
     from schema_sanitizer.core_impl.native_runtime import native_core
 
     # Footer field 2 (schema), compact list header, 65,536 struct elements, but
@@ -38,9 +41,8 @@ def test_parquet_footer_rejects_impossible_list_before_reserve(tmp_path: Path) -
         native_core.parquet_footer_info_json(str(path))
 
 
-def test_parquet_footer_rejects_overflowing_varint(tmp_path: Path) -> None:
+def test_parquet_footer_rejects_overflowing_varint(tmp_path: Path, require_native: None) -> None:
     """A ten-byte varint may use only one payload bit in its final byte."""
-    require_native()
     from schema_sanitizer.core_impl.native_runtime import native_core
 
     # Footer field 6 (created_by binary) followed by an overflowing uint64
@@ -98,9 +100,9 @@ def test_hardened_allocator_claims_ownership_before_reading_headers() -> None:
 
 def test_parquet_footer_rejects_impossible_unknown_list_before_iteration(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Unknown collection fields cannot claim more elements than input bytes."""
-    require_native()
     from schema_sanitizer.core_impl.native_runtime import native_core
 
     # Unknown footer field 15, list type, extended size 100, byte elements, but
@@ -115,9 +117,9 @@ def test_parquet_footer_rejects_impossible_unknown_list_before_iteration(
 
 def test_parquet_footer_rejects_stop_typed_nonempty_collection(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """STOP is not a valid element type for a non-empty compact collection."""
-    require_native()
     from schema_sanitizer.core_impl.native_runtime import native_core
 
     footer = b"\xf9\x10\x00"
@@ -130,9 +132,9 @@ def test_parquet_footer_rejects_stop_typed_nonempty_collection(
 
 def test_parquet_footer_rejects_impossible_unknown_map_before_iteration(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Unknown maps are bounded by the bytes that could encode their pairs."""
-    require_native()
     from schema_sanitizer.core_impl.native_runtime import native_core
 
     # Unknown footer field 15, map type, ten byte/byte pairs, but only the

@@ -1,4 +1,8 @@
-"""Attach immutable source-manifest identities to public diagnostics."""
+"""Attach immutable source-manifest identities to public diagnostics.
+
+It records immutable source identities, versions, counts, and metadata on the final
+public diagnostic snapshot.
+"""
 
 from __future__ import annotations
 

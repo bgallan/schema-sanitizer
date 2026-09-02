@@ -1,5 +1,8 @@
 // Exercises immutable per-source CSV projections under concurrent switching.
+// Deterministic checksums validate header selection and column metadata while
+// ordered workers repeatedly alternate among independent source layouts.
 
+/// Computes the deterministic projection checksum for one task ordinal.
 std::uint64_t csv_projection_checksum(
     const sanitize::internal::CsvSourceProjectionSet &set,
     std::uint64_t ordinal) {
@@ -15,6 +18,7 @@ std::uint64_t csv_projection_checksum(
   return checksum;
 }
 
+/// Verifies concurrent source switching preserves immutable CSV projections.
 bool run_csv_projection_switch_round() {
   auto projections =
       std::make_shared<sanitize::internal::CsvSourceProjectionSet>();

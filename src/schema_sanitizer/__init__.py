@@ -129,9 +129,9 @@ def __getattr__(name: str) -> Any:  # pragma: no cover
         return getattr(import_module(f"{__name__}{mod_name}"), attr)
     except Exception as e:
         # Always wrap native-backed access failures with loader diagnostics.
-        from .core_impl.loader_debug import collect_loader_debug
+        from .core_impl.loader_debug import loader_debug
 
-        raise SchemaSanitizerImportError(str(e), detail=collect_loader_debug()) from e
+        raise SchemaSanitizerImportError(str(e), detail=loader_debug()) from e
 
 
 __all__ = [

@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency generic evidence uses compact packet local key indices."""
+"""Define packet-local key-index contracts for generic nested inference.
+
+The cases deduplicate repeated keys, bound high-cardinality evidence per packet, and preserve
+exact single/multi schemas and values.
+"""
 
 from __future__ import annotations
 
@@ -59,7 +63,9 @@ def test_generic_evidence_uses_compact_packet_local_key_indices() -> None:
     assert reducer.count("packet.keys.Resolve") == 4
     assert "resolved_id = strings->intern(View(index))" in keys
     assert "std::numeric_limits<std::uint32_t>::max()" in keys
-    assert "parallel_evidence_keys.cc" in sources
+    assert "GLOB_RECURSE _schema_sanitizer_native_sources" in sources
+    assert '_schema_sanitizer_relative_source MATCHES "^api/"' in sources
+    assert "_schema_sanitizer_unique_owned_count" in sources
 
     combined = header + builder + keys + reducer
     assert "getenv" not in combined

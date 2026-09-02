@@ -1,4 +1,8 @@
-"""Canonical source-plan construction for prepared public inputs."""
+"""Canonical source-plan construction for prepared public inputs.
+
+It chooses canonical plans for attached, local, and remote prepared inputs, preserving
+deterministic order and deduplicated identity.
+"""
 
 from __future__ import annotations
 

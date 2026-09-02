@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency resource release and remote shutdown."""
+"""Verify serialized resource release and ownership-aware remote shutdown.
+
+Memory and storage leases must withstand concurrent release and resize, while close deadlines,
+owned-thread rejection, secondary close callers, late provider clients, and abandoned prefetch
+results all retire their resources without deadlock.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +13,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 from schema_sanitizer.api_impl.source_plan.remote import RemoteChunkPrefetchIterator
 from schema_sanitizer.core_impl.memory_budget import (
@@ -38,8 +43,7 @@ def test_operation_memory_lease_release_is_thread_safe() -> None:
         thread.start()
     barrier.wait()
     for thread in threads:
-        thread.join(timeout=2)
-        assert not thread.is_alive()
+        join_thread_or_fail(thread)
 
     assert lease.reserved_bytes == 0
     assert ledger.snapshot().reserved_bytes == 0
@@ -47,15 +51,8 @@ def test_operation_memory_lease_release_is_thread_safe() -> None:
     ledger.close()
 
 
-def test_temporary_storage_lease_release_is_thread_safe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_temporary_storage_lease_release_is_thread_safe() -> None:
     """Concurrent release cannot underflow bytes or active-lease accounting."""
-    monkeypatch.setattr(
-        TemporaryStoragePermitPool,
-        "_ensure_filesystem_capacity",
-        staticmethod(lambda *_args, **_kwargs: None),
-    )
     pool = TemporaryStoragePermitPool(64 << 20)
     lease = pool.acquire(8 << 20, label="release race")
     barrier = threading.Barrier(17)
@@ -70,8 +67,7 @@ def test_temporary_storage_lease_release_is_thread_safe(
         thread.start()
     barrier.wait()
     for thread in threads:
-        thread.join(timeout=2)
-        assert not thread.is_alive()
+        join_thread_or_fail(thread)
 
     snapshot = pool.snapshot()
     assert snapshot.reserved_bytes == 0
@@ -80,15 +76,8 @@ def test_temporary_storage_lease_release_is_thread_safe(
     pool.close()
 
 
-def test_temporary_storage_resize_and_release_are_serialized(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_temporary_storage_resize_and_release_are_serialized() -> None:
     """A resize racing final cleanup leaves no retained permit or drift."""
-    monkeypatch.setattr(
-        TemporaryStoragePermitPool,
-        "_ensure_filesystem_capacity",
-        staticmethod(lambda *_args, **_kwargs: None),
-    )
     for _ in range(64):
         pool = TemporaryStoragePermitPool(64 << 20)
         lease = pool.acquire(4 << 20, label="resize race")
@@ -113,10 +102,8 @@ def test_temporary_storage_resize_and_release_are_serialized(
         resize_thread.start()
         release_thread.start()
         barrier.wait()
-        resize_thread.join(timeout=2)
-        release_thread.join(timeout=2)
-        assert not resize_thread.is_alive()
-        assert not release_thread.is_alive()
+        join_thread_or_fail(resize_thread)
+        join_thread_or_fail(release_thread)
         assert len(resize_errors) <= 1
         snapshot = pool.snapshot()
         assert snapshot.reserved_bytes == 0
@@ -193,8 +180,7 @@ def test_remote_close_deadline_includes_cancelled_future_drain(
     assert not release.is_set()
     release.set()
     coordinator.close()
-    coordinator._thread.join(timeout=SCHEDULER_TIMEOUT_SECONDS)  # noqa: SLF001
-    assert not coordinator._thread.is_alive()  # noqa: SLF001
+    join_thread_or_fail(coordinator._thread)  # noqa: SLF001
 
 
 def test_remote_close_from_owned_thread_fails_without_deadlock() -> None:
@@ -249,8 +235,7 @@ def test_concurrent_remote_close_waits_for_the_owner() -> None:
     assert completions == []
     coordinator._loop.call_soon_threadsafe(release_exit.set)  # noqa: SLF001
     for thread in threads:
-        thread.join(timeout=2)
-        assert not thread.is_alive()
+        join_thread_or_fail(thread)
 
     assert errors == []
     assert completions == [True, True]
@@ -260,11 +245,11 @@ class _ClosingClient:
     """Track cleanup of a client created during pool shutdown."""
 
     def __init__(self) -> None:
-        """Initialize close accounting."""
+        """Initialize the closing client test double."""
         self.close_calls = 0
 
     async def close(self) -> None:
-        """Record final close."""
+        """Close the resources owned by the closing client test double."""
         self.close_calls += 1
 
 
@@ -272,17 +257,17 @@ class _ClosingManager:
     """Track entry and exit of a manager created during pool shutdown."""
 
     def __init__(self) -> None:
-        """Initialize lifecycle accounting."""
+        """Initialize the closing manager test double."""
         self.enter_calls = 0
         self.exit_calls = 0
 
     async def __aenter__(self) -> object:
-        """Record entry and return one value."""
+        """Enter the asynchronous context managed by the closing manager test double."""
         self.enter_calls += 1
         return object()
 
     async def __aexit__(self, *_exc: object) -> None:
-        """Record final exit."""
+        """Exit the asynchronous context managed by the closing manager test double and run cleanup."""
         self.exit_calls += 1
 
 
@@ -354,40 +339,55 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
     started = threading.Event()
     release = threading.Event()
     staged_closed = threading.Event()
-    coordinator = RemoteIoCoordinator(shutdown_timeout_seconds=0.05)
+    coordinator = RemoteIoCoordinator(shutdown_timeout_seconds=SCHEDULER_TIMEOUT_SECONDS)
 
     class Staged:
         """Record cleanup of one staging result completed after abandonment."""
 
         def close(self) -> None:
-            """Record staging cleanup."""
+            """Close the resources owned by the staged test double."""
             staged_closed.set()
 
     class Session:
         """Provide a lightweight shared staging session."""
 
         async def __aenter__(self) -> Session:
-            """Return the session."""
+            """Enter the asynchronous context managed by the session test double."""
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
-            """Close the session."""
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
+            pass
 
-    class Manifest:
+    from schema_sanitizer.api_impl.input.directory_preparation import (
+        RemoteNativeDirectorySourceManifest,
+    )
+    from schema_sanitizer.sources.models import RemoteFile
+
+    class Lease:
+        def release(self) -> None:
+            """Release the resource held by the lease test double."""
+            pass
+
+    class Manifest(RemoteNativeDirectorySourceManifest):
         """Expose one cancellation-resistant remote chunk."""
 
-        files = (object(),)
-        chunk_size = 1
-        memory_limit_bytes = 64 << 20
-        threading_mode = "multi"
-        operation_context = SimpleNamespace(remote_coordinator=coordinator)
-
         def open_staging_session(self) -> Session:
-            """Create the explicit shared session."""
+            """Open the controlled staging session for the sink."""
             return Session()
 
-        async def stage_chunk_async(self, _start: int, _session: Session) -> Staged:
-            """Delay successful staging until after iterator close returns."""
+        def try_acquire_storage_lease(self, _start: int) -> Lease:
+            """Attempt to acquire the manifest storage lease."""
+            return Lease()
+
+        async def stage_chunk_async(
+            self,
+            _start: int,
+            _session: Session,
+            storage_lease: object | None = None,
+        ) -> Staged:
+            """Stage one chunk through the controlled asynchronous session."""
+            assert storage_lease is not None
             started.set()
             while not release.is_set():
                 try:
@@ -396,22 +396,34 @@ def test_remote_prefetch_abandonment_is_bounded_and_closes_late_result(
                     continue
             return Staged()
 
-    iterator = RemoteChunkPrefetchIterator(Manifest())
-    iterator.__enter__()
-    assert started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
-    close_timeouts: list[float] = []
+    try:
+        iterator = RemoteChunkPrefetchIterator(
+            Manifest(
+                files=[RemoteFile("gs://bucket/part.jsonl", "part.jsonl", size=1)],
+                input_format="jsonl",
+                memory_limit_bytes=64 << 20,
+                threading_mode="multi",
+                chunk_size=1,
+                operation_context=SimpleNamespace(remote_coordinator=coordinator),
+            )
+        )
+        iterator.__enter__()
+        assert started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+        close_timeouts: list[float] = []
 
-    def bounded_close(_closer: object, *, timeout_seconds: float) -> bool:
-        """Model an exhausted session deadline without waiting on wall time."""
-        close_timeouts.append(timeout_seconds)
-        return False
+        def bounded_close(_closer: object, *, timeout_seconds: float) -> bool:
+            """Model an exhausted session deadline without waiting on wall time."""
+            close_timeouts.append(timeout_seconds)
+            return False
 
-    monkeypatch.setattr(remote_source, "remaining_seconds", lambda _deadline: 0.05)
-    monkeypatch.setattr(remote_source.SharedDownloadSessionCloser, "close", bounded_close)
-    iterator.close()
-    assert close_timeouts == [0.05]
-    assert not staged_closed.is_set()
-    assert not release.is_set()
-    release.set()
-    assert staged_closed.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
-    coordinator.close()
+        monkeypatch.setattr(remote_source, "remaining_seconds", lambda _deadline: 0.05)
+        monkeypatch.setattr(remote_source.SharedDownloadSessionCloser, "close", bounded_close)
+        iterator.close()
+        assert close_timeouts == [0.05]
+        assert not staged_closed.is_set()
+        assert not release.is_set()
+        release.set()
+        assert staged_closed.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+    finally:
+        release.set()
+        coordinator.close()

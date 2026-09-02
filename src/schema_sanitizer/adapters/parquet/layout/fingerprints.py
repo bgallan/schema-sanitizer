@@ -1,4 +1,8 @@
-"""Root-level fingerprints for recursive Parquet layouts."""
+"""Root-level fingerprints for recursive Parquet layouts.
+
+It derives canonical root and leaf fingerprints so independently decoded layouts can be
+compared without relying on object identity.
+"""
 
 from __future__ import annotations
 
@@ -60,6 +64,8 @@ def _root_contract_from_parts(
     leaf_components = normalize_path_components(field.get("leaf_path_components"))
     repeated_paths = [str(path) for path in list(field.get("repeated_node_paths") or [])]
     repeated_components = normalize_path_components(field.get("repeated_node_path_components"))
+    if leaf_components is None or repeated_components is None:
+        raise ValueError("recursive Parquet diagnostics require component-aware paths")
     return {
         "name": str(field.get("name") or ""),
         "root_kind": str(field.get("root_kind") or ""),
@@ -86,15 +92,9 @@ def _root_contract_from_parts(
             field.get("max_child_count_max") or field.get("max_child_count") or 0
         ),
         "leaf_paths": leaf_paths,
-        "leaf_path_components": (
-            leaf_components if leaf_components is not None else [[path] for path in leaf_paths]
-        ),
+        "leaf_path_components": leaf_components,
         "repeated_node_paths": repeated_paths,
-        "repeated_node_path_components": (
-            repeated_components
-            if repeated_components is not None
-            else [[path] for path in repeated_paths]
-        ),
+        "repeated_node_path_components": repeated_components,
         "leaf_level_fingerprint": leaf_level_fingerprint,
         "leaf_repetition_path_fingerprint": repetition_path_fingerprint,
         "leaf_repeated_ancestor_fingerprint": repeated_ancestor_fingerprint,

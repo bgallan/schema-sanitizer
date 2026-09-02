@@ -1,5 +1,6 @@
-// Implements primitive reads and bounded skipping for the Thrift compact
-// reader.
+// Reads compact-Thrift primitives, field headers, collections, and skipped
+// values from bounded input. This fragment is included by the consolidated
+// footer reader inside its private implementation namespace.
 
 sanitize::Result<std::uint8_t> CompactReader::read_byte() {
   if (pos_ >= data_.size()) {
@@ -8,6 +9,8 @@ sanitize::Result<std::uint8_t> CompactReader::read_byte() {
   return static_cast<std::uint8_t>(data_[pos_++]);
 }
 
+/// Reads an unsigned compact-Thrift varint and rejects overlong 64-bit
+/// encodings.
 sanitize::Result<std::uint64_t> CompactReader::read_varint() {
   std::uint64_t out = 0;
   int shift = 0;
@@ -25,6 +28,8 @@ sanitize::Result<std::uint64_t> CompactReader::read_varint() {
   return sanitize::Status::Invalid("Parquet footer: invalid varint");
 }
 
+/// Reads a zigzag-encoded compact-Thrift integer with signed 32-bit range
+/// validation.
 sanitize::Result<std::int32_t> CompactReader::read_i32() {
   std::uint64_t raw = 0;
   SAN_ASSIGN_OR_RAISE(raw, read_varint());
@@ -36,6 +41,8 @@ sanitize::Result<std::int32_t> CompactReader::read_i32() {
   return static_cast<std::int32_t>(value);
 }
 
+/// Reads a compact-Thrift integer and narrows it after signed 16-bit range
+/// validation.
 sanitize::Result<std::int16_t> CompactReader::read_i16() {
   std::int32_t value = 0;
   SAN_ASSIGN_OR_RAISE(value, read_i32());
@@ -46,12 +53,15 @@ sanitize::Result<std::int16_t> CompactReader::read_i16() {
   return static_cast<std::int16_t>(value);
 }
 
+/// Reads a zigzag-encoded signed 64-bit compact-Thrift integer.
 sanitize::Result<std::int64_t> CompactReader::read_i64() {
   std::uint64_t raw = 0;
   SAN_ASSIGN_OR_RAISE(raw, read_varint());
   return unzigzag(raw);
 }
 
+/// Charges materialized bytes to the active memory budget before allocating
+/// derived storage.
 sanitize::Status
 CompactReader::charge_materialized_bytes(std::uint64_t bytes,
                                          std::string_view label) {
@@ -71,6 +81,8 @@ CompactReader::charge_materialized_bytes(std::uint64_t bytes,
   return {};
 }
 
+/// Validates a metadata collection count before reserving its materialized
+/// storage.
 sanitize::Status validate_metadata_list(CompactReader &reader,
                                         std::uint64_t count,
                                         std::uint64_t max_count,
@@ -94,6 +106,8 @@ sanitize::Status validate_metadata_list(CompactReader &reader,
   return reader.charge_materialized_bytes(count * element_bytes, label);
 }
 
+/// Reads a length-prefixed compact-Thrift binary value within metadata memory
+/// limits.
 sanitize::Result<std::string> CompactReader::read_binary() {
   std::uint64_t size = 0;
   SAN_ASSIGN_OR_RAISE(size, read_varint());
@@ -111,6 +125,7 @@ sanitize::Result<std::string> CompactReader::read_binary() {
   return out;
 }
 
+/// Skips binary after validating lengths, nesting, and remaining input bytes.
 sanitize::Status CompactReader::skip_binary() {
   std::uint64_t size = 0;
   SAN_ASSIGN_OR_RAISE(size, read_varint());
@@ -126,6 +141,8 @@ sanitize::Status CompactReader::skip_binary() {
   return {};
 }
 
+/// Reads a compact-Thrift collection header and validates its element count and
+/// type.
 sanitize::Status CompactReader::read_list_header(std::uint8_t *element_type,
                                                  std::uint64_t *size) {
   if (!element_type || !size) {
@@ -154,6 +171,7 @@ sanitize::Status CompactReader::read_list_header(std::uint8_t *element_type,
   return {};
 }
 
+/// Skips type after validating lengths, nesting, and remaining input bytes.
 sanitize::Status CompactReader::skip_type(std::uint8_t type, int depth) {
   if (depth > kMaxSkipDepth) {
     return sanitize::Status::Invalid(
@@ -213,6 +231,8 @@ sanitize::Status CompactReader::skip_type(std::uint8_t type, int depth) {
   }
 }
 
+/// Skips container value after validating lengths, nesting, and remaining input
+/// bytes.
 sanitize::Status CompactReader::skip_container_value(std::uint8_t type,
                                                      int depth) {
   if (type == kTypeBoolTrue || type == kTypeBoolFalse) {
@@ -224,6 +244,7 @@ sanitize::Status CompactReader::skip_container_value(std::uint8_t type,
   return skip_type(type, depth);
 }
 
+/// Skips struct after validating lengths, nesting, and remaining input bytes.
 sanitize::Status CompactReader::skip_struct(int depth) {
   std::int16_t last_field_id = 0;
   while (true) {
@@ -242,6 +263,7 @@ sanitize::Status CompactReader::skip_struct(int depth) {
   }
 }
 
+/// Skips list after validating lengths, nesting, and remaining input bytes.
 sanitize::Status CompactReader::skip_list(int depth) {
   std::uint8_t element_type = 0;
   std::uint64_t size = 0;
@@ -251,6 +273,7 @@ sanitize::Status CompactReader::skip_list(int depth) {
   return {};
 }
 
+/// Skips map after validating lengths, nesting, and remaining input bytes.
 sanitize::Status CompactReader::skip_map(int depth) {
   std::uint64_t size = 0;
   SAN_ASSIGN_OR_RAISE(size, read_varint());

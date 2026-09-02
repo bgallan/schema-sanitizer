@@ -1,4 +1,8 @@
-"""Hive-style partition planning and argparse adapters."""
+"""Hive-style partition planning and argparse adapters.
+
+It validates date and hour ranges, renders source and output URI templates, builds
+ordered partition plans, and supplies matching CLI adapters.
+"""
 
 from __future__ import annotations
 

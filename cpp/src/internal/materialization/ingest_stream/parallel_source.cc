@@ -1,4 +1,6 @@
 // Implements bounded ordered packet preparation for multi-threaded ingestion.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/ingest_stream/parallel_source.hh"
 #include "internal/materialization/ingest_stream/parallel_source_impl.hh"
@@ -18,6 +20,8 @@
 
 namespace sanitize::internal {
 
+/// Initializes bounded ordered packet preparation around an ingest stream
+/// reader.
 ParallelIngestStreamSource::ParallelIngestStreamSource(Init init)
     : fields_(std::move(init.fields)), frontend_(std::move(init.frontend)),
       plan_keepalive_(std::move(init.plan)), opts_(std::move(init.opts)),
@@ -39,6 +43,8 @@ ParallelIngestStreamSource::ParallelIngestStreamSource(Init init)
   }
 }
 
+/// Cancels pending preparation and releases ordered packet and Arrow stream
+/// ownership.
 ParallelIngestStreamSource::~ParallelIngestStreamSource() {
   diagnostics_.capture_operation_memory();
   if (telemetry_keepalive_) {
@@ -46,17 +52,23 @@ ParallelIngestStreamSource::~ParallelIngestStreamSource() {
   }
 }
 
+/// Exports a fresh Arrow schema for the stream without transferring the
+/// source's internal state.
 sanitize::Status
 ParallelIngestStreamSource::GetSchema(struct ArrowSchema *out) {
   return export_fields_as_struct_schema(fields_, out,
                                         opts_->spec.timestamp_precision);
 }
 
+/// Returns the operation task arena associated with this stream or source
+/// instance.
 std::shared_ptr<OperationTaskArena>
 ParallelIngestStreamSource::TaskArena() const noexcept {
   return task_arena_keepalive_;
 }
 
+/// Produces the next Arrow batch in source order, or a released array at end of
+/// stream.
 sanitize::Status ParallelIngestStreamSource::GetNext(struct ArrowArray *out) {
   PerformancePhaseScope stream_scope(telemetry_keepalive_,
                                      PerformancePhase::kStreamGetNext);
@@ -121,6 +133,8 @@ sanitize::Status ParallelIngestStreamSource::GetNext(struct ArrowArray *out) {
   }
 }
 
+/// Cancels outstanding work, releases stream resources, and makes subsequent
+/// callbacks harmless.
 sanitize::Status ParallelIngestStreamSource::Close() {
   if (!eof_) {
     diagnostics_.record_cancellation("consumer_close");

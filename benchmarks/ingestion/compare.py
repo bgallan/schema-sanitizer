@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Create an informational comparison between two benchmark JSON reports."""
+"""Create an informational comparison between two benchmark JSON reports.
+
+It loads baseline and candidate reports, calculates percentage changes, and renders
+their case-by-case deltas.
+"""
 
 from __future__ import annotations
 
@@ -10,16 +14,19 @@ from typing import Any
 
 
 def _load(path: Path) -> dict[str, Any]:
+    """Load and validate a machine-readable benchmark report."""
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _percent(current: float | int | None, baseline: float | int | None) -> str:
+    """Calculate the percentage change between baseline and candidate values."""
     if current is None or baseline in (None, 0):
         return "n/a"
     return f"{((float(current) / float(baseline)) - 1.0) * 100.0:+.1f}%"
 
 
 def compare(current_path: Path, baseline_path: Path) -> str:
+    """Compare two benchmark reports and return the rendered result."""
     current = _load(current_path)
     baseline = _load(baseline_path)
     current_cases = {item["label"]: item for item in current.get("benchmarks", [])}
@@ -59,6 +66,7 @@ def compare(current_path: Path, baseline_path: Path) -> str:
 
 
 def main() -> None:
+    """Load two report paths and print or persist their benchmark comparison."""
     parser = argparse.ArgumentParser()
     parser.add_argument("current", type=Path)
     parser.add_argument("baseline", type=Path)

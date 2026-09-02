@@ -1,9 +1,10 @@
 /*
- * Python ABI3 JSONL stream writer wrapper.
+ * Implements the Python ABI3 JSONL stream-writer wrapper.
  *
  * This file exposes JSONL Python methods while output and batch extraction
  * helpers live in _core_abi3_jsonl_output.cc.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -21,35 +22,8 @@
 namespace core_abi3_internal {
 namespace jsonl = sanitize::internal::jsonl_stream_writer;
 
-namespace {
-
-PyObject *jsonl_stats_to_dict(const jsonl::WriteStats &stats) {
-  PyObject *dict = PyDict_New();
-  if (!dict) {
-    return nullptr;
-  }
-  PyObject *rows = PyLong_FromLongLong(stats.materialized_rows);
-  PyObject *batches = PyLong_FromLongLong(stats.batches);
-  if (!rows || !batches) {
-    Py_XDECREF(rows);
-    Py_XDECREF(batches);
-    Py_DECREF(dict);
-    return nullptr;
-  }
-  if (PyDict_SetItemString(dict, "materialized_rows", rows) < 0 ||
-      PyDict_SetItemString(dict, "batches", batches) < 0) {
-    Py_DECREF(rows);
-    Py_DECREF(batches);
-    Py_DECREF(dict);
-    return nullptr;
-  }
-  Py_DECREF(rows);
-  Py_DECREF(batches);
-  return dict;
-}
-
-} // namespace
-
+/// Writes a Python Arrow stream to a JSONL destination and returns row and
+/// batch counts.
 PyObject *py_jsonl_stream_write(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *output_obj = nullptr;
@@ -74,9 +48,12 @@ PyObject *py_jsonl_stream_write(PyObject *, PyObject *args) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;
   }
-  return jsonl_stats_to_dict(result.ValueOrDie());
+  const auto &stats = result.ValueOrDie();
+  return materialization_stats_dict(stats.materialized_rows, stats.batches);
 }
 
+/// Adds generated metadata columns and writes the resulting Arrow stream to
+/// JSONL.
 PyObject *py_jsonl_stream_write_with_metadata(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *path_obj = nullptr;
@@ -100,9 +77,9 @@ PyObject *py_jsonl_stream_write_with_metadata(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  ArrowArrayStream *wrapped = make_metadata_stream_wrapper(
+  auto wrapped = own_arrow_stream(make_metadata_stream_wrapper(
       stream_obj, first_row_columns, all_row_columns, row_span_columns,
-      timestamp_columns, memory_limit_bytes);
+      timestamp_columns, memory_limit_bytes));
   if (!wrapped) {
     return nullptr;
   }
@@ -110,21 +87,21 @@ PyObject *py_jsonl_stream_write_with_metadata(PyObject *, PyObject *args) {
       sanitize::internal::ordered_text_output::threading_mode_from_int(
           threading_mode_value);
   if (!mode_result.ok()) {
-    schema_sanitizer_stream_free(wrapped);
     PyErr_SetString(PyExc_ValueError, mode_result.status().message().c_str());
     return nullptr;
   }
   auto result = jsonl_write_arrow_stream_to_path(
-      wrapped, std::string(path, static_cast<std::size_t>(path_len)),
+      wrapped.get(), std::string(path, static_cast<std::size_t>(path_len)),
       memory_limit_bytes, mode_result.ValueOrDie());
-  schema_sanitizer_stream_free(wrapped);
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;
   }
-  return jsonl_stats_to_dict(result.ValueOrDie());
+  const auto &stats = result.ValueOrDie();
+  return materialization_stats_dict(stats.materialized_rows, stats.batches);
 }
 
+/// Serializes one PyArrow record batch as bounded JSON Lines bytes.
 PyObject *py_jsonl_batch_bytes(PyObject *, PyObject *args) {
   PyObject *batch_obj = nullptr;
   long long memory_limit_bytes = -1;
@@ -144,6 +121,7 @@ PyObject *py_jsonl_batch_bytes(PyObject *, PyObject *args) {
                                    static_cast<Py_ssize_t>(bytes.size()));
 }
 
+/// Serializes a sequence of PyArrow record batches as bounded JSON Lines bytes.
 PyObject *py_jsonl_batches_bytes(PyObject *, PyObject *args) {
   PyObject *batches_obj = nullptr;
   long long memory_limit_bytes = -1;
@@ -163,6 +141,7 @@ PyObject *py_jsonl_batches_bytes(PyObject *, PyObject *args) {
                                    static_cast<Py_ssize_t>(bytes.size()));
 }
 
+/// Reports whether the native JSONL writer supports a supplied PyArrow schema.
 PyObject *py_jsonl_schema_supported(PyObject *, PyObject *args) {
   PyObject *schema_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:jsonl_schema_supported", &schema_obj)) {

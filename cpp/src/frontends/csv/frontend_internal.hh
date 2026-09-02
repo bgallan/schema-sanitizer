@@ -1,4 +1,6 @@
-// Declares CSV frontend state shared by lifecycle and batching units.
+// Declares CSV frontend state shared by lifecycle and batching units. It frames
+// records, applies source projections, and returns budget-owned row batches in
+// order.
 
 #pragma once
 
@@ -31,13 +33,27 @@ public:
   sanitize::Result<RowBatch> next_batch(int64_t capacity);
 
 private:
+  /// Decodes one framed record into the batch, using the raw fast path when
+  /// eligible.
   sanitize::Status append_record(CsvBatchStorage *storage,
                                  const TextSlice &record);
+
+  /// Parses framed records concurrently and commits their decoded cells in
+  /// source order.
   sanitize::Status append_records_parallel(CsvBatchStorage *storage,
                                            std::span<const TextSlice> records);
+
+  /// Detects and consumes the header at each applicable source boundary.
   sanitize::Result<bool> consume_header_record(const TextSlice &record);
+
+  /// Parses and validates a header before installing or comparing its
+  /// projection.
   sanitize::Status process_header_record(const TextSlice &record);
+
+  /// Returns the configured delimiter, defaulting to a comma when unspecified.
   static char resolved_delimiter(const Options &options) noexcept;
+
+  /// Returns the configured escape byte, or NUL when escaping is disabled.
   static char resolved_escape_char(const Options &options) noexcept;
 
   ChunkSourcePtr source_;

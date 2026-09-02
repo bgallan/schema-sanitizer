@@ -18,130 +18,193 @@ env:
   PIP_NO_INPUT: '1'
   PIP_RETRIES: '10'
   PIP_TIMEOUT: '60'
+  PYTHONHASHSEED: '0'
+  PYTHONUTF8: '1'
+  TZ: UTC
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref
-    }}
+  group: ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number
+    || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # Build the four release wheels as one homogeneous platform matrix.
-  platform-wheel-builds:
-    name: wheel / ${{ matrix['display-name'] }}
-    runs-on: ${{ matrix.runner }}
+  # Keep one producer job per release platform so each test matrix can start as
+  # soon as its own certified wheel is ready. The stable display names remain
+  # the same as the former matrix cells.
+  platform-wheel-linux-x86-64:
+    name: wheel / Linux x86-64
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - display-name: Linux x86-64
-            runner: ubuntu-24.04
-            platform-name: linux-x86_64
-            artifact: linux
-            arch: x86_64
-          - display-name: Windows AMD64
-            runner: windows-2025
-            platform-name: windows-amd64
-            artifact: windows
-            arch: AMD64
-          - display-name: macOS x86-64
-            runner: macos-15-intel
-            platform-name: macos-x86_64
-            artifact: macos-x86_64
-            arch: x86_64
-          - display-name: macOS ARM64
-            runner: macos-15
-            platform-name: macos-arm64
-            artifact: macos-arm64
-            arch: arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/build-platform-wheel
         with:
-          platform-name: ${{ matrix['platform-name'] }}
-          artifact: ${{ matrix.artifact }}
-          arch: ${{ matrix.arch }}
-
-  # Twelve independent cells keep all platform/shard pairs visible while
-  # collecting them under one thematic test owner.
-  platform-tests:
-    name: tests / ${{ matrix.shard }} / ${{ matrix['display-name'] }}
-    needs: [platform-wheel-builds]
-    runs-on: ${{ matrix.runner }}
+          platform-name: linux-x86_64
+          artifact: linux
+          arch: x86_64
+  platform-wheel-windows-amd64:
+    name: wheel / Windows AMD64
+    runs-on: windows-2022
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - display-name: Linux x86-64
-            runner: ubuntu-24.04
-            platform-name: linux-x86_64
-            artifact: linux
-            shard: concurrency
-          - display-name: Windows AMD64
-            runner: windows-2025
-            platform-name: windows-amd64
-            artifact: windows
-            shard: concurrency
-          - display-name: macOS x86-64
-            runner: macos-15-intel
-            platform-name: macos-x86_64
-            artifact: macos-x86_64
-            shard: concurrency
-          - display-name: macOS ARM64
-            runner: macos-15
-            platform-name: macos-arm64
-            artifact: macos-arm64
-            shard: concurrency
-          - display-name: Linux x86-64
-            runner: ubuntu-24.04
-            platform-name: linux-x86_64
-            artifact: linux
-            shard: memory-parquet
-          - display-name: Windows AMD64
-            runner: windows-2025
-            platform-name: windows-amd64
-            artifact: windows
-            shard: memory-parquet
-          - display-name: macOS x86-64
-            runner: macos-15-intel
-            platform-name: macos-x86_64
-            artifact: macos-x86_64
-            shard: memory-parquet
-          - display-name: macOS ARM64
-            runner: macos-15
-            platform-name: macos-arm64
-            artifact: macos-arm64
-            shard: memory-parquet
-          - display-name: Linux x86-64
-            runner: ubuntu-24.04
-            platform-name: linux-x86_64
-            artifact: linux
-            shard: io-pipeline
-          - display-name: Windows AMD64
-            runner: windows-2025
-            platform-name: windows-amd64
-            artifact: windows
-            shard: io-pipeline
-          - display-name: macOS x86-64
-            runner: macos-15-intel
-            platform-name: macos-x86_64
-            artifact: macos-x86_64
-            shard: io-pipeline
-          - display-name: macOS ARM64
-            runner: macos-15
-            platform-name: macos-arm64
-            artifact: macos-arm64
-            shard: io-pipeline
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
+      - uses: ./.github/actions/build-platform-wheel
+        with:
+          platform-name: windows-amd64
+          artifact: windows
+          arch: AMD64
+  platform-wheel-macos-x86-64:
+    name: wheel / macOS x86-64
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-platform-wheel
+        with:
+          platform-name: macos-x86_64
+          artifact: macos-x86_64
+          arch: x86_64
+  platform-wheel-macos-arm64:
+    name: wheel / macOS ARM64
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/build-platform-wheel
+        with:
+          platform-name: macos-arm64
+          artifact: macos-arm64
+          arch: arm64
+
+  # Four one-axis matrices keep every platform/shard pair independently named.
+  # Failed wheel builds do not suppress tests for the platform artifacts that
+  # were produced; cancellation still prevents new test work from starting.
+  platform-tests-linux-x86-64:
+    if: ${{ !cancelled() }}
+    needs: [platform-wheel-linux-x86-64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [io-pipeline, memory-parquet, concurrency]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          show-progress: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.11.9
+      - uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: platform-tests-${{ matrix.shard }}
+          python-version: 3.11.9
+          dependency-paths: |-
+            meta/ci/requirements/platform-tests.txt
+            meta/ci/requirements/python-artifact-sha256.lock
       - uses: ./.github/actions/test-platform-wheel
         with:
-          platform-name: ${{ matrix['platform-name'] }}
-          artifact: ${{ matrix.artifact }}
+          platform-name: linux-x86_64
+          artifact: linux
           shard: ${{ matrix.shard }}
+          producer-result: ${{ needs.platform-wheel-linux-x86-64.result }}
+  platform-tests-windows-amd64:
+    if: ${{ !cancelled() }}
+    needs: [platform-wheel-windows-amd64]
+    runs-on: windows-2022
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [io-pipeline, memory-parquet, concurrency]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          show-progress: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.11.9
+      - uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: platform-tests-${{ matrix.shard }}
+          python-version: 3.11.9
+          dependency-paths: |-
+            meta/ci/requirements/platform-tests.txt
+            meta/ci/requirements/python-artifact-sha256.lock
+      - uses: ./.github/actions/test-platform-wheel
+        with:
+          platform-name: windows-amd64
+          artifact: windows
+          shard: ${{ matrix.shard }}
+          producer-result: ${{ needs.platform-wheel-windows-amd64.result }}
+  platform-tests-macos-x86-64:
+    if: ${{ !cancelled() }}
+    needs: [platform-wheel-macos-x86-64]
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [io-pipeline, memory-parquet, concurrency]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          show-progress: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.11.9
+      - uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: platform-tests-${{ matrix.shard }}
+          python-version: 3.11.9
+          dependency-paths: |-
+            meta/ci/requirements/platform-tests.txt
+            meta/ci/requirements/python-artifact-sha256.lock
+      - uses: ./.github/actions/test-platform-wheel
+        with:
+          platform-name: macos-x86_64
+          artifact: macos-x86_64
+          shard: ${{ matrix.shard }}
+          producer-result: ${{ needs.platform-wheel-macos-x86-64.result }}
+  platform-tests-macos-arm64:
+    if: ${{ !cancelled() }}
+    needs: [platform-wheel-macos-arm64]
+    runs-on: macos-15
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [io-pipeline, memory-parquet, concurrency]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          show-progress: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.11.9
+      - uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: platform-tests-${{ matrix.shard }}
+          python-version: 3.11.9
+          dependency-paths: |-
+            meta/ci/requirements/platform-tests.txt
+            meta/ci/requirements/python-artifact-sha256.lock
+      - uses: ./.github/actions/test-platform-wheel
+        with:
+          platform-name: macos-arm64
+          artifact: macos-arm64
+          shard: ${{ matrix.shard }}
+          producer-result: ${{ needs.platform-wheel-macos-arm64.result }}
 
   # Source, quality, coverage, and sanitizer workloads are one heterogeneous
   # validation matrix. An explicit include list preserves every runner and SLA.
@@ -182,7 +245,7 @@ jobs:
             mode: linux-full
           - name: sanitizer / windows-amd64-asan
             task: platform-sanitizer
-            runner: windows-2025
+            runner: windows-2022
             python: 3.11.9
             timeout: 70
             sanitizer: asan
@@ -208,16 +271,60 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: ${{ matrix.python }}
-          cache: pip
-          cache-dependency-path: |-
+      - if: matrix.task == 'quality'
+        uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: quality
+          python-version: ${{ matrix.python }}
+          dependency-paths: |-
             pyproject.toml
-            meta/ci/requirements/*.txt
-            .github/actions/*/action.yml
+            meta/ci/requirements/build-tools.txt
+            meta/ci/requirements/quality.txt
+            meta/ci/requirements/pre-commit-hooks.txt
+            meta/ci/requirements/python-artifact-sha256.lock
+      - if: matrix.task == 'source-distribution'
+        uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: source-distribution
+          python-version: ${{ matrix.python }}
+          dependency-paths: |-
+            pyproject.toml
+            meta/ci/requirements/build-tools.txt
+            meta/ci/requirements/downstream.txt
+            meta/ci/requirements/python-artifact-sha256.lock
+      - if: matrix.task == 'native-llvm-coverage'
+        uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: native-llvm-coverage
+          python-version: ${{ matrix.python }}
+          dependency-paths: |-
+            pyproject.toml
+            meta/ci/requirements/build-tools.txt
+            meta/ci/requirements/platform-tests.txt
+            meta/ci/requirements/python-artifact-sha256.lock
+      - if: matrix.task == 'thread-sanitizer'
+        uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: thread-sanitizer
+          python-version: ${{ matrix.python }}
+          dependency-paths: |-
+            meta/ci/requirements/build-tools.txt
+            meta/ci/requirements/python-artifact-sha256.lock
+      - if: matrix.task == 'platform-sanitizer'
+        uses: ./.github/actions/restore-pip-cache
+        with:
+          owner: platform-sanitizer
+          python-version: ${{ matrix.python }}
+          dependency-paths: |-
+            pyproject.toml
+            meta/ci/requirements/build-tools.txt
+            meta/ci/requirements/python-artifact-sha256.lock
       - name: Require a known validation workload
         env:
           VALIDATION_TASK: ${{ matrix.task }}
         shell: bash
         run: |-
+          set -euo pipefail
           case "${VALIDATION_TASK}" in
             quality|source-distribution|native-llvm-coverage|thread-sanitizer|platform-sanitizer) ;;
             *)
@@ -227,6 +334,8 @@ jobs:
           esac
       - if: matrix.task == 'quality'
         uses: ./.github/actions/quality-validation
+        with:
+          python-version: ${{ matrix.python }}
       - if: matrix.task == 'source-distribution'
         uses: ./.github/actions/source-distribution
       - if: matrix.task == 'native-llvm-coverage'
@@ -240,28 +349,49 @@ jobs:
           mode: ${{ matrix.mode }}
 
   # This is the only final job and the only stable check branch protection
-  # needs. Release assembly starts only after every matrix is green.
+  # needs. Release assembly starts only after every upstream job is green.
   validation-gate:
     name: validation gate
     if: always()
-    needs: [platform-wheel-builds, platform-tests, validation-matrix]
+    needs:
+      - platform-wheel-linux-x86-64
+      - platform-wheel-windows-amd64
+      - platform-wheel-macos-x86-64
+      - platform-wheel-macos-arm64
+      - platform-tests-linux-x86-64
+      - platform-tests-windows-amd64
+      - platform-tests-macos-x86-64
+      - platform-tests-macos-arm64
+      - validation-matrix
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - name: Require every validation matrix to succeed
+      - name: Require every upstream validation job to succeed
         env:
-          WHEEL_BUILDS_RESULT: ${{ needs.platform-wheel-builds.result }}
-          PLATFORM_TESTS_RESULT: ${{ needs.platform-tests.result }}
+          WHEEL_LINUX_X86_64_RESULT: ${{ needs.platform-wheel-linux-x86-64.result }}
+          WHEEL_WINDOWS_AMD64_RESULT: ${{ needs.platform-wheel-windows-amd64.result }}
+          WHEEL_MACOS_X86_64_RESULT: ${{ needs.platform-wheel-macos-x86-64.result }}
+          WHEEL_MACOS_ARM64_RESULT: ${{ needs.platform-wheel-macos-arm64.result }}
+          PLATFORM_TESTS_LINUX_X86_64_RESULT: ${{ needs.platform-tests-linux-x86-64.result }}
+          PLATFORM_TESTS_WINDOWS_AMD64_RESULT: ${{ needs.platform-tests-windows-amd64.result }}
+          PLATFORM_TESTS_MACOS_X86_64_RESULT: ${{ needs.platform-tests-macos-x86-64.result }}
+          PLATFORM_TESTS_MACOS_ARM64_RESULT: ${{ needs.platform-tests-macos-arm64.result }}
           VALIDATION_MATRIX_RESULT: ${{ needs.validation-matrix.result }}
         shell: bash
         run: |-
           set -euo pipefail
           for result in \
-            "${WHEEL_BUILDS_RESULT}" \
-            "${PLATFORM_TESTS_RESULT}" \
+            "${WHEEL_LINUX_X86_64_RESULT}" \
+            "${WHEEL_WINDOWS_AMD64_RESULT}" \
+            "${WHEEL_MACOS_X86_64_RESULT}" \
+            "${WHEEL_MACOS_ARM64_RESULT}" \
+            "${PLATFORM_TESTS_LINUX_X86_64_RESULT}" \
+            "${PLATFORM_TESTS_WINDOWS_AMD64_RESULT}" \
+            "${PLATFORM_TESTS_MACOS_X86_64_RESULT}" \
+            "${PLATFORM_TESTS_MACOS_ARM64_RESULT}" \
             "${VALIDATION_MATRIX_RESULT}"; do
             if [[ "${result}" != "success" ]]; then
-              echo "A validation matrix ended with ${result}" >&2
+              echo "An upstream validation job ended with ${result}" >&2
               exit 1
             fi
           done
@@ -270,51 +400,250 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
-          python-version: 3.11.9
-          cache: pip
-          cache-dependency-path: |-
-            pyproject.toml
-            meta/ci/requirements/*.txt
-            .github/actions/*/action.yml
-      - id: download-source-distribution
-        continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+          # This packaging-only gate uses an exact runner-native interpreter;
+          # release wheels retain their complete 3.11-3.14 ABI coverage above.
+          python-version: 3.13.15
+      - uses: ./.github/actions/restore-pip-cache
         with:
-          name: source-distribution
-          path: download/source
-      - name: Remove a partial source-distribution download before retrying
-        if: ${{ always() && steps.download-source-distribution.outcome == 'failure' }}
+          owner: validation-gate
+          python-version: 3.13.15
+          dependency-paths: |-
+            meta/ci/requirements/build-tools.txt
+            meta/ci/requirements/python-artifact-sha256.lock
+      - name: Reset release-assembly destinations
         shell: bash
         run: |-
           set -euo pipefail
-          rm -rf -- download/source
-      - name: Retry the source-distribution download
-        if: ${{ always() && steps.download-source-distribution.outcome == 'failure' }}
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: source-distribution
-          path: download/source
-      - id: download-platform-wheels
+          rm -rf -- download dist release retained
+      - id: download-validation-artifacts
         continue-on-error: true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          path: download/wheels
-          pattern: dist-wheels-*
-          merge-multiple: true
-      - name: Remove partial platform-wheel downloads before retrying
-        if: ${{ always() && steps.download-platform-wheels.outcome == 'failure' }}
+          path: download/incoming
+      - name: Remove partial validation artifacts before retrying
+        id: reset-validation-artifact-download
+        if: ${{ always() && steps.download-validation-artifacts.outcome == 'failure' }}
         shell: bash
         run: |-
           set -euo pipefail
-          rm -rf -- download/wheels
-      - name: Retry the platform-wheel downloads
-        if: ${{ always() && steps.download-platform-wheels.outcome == 'failure' }}
+          rm -rf -- download/incoming
+      - name: Retry the complete validation-artifact download
+        if: ${{ always() && steps.download-validation-artifacts.outcome == 'failure' && steps.reset-validation-artifact-download.outcome == 'success' }}
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          path: download/wheels
-          pattern: dist-wheels-*
-          merge-multiple: true
+          path: download/incoming
+      - name: Require and stage the exact validation-artifact inventory
+        id: stage-validation-artifacts
+        shell: bash
+        run: |-
+          set -euo pipefail
+          wheel_artifacts=(
+            candidate-wheels-linux-x86_64
+            candidate-wheels-macos-arm64
+            candidate-wheels-macos-x86_64
+            candidate-wheels-windows-amd64
+          )
+          final_bundle_artifacts=(
+            dist-wheels-linux-x86_64
+            dist-wheels-macos-arm64
+            dist-wheels-macos-x86_64
+            dist-wheels-windows-amd64
+          )
+          sanitizer_artifacts=(
+            sanitizer-certificate-Linux-X64-asan-ubsan
+            sanitizer-certificate-Linux-X64-tsan
+            sanitizer-certificate-Windows-X64-asan
+            sanitizer-certificate-macOS-ARM64-asan-ubsan
+            sanitizer-certificate-macOS-X64-asan-ubsan
+          )
+          test_platforms=(linux-x86_64 macos-arm64 macos-x86_64 windows-amd64)
+          test_shards=(concurrency io-pipeline memory-parquet)
+          expected=(
+            native-coverage-certificate
+            source-distribution
+            "${wheel_artifacts[@]}"
+            "${sanitizer_artifacts[@]}"
+          )
+          for platform in "${test_platforms[@]}"; do
+            for shard in "${test_shards[@]}"; do
+              expected+=("platform-test-evidence-${platform}-${shard}")
+            done
+          done
+          if [[ ! -d download/incoming || -L download/incoming ]]; then
+            echo "Validation-artifact download root is missing or unsafe" >&2
+            exit 2
+          fi
+          if find download/incoming -mindepth 1 -maxdepth 1 ! -type d -print -quit | grep -q .; then
+            echo "Validation-artifact download contains a non-directory entry" >&2
+            exit 2
+          fi
+          candidate_count=0
+          for artifact in "${wheel_artifacts[@]}"; do
+            [[ -d "download/incoming/${artifact}" ]] && ((candidate_count += 1))
+          done
+          bundle_count=0
+          for artifact in "${final_bundle_artifacts[@]}"; do
+            manifest="download/incoming/${artifact}/certified-wheel-bundle.json"
+            [[ -f "${manifest}" && ! -L "${manifest}" ]] && ((bundle_count += 1))
+          done
+          if [[ "${bundle_count}" -eq 4 ]]; then
+            mkdir -p download/bundles
+            for artifact in "${final_bundle_artifacts[@]}"; do
+              mv -- "download/incoming/${artifact}" download/bundles/
+            done
+            python meta/ci/release/certified_wheel_bundle.py restore-validation \
+              --bundles-root download/bundles \
+              --output-root download/restored \
+              --overlays-root download/incoming \
+              --github-output "${GITHUB_OUTPUT}" \
+              --github-sha "${GITHUB_SHA}" \
+              --github-run-id "${GITHUB_RUN_ID}" \
+              --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+            rm -rf -- download/incoming
+            mv -- download/restored download/incoming
+          else
+            if [[ "${candidate_count}" -ne 4 ]]; then
+              echo "Expected four candidate wheels or a complete retained-bundle baseline" >&2
+              exit 2
+            fi
+            echo 'reused=false' >> "${GITHUB_OUTPUT}"
+          fi
+          mapfile -t expected < <(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)
+          mapfile -t actual < <(
+            find download/incoming -mindepth 1 -maxdepth 1 -type d -printf '%f\n' |
+              while IFS= read -r artifact; do
+                # A rerun of the reusable CI may see trusted outputs produced
+                # later by an earlier attempt of this same outer workflow.
+                case "${artifact}" in
+                  release-distributions|pypi-publish-distributions | \
+                  dist-wheels-linux-x86_64 | \
+                  dist-wheels-macos-arm64 | \
+                  dist-wheels-macos-x86_64 | \
+                  dist-wheels-windows-amd64) continue ;;
+                  *) printf '%s\n' "${artifact}" ;;
+                esac
+              done | LC_ALL=C sort
+          )
+          if [[ "${#actual[@]}" -ne "${#expected[@]}" ]]; then
+            printf 'Expected artifacts:\n%s\n' "${expected[*]}" >&2
+            printf 'Downloaded artifacts:\n%s\n' "${actual[*]}" >&2
+            exit 2
+          fi
+          for index in "${!expected[@]}"; do
+            if [[ "${actual[index]}" != "${expected[index]}" ]]; then
+              printf 'Expected artifacts:\n%s\n' "${expected[*]}" >&2
+              printf 'Downloaded artifacts:\n%s\n' "${actual[*]}" >&2
+              exit 2
+            fi
+          done
+          mkdir -p \
+            download/platform-tests \
+            download/sanitizers \
+            download/wheels
+          cp -a -- download/incoming/native-coverage-certificate download/native-coverage
+          cp -a -- download/incoming/source-distribution download/source
+          for artifact in "${wheel_artifacts[@]}"; do
+            cp -a -- "download/incoming/${artifact}/." download/wheels/
+          done
+          for artifact in "${sanitizer_artifacts[@]}"; do
+            cp -a -- "download/incoming/${artifact}/." download/sanitizers/
+          done
+          for platform in "${test_platforms[@]}"; do
+            for shard in "${test_shards[@]}"; do
+              artifact="platform-test-evidence-${platform}-${shard}"
+              cp -a -- "download/incoming/${artifact}" download/platform-tests/
+            done
+          done
+      - name: Verify the native-coverage gate evidence
+        shell: bash
+        run: |-
+          set -euo pipefail
+          python meta/ci/native/check_llvm_coverage.py verify \
+            --certificate download/native-coverage/native-coverage-certificate.json \
+            --github-sha "${GITHUB_SHA}" \
+            --github-run-id "${GITHUB_RUN_ID}" \
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+      - name: Verify every platform-wheel certificate
+        shell: bash
+        run: |-
+          set -euo pipefail
+          shopt -s nullglob
+          certificates=(download/wheels/platform-wheel-certificate-*.json)
+          if [[ "${#certificates[@]}" -ne 4 ]]; then
+            echo "Expected four platform-wheel certificates, found ${#certificates[@]}" >&2
+            exit 2
+          fi
+          platforms=(linux-x86_64 macos-arm64 macos-x86_64 windows-amd64)
+          for platform in "${platforms[@]}"; do
+            certificate="download/wheels/platform-wheel-certificate-${platform}.json"
+            if [[ ! -f "${certificate}" || -L "${certificate}" ]]; then
+              echo "Missing regular platform-wheel certificate: ${certificate}" >&2
+              exit 2
+            fi
+            python meta/ci/native/certify_platform_wheel.py verify \
+              --certificate "${certificate}" \
+              --wheel-directory download/wheels \
+              --platform "${platform}" \
+              --github-sha "${GITHUB_SHA}" \
+              --github-run-id "${GITHUB_RUN_ID}" \
+              --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+          done
+      - name: Verify the complete sanitizer evidence matrix
+        shell: bash
+        run: |-
+          set -euo pipefail
+          python meta/ci/sanitizers/certify_sanitizer_run.py verify-directory \
+            --evidence-directory download/sanitizers \
+            --github-sha "${GITHUB_SHA}" \
+            --github-run-id "${GITHUB_RUN_ID}" \
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+      - name: Verify every platform-test evidence set
+        shell: bash
+        run: |-
+          set -euo pipefail
+          shopt -s nullglob
+          expected=(
+            'platform-test-evidence-linux-x86_64-concurrency:linux:concurrency'
+            'platform-test-evidence-linux-x86_64-io-pipeline:linux:io-pipeline'
+            'platform-test-evidence-linux-x86_64-memory-parquet:linux:memory-parquet'
+            'platform-test-evidence-macos-arm64-concurrency:macos-arm64:concurrency'
+            'platform-test-evidence-macos-arm64-io-pipeline:macos-arm64:io-pipeline'
+            'platform-test-evidence-macos-arm64-memory-parquet:macos-arm64:memory-parquet'
+            'platform-test-evidence-macos-x86_64-concurrency:macos-x86_64:concurrency'
+            'platform-test-evidence-macos-x86_64-io-pipeline:macos-x86_64:io-pipeline'
+            'platform-test-evidence-macos-x86_64-memory-parquet:macos-x86_64:memory-parquet'
+            'platform-test-evidence-windows-amd64-concurrency:windows:concurrency'
+            'platform-test-evidence-windows-amd64-io-pipeline:windows:io-pipeline'
+            'platform-test-evidence-windows-amd64-memory-parquet:windows:memory-parquet'
+          )
+          actual=(download/platform-tests/platform-test-evidence-*)
+          if [[ "${#actual[@]}" -ne "${#expected[@]}" ]]; then
+            echo "Expected ${#expected[@]} platform-test evidence sets, found ${#actual[@]}" >&2
+            exit 2
+          fi
+          for specification in "${expected[@]}"; do
+            artifact=${specification%%:*}
+            remainder=${specification#*:}
+            platform=${remainder%%:*}
+            shard=${remainder#*:}
+            directory="download/platform-tests/${artifact}"
+            [[ -d "${directory}" && ! -L "${directory}" ]] || {
+              echo "Platform-test evidence directory is missing or unsafe: ${directory}" >&2
+              exit 2
+            }
+            python meta/ci/quality/platform_test_evidence.py verify \
+              --evidence-dir "${directory}" \
+              --certificate "${directory}/platform-test-certificate-${platform}-${shard}.json" \
+              --platform "${platform}" \
+              --shard "${shard}" \
+              --github-sha "${GITHUB_SHA}" \
+              --github-run-id "${GITHUB_RUN_ID}" \
+              --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+          done
       - name: Validate the complete release artifact set
+        env:
+          PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+          PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
         shell: bash
         run: |
           set -euo pipefail
@@ -323,7 +652,9 @@ jobs:
           SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
           [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
           export SOURCE_DATE_EPOCH
-          python -m pip install pip==26.1.2 twine==7.0.0 packaging==26.3
+          python meta/ci/quality/ensure_pinned_pip.py
+          python -m meta.ci.quality.install_locked_requirements \
+            --lock meta/ci/requirements/build-tools.txt --packages twine packaging
           python -m twine check dist/*
           python meta/ci/release/check_distribution_contents.py --release-set dist/*
       - name: Assemble the auditable release artifact
@@ -338,6 +669,108 @@ jobs:
             --github-run-id "${GITHUB_RUN_ID}" \
             --github-run-attempt "${GITHUB_RUN_ATTEMPT}" \
             release/packages/*
+          cat release/release-manifest.json
+      - name: Assemble four durable certified wheel bundles
+        if: steps.stage-validation-artifacts.outputs.reused != 'true'
+        shell: bash
+        run: |-
+          set -euo pipefail
+          python meta/ci/release/certified_wheel_bundle.py create \
+            --wheels-root download/wheels \
+            --validation-root download/incoming \
+            --release-root release \
+            --output-root retained \
+            --github-sha "${GITHUB_SHA}" \
+            --github-run-id "${GITHUB_RUN_ID}" \
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+      - name: Upload the durable Linux wheel bundle
+        id: upload-durable-linux-wheel
+        if: steps.stage-validation-artifacts.outputs.reused != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-linux-x86_64
+          path: retained/linux-x86_64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Retry the durable Linux wheel-bundle upload
+        if: ${{ steps.stage-validation-artifacts.outputs.reused != 'true' && steps.upload-durable-linux-wheel.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-linux-x86_64
+          path: retained/linux-x86_64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Upload the durable macOS ARM64 wheel bundle
+        id: upload-durable-macos-arm64-wheel
+        if: steps.stage-validation-artifacts.outputs.reused != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-macos-arm64
+          path: retained/macos-arm64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Retry the durable macOS ARM64 wheel-bundle upload
+        if: ${{ steps.stage-validation-artifacts.outputs.reused != 'true' && steps.upload-durable-macos-arm64-wheel.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-macos-arm64
+          path: retained/macos-arm64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Upload the durable macOS x86-64 wheel bundle
+        id: upload-durable-macos-x86-64-wheel
+        if: steps.stage-validation-artifacts.outputs.reused != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-macos-x86_64
+          path: retained/macos-x86_64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Retry the durable macOS x86-64 wheel-bundle upload
+        if: ${{ steps.stage-validation-artifacts.outputs.reused != 'true' && steps.upload-durable-macos-x86-64-wheel.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-macos-x86_64
+          path: retained/macos-x86_64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Upload the durable Windows wheel bundle
+        id: upload-durable-windows-wheel
+        if: steps.stage-validation-artifacts.outputs.reused != 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-windows-amd64
+          path: retained/windows-amd64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+      - name: Retry the durable Windows wheel-bundle upload
+        if: ${{ steps.stage-validation-artifacts.outputs.reused != 'true' && steps.upload-durable-windows-wheel.outcome == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: dist-wheels-windows-amd64
+          path: retained/windows-amd64/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
       - name: Upload the only publishable release set
         id: upload-release-distributions
         continue-on-error: true
@@ -346,8 +779,9 @@ jobs:
           name: release-distributions
           path: release/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
           compression-level: 0
+          overwrite: true
       - name: Retry the publishable release-set upload after a transport failure
         if: ${{ always() && steps.upload-release-distributions.outcome == 'failure' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -355,6 +789,6 @@ jobs:
           name: release-distributions
           path: release/
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
           compression-level: 0
           overwrite: true

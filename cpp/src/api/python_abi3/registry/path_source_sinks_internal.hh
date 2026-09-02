@@ -1,4 +1,7 @@
-// Shared state and operations for path-source registry sink methods.
+// Declares shared state and operations for path-source registry sink methods.
+// The routines preserve source order and Arrow ownership while applying
+// compiled registry plans.
+
 #pragma once
 
 #include <cstddef>
@@ -11,12 +14,11 @@
 #endif
 #include <Python.h>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/metadata/columns/api.hh"
 #include "api/python_abi3/metadata/stream/stream.hh"
 #include "api/python_abi3/path_sources/path_sources.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 #include "sanitize/core/status.hh"
 #include "sanitize/options/options.hh"
 #include "sanitize/registry/registry.hh"
@@ -34,16 +36,15 @@ namespace core_abi3_internal::path_registry_detail {
 
 struct PyRegistrySinkOutputs {
   ArrowArrayStream *main_stream = nullptr;
-  schema_sanitizer_diagnostics *diagnostics = nullptr;
-  char *registry_json = nullptr;
-  char *drifts_json = nullptr;
-  char *conversion_timestamp = nullptr;
-  char *err = nullptr;
+  NativeDiagnostics *diagnostics = nullptr;
+  std::string registry_json = "{}";
+  std::string drifts_json = "[]";
+  std::string conversion_timestamp;
 };
 
 struct NativePathSourcesStreamState {
   ~NativePathSourcesStreamState();
-  schema_sanitizer_context *ctx = nullptr;
+  NativeContext *ctx = nullptr;
   sanitize::PreparedOptionsPtr prepared;
   std::shared_ptr<void> operation_memory_pool;
   std::shared_ptr<sanitize::internal::PerformanceTelemetry> telemetry;
@@ -66,16 +67,15 @@ struct NativePathSourcesStreamState {
   PyObject *chunk_provider = nullptr;
   bool chunk_provider_exhausted = false;
   ArrowArrayStream *inner = nullptr;
-  schema_sanitizer_diagnostics *diagnostics = nullptr;
+  NativeDiagnostics *diagnostics = nullptr;
   std::shared_ptr<sanitize::IngestDiagnostics> aggregate_diagnostics;
   std::unique_ptr<MetadataStreamState> metadata;
   std::string last_error;
 };
 
 void release_registry_outputs(PyRegistrySinkOutputs *outputs);
-bool bind_path_source_diagnostics(
-    NativePathSourcesStreamState *state,
-    schema_sanitizer_diagnostics *diagnostics) noexcept;
+bool bind_path_source_diagnostics(NativePathSourcesStreamState *state,
+                                  NativeDiagnostics *diagnostics) noexcept;
 void close_chunk_provider(NativePathSourcesStreamState *state) noexcept;
 [[nodiscard]] bool
 path_source_input_empty(const PathSourceInput &input) noexcept;
@@ -86,18 +86,16 @@ metadata_columns_for_child(const NativePathSourcesStreamState *state,
                            bool source_file_in_inner = false);
 std::string path_source_error_message(const PathSourceSpec &source,
                                       const std::string &message);
-PyObject *pack_registry_or_raise_with_metadata(int status, PyObject *keepalive,
-                                               PyRegistrySinkOutputs *outputs,
-                                               PyObject *first_row_columns,
-                                               PyObject *all_row_columns,
-                                               PyObject *row_span_columns,
-                                               PyObject *timestamp_columns,
-                                               std::int64_t memory_limit_bytes);
+PyObject *pack_registry_or_raise_with_metadata(
+    sanitize::Result<NativeRegistrySinkOutput> result, PyObject *keepalive,
+    PyObject *first_row_columns, PyObject *all_row_columns,
+    PyObject *row_span_columns, PyObject *timestamp_columns,
+    std::int64_t memory_limit_bytes);
 
 bool provider_has_next_sources(PyObject *provider_obj);
 sanitize::Result<sanitize::SchemaRegistryMergeResult>
 merge_path_source_provider_schemas(
-    schema_sanitizer_context *ctx, PyObject *provider_obj,
+    NativeContext *ctx, PyObject *provider_obj,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
     const char *field_name_policy, bool skip_invalid_json_sources,
     const sanitize::LogicalSchema *previous_schema = nullptr,
@@ -109,8 +107,11 @@ void path_sources_release(ArrowArrayStream *stream);
 int path_sources_get_schema(ArrowArrayStream *stream, ArrowSchema *out);
 int path_sources_get_next(ArrowArrayStream *stream, ArrowArray *out);
 
+PyObject *pack_path_source_registry_stream(
+    PyObject *keepalive, std::unique_ptr<NativePathSourcesStreamState> state,
+    PyObject *chunk_provider = nullptr);
 PyObject *pack_chunk_provider_registry_stream(
-    PyObject *ctx_obj, schema_sanitizer_context *ctx, const char *sink_name,
+    PyObject *ctx_obj, NativeContext *ctx, const char *sink_name,
     PyObject *stream_provider_obj,
     const sanitize::PreparedOptionsPtr &prepared_options,
     std::shared_ptr<NativeRegistryPlan> registry_plan,

@@ -1,4 +1,8 @@
-"""Bounded per-operation diagnostics for concurrent runtime observability."""
+"""Retain bounded per-operation diagnostics for concurrent runtime observability.
+
+Weakly registered operations publish snapshots under clone budgets, mark completion, aggregate
+process state, and reset their registry safely after a fork.
+"""
 
 from __future__ import annotations
 

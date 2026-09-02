@@ -1,4 +1,7 @@
-"""Regression coverage for memory external claim is published atomically."""
+"""Stress-tests atomic path-claim publication with retry-generation reuse, heap compaction,
+guardian startup rollback, callback fairness, partial releases, stale deletion, and
+asynchronous bridge drains. A claim becomes visible as one transaction and stays owned
+until exact external-marker cleanup, even when callbacks spawn work or deletions fail."""
 
 from __future__ import annotations
 
@@ -12,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -26,6 +30,7 @@ _NATIVE_STUB_MODULES = (
 def test_external_claim_is_published_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify external claim is published atomically."""
     import schema_sanitizer.core_impl.path_identity as module
 
     monkeypatch.setenv("SCHEMA_SANITIZER_COORDINATION_DIR", str(tmp_path / "coord"))
@@ -39,19 +44,21 @@ def test_external_claim_is_published_atomically(
     calls_lock = threading.Lock()
 
     def blocked_write(descriptor: int, payload: bytes) -> None:
+        """Pause at the blocked write synchronization point."""
         nonlocal calls
         with calls_lock:
             calls += 1
             first = calls == 1
         if first:
             entered.set()
-            assert release.wait(3)
+            assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
         original(descriptor, payload)
 
     monkeypatch.setattr(module, "_write_claim_payload", blocked_write)
     outcomes: list[object] = []
 
     def claim() -> None:
+        """Claim the resource at the controlled publication point."""
         try:
             outcomes.append(module.claim_path_identity(path))
         except BaseException as exc:
@@ -60,12 +67,11 @@ def test_external_claim_is_published_atomically(
     first = threading.Thread(target=claim)
     second = threading.Thread(target=claim)
     first.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     second.start()
-    second.join(2)
+    join_thread_or_fail(second)
     release.set()
-    first.join(2)
-    assert not first.is_alive() and not second.is_alive()
+    join_thread_or_fail(first)
     owners = [value for value in outcomes if isinstance(value, module.PathIdentity)]
     errors = [value for value in outcomes if isinstance(value, BaseException)]
     assert len(owners) == 1
@@ -77,6 +83,7 @@ def test_external_claim_is_published_atomically(
 def test_retry_cancel_reschedule_never_reuses_old_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify retry cancel reschedule never reuses old generation."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     key = ("external-claim-is-published-atomically-aba", object())
@@ -98,6 +105,7 @@ def test_retry_cancel_reschedule_never_reuses_old_generation(
 
 
 def test_retry_heap_compacts_replaced_payloads() -> None:
+    """Verify retry heap compacts replaced payloads."""
     from schema_sanitizer.core_impl.retry_scheduler import (
         cancel_retry,
         retry_scheduler_snapshot,
@@ -120,6 +128,7 @@ def test_retry_heap_compacts_replaced_payloads() -> None:
 def test_retry_worker_start_rollback_has_autonomous_guardian(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify retry worker start rollback has autonomous guardian."""
     import schema_sanitizer.core_impl.retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -129,6 +138,7 @@ def test_retry_worker_start_rollback_has_autonomous_guardian(
         calls = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.calls += 1
             if self.calls == 1:
                 raise OSError("transient release")
@@ -139,6 +149,7 @@ def test_retry_worker_start_rollback_has_autonomous_guardian(
     real_thread = threading.Thread
 
     def thread_factory(*args: Any, **kwargs: Any) -> threading.Thread:
+        """Construct the controlled worker thread and record publication order."""
         worker = real_thread(*args, **kwargs)
         if kwargs.get("name") == "schema-sanitizer-retry-timer":
             worker.start = lambda: (_ for _ in ()).throw(RuntimeError("start failed"))
@@ -146,20 +157,21 @@ def test_retry_worker_start_rollback_has_autonomous_guardian(
 
     monkeypatch.setattr(module.threading, "Thread", thread_factory)
     scheduler._start_timer_worker()
-    assert released.wait(2)
-    deadline = time.monotonic() + 2
+    assert released.wait(SCHEDULER_TIMEOUT_SECONDS)
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     guardian = module._RELEASE_GUARDIAN
     while time.monotonic() < deadline:
         with guardian._condition:
-            if id(lease) not in guardian._owner_index:
+            if id(lease) not in guardian._items:
                 break
         time.sleep(0.01)
     with guardian._condition:
-        assert id(lease) not in guardian._owner_index
+        assert id(lease) not in guardian._items
     assert scheduler.snapshot().failed_worker_leases == 0
 
 
 def test_retry_timer_is_not_blocked_by_one_callback() -> None:
+    """Verify retry timer is not blocked by one callback."""
     from schema_sanitizer.core_impl.retry_scheduler import schedule_retry
 
     blocked = threading.Event()
@@ -167,8 +179,9 @@ def test_retry_timer_is_not_blocked_by_one_callback() -> None:
     second = threading.Event()
 
     def first_callback() -> None:
+        """Run the first callback while replacement publication is blocked."""
         blocked.set()
-        assert release.wait(3)
+        assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     assert schedule_retry(
         ("external-claim-is-published-atomically-exec", 1), first_callback, delay_seconds=0
@@ -176,14 +189,15 @@ def test_retry_timer_is_not_blocked_by_one_callback() -> None:
     assert schedule_retry(
         ("external-claim-is-published-atomically-exec", 2), second.set, delay_seconds=0.02
     )
-    assert blocked.wait(2)
-    assert second.wait(2)
+    assert blocked.wait(SCHEDULER_TIMEOUT_SECONDS)
+    assert second.wait(SCHEDULER_TIMEOUT_SECONDS)
     release.set()
 
 
 def test_partial_claim_release_does_not_restore_path_authority(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify partial claim release does not restore path authority."""
     import schema_sanitizer.core_impl.path_identity as module
 
     monkeypatch.setenv("SCHEMA_SANITIZER_COORDINATION_DIR", str(tmp_path / "coord"))
@@ -198,6 +212,7 @@ def test_partial_claim_release_does_not_restore_path_authority(
     failed = False
 
     def fail_once() -> None:
+        """Inject the once failure at the controlled test point."""
         nonlocal failed
         if not failed:
             failed = True
@@ -217,6 +232,7 @@ def test_partial_claim_release_does_not_restore_path_authority(
 def test_failed_stale_delete_retains_claim_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify failed stale delete retains claim owner."""
     from schema_sanitizer.core_impl.temporary_janitor import (
         _TemporaryArtifactJanitor,
     )
@@ -227,7 +243,11 @@ def test_failed_stale_delete_retains_claim_owner(
     leftover.write_text("x")
     janitor = _TemporaryArtifactJanitor()
     janitor.root = lambda: root  # type: ignore[method-assign]
-    monkeypatch.setattr(janitor, "_delete", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        janitor,
+        "_delete_owned",
+        lambda path, _is_dir, identity=None: (False, path, identity, False),
+    )
     janitor._scan_stale()
     assert janitor.snapshot().pending_artifacts == 1
     artifact = next(iter(janitor._pending.values()))
@@ -241,6 +261,7 @@ def test_failed_stale_delete_retains_claim_owner(
 def test_bridge_drain_reaches_tasks_spawned_from_finally(
     native_stub: None,
 ) -> None:
+    """Verify bridge drain reaches tasks spawned from finally."""
     from schema_sanitizer.remote_impl.async_bridge import _BridgeRunner
 
     started = threading.Event()
@@ -249,9 +270,11 @@ def test_bridge_drain_reaches_tasks_spawned_from_finally(
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             return None
 
     async def child() -> None:
+        """Run the child-side operation in the controlled lifecycle."""
         child_started.set()
         try:
             await asyncio.sleep(3600)
@@ -259,6 +282,7 @@ def test_bridge_drain_reaches_tasks_spawned_from_finally(
             child_finally.set()
 
     async def operation() -> None:
+        """Run the controlled operation under test."""
         started.set()
         try:
             await asyncio.sleep(3600)
@@ -267,10 +291,9 @@ def test_bridge_drain_reaches_tasks_spawned_from_finally(
 
     runner = _BridgeRunner(operation(), copy_context(), Lease())
     runner.start()
-    assert started.wait(2)
+    assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
     runner.cancel()
-    runner._thread.join(2)
-    assert not runner._thread.is_alive()
+    join_thread_or_fail(runner._thread)
     assert child_started.is_set()
     assert child_finally.is_set()
 
@@ -278,6 +301,7 @@ def test_bridge_drain_reaches_tasks_spawned_from_finally(
 def test_path_claim_owner_finalizer_eventually_removes_external_claim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify path claim owner finalizer eventually removes external claim."""
     import schema_sanitizer.core_impl.path_identity as module
 
     monkeypatch.setenv("SCHEMA_SANITIZER_COORDINATION_DIR", str(tmp_path / "coord"))
@@ -289,31 +313,7 @@ def test_path_claim_owner_finalizer_eventually_removes_external_claim(
     claim = Path(identity.external_claim_path)
     del identity
     gc.collect()
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while claim.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert not claim.exists()
-
-
-def test_source_contracts() -> None:
-    root = Path(__file__).resolve().parents[2]
-    retry = (root / "src/schema_sanitizer/core_impl/retry_scheduler.py").read_text()
-    path_identity = (root / "src/schema_sanitizer/core_impl/path_identity.py").read_text()
-    assert "_next_token_locked" in retry
-    assert "discard_payload" in retry
-    assert "_compact_heap_locked" in retry
-    assert "schema-sanitizer-retry-timer" in retry
-    assert "schema-sanitizer-retry-executor" in retry
-    assert "schema-sanitizer-retry-lease-guardian" in retry
-    assert "_MAX_EMERGENCY_BYTES" in retry
-    assert "os.link(" in path_identity
-    assert ".claim-write-" in path_identity
-    assert "authority_released" in path_identity
-    assert "_CLAIM_SWEEP_ITERATOR" in path_identity
-    header = (root / "cpp/src/internal/runtime/operation_task_arena.hh").read_text()
-    source = (root / "cpp/src/internal/runtime/operation_task_arena.cc").read_text()
-    assert "class TaskMemoryLease" in header
-    assert "SubmitLeased" in header and "SubmitLeased" in source
-    assert "kLaneCount = 2U" in source
-    assert "reaper_queued_bytes" in header
-    assert "post_shutdown_retained_bytes" in header

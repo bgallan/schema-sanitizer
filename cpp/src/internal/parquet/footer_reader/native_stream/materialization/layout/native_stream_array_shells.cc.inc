@@ -1,5 +1,5 @@
-// Native recursive Arrow array shells and materialization cursor declarations.
-// Included directly by footer_reader.cc.
+// Declares native recursive Arrow array shells and materialization cursors.
+// This fragment is included directly by footer_reader.cc.
 
 struct NativeRepeatedLevelLayoutView {
   bool decoded = false;
@@ -19,6 +19,7 @@ struct NativeRepeatedLevelLayoutWindow {
   std::vector<std::uint8_t> validity_bitmap;
 };
 
+/// Derives the repeated-level domain covering the selected flat row window.
 sanitize::Result<NativeElementRange>
 native_repeated_domain_range(const ColumnChunkInfo &column,
                              std::size_t layout_index,
@@ -48,6 +49,8 @@ native_repeated_domain_range(const ColumnChunkInfo &column,
   return range;
 }
 
+/// Derives the repeated element interval represented by a bounded level-layout
+/// window.
 sanitize::Result<NativeElementRange>
 native_repeated_element_range(const ColumnChunkInfo &column,
                               std::size_t layout_index,
@@ -69,6 +72,7 @@ native_repeated_element_range(const ColumnChunkInfo &column,
   return NativeElementRange{first, last - first};
 }
 
+/// Maps a repeated element interval to the corresponding leaf-value window.
 sanitize::Result<NativeRepeatedLeafWindow>
 native_repeated_leaf_window(const ColumnChunkInfo &column,
                             const NativeFlatRowWindow &window) {
@@ -89,6 +93,8 @@ native_repeated_leaf_window(const ColumnChunkInfo &column,
   return NativeRepeatedLeafWindow{deepest.element_count, elements};
 }
 
+/// Copies validity bitmap range with bounds checks and the required Arrow
+/// physical representation.
 void copy_validity_bitmap_range(const std::vector<std::uint8_t> &source,
                                 NativeElementRange range,
                                 std::vector<std::uint8_t> *target,
@@ -118,6 +124,7 @@ void copy_validity_bitmap_range(const std::vector<std::uint8_t> &source,
   }
 }
 
+/// Slices repeated-level layout metadata to a bounded row window.
 sanitize::Result<NativeRepeatedLevelLayoutWindow>
 native_repeated_level_layout_window(const ColumnChunkInfo &column,
                                     std::size_t layout_index,
@@ -150,6 +157,8 @@ native_repeated_level_layout_window(const ColumnChunkInfo &column,
   return result;
 }
 
+/// Builds complete repeated-level offsets and validity state for one leaf
+/// column.
 sanitize::Result<NativeRepeatedLevelLayoutView>
 native_repeated_level_layout(const ColumnChunkInfo &column,
                              std::size_t layout_index) {
@@ -168,6 +177,8 @@ native_repeated_level_layout(const ColumnChunkInfo &column,
       "native Parquet reader: recursive repeated layout was not decoded");
 }
 
+/// Configures native list array buffers and child pointers under the Arrow C
+/// Data ownership contract.
 sanitize::Status
 configure_native_list_array(NativeParquetListArray *list_array,
                             const std::vector<std::uint8_t> &validity,
@@ -198,6 +209,8 @@ configure_native_list_array(NativeParquetListArray *list_array,
   return {};
 }
 
+/// Configures native struct array buffers and child pointers under the Arrow C
+/// Data ownership contract.
 sanitize::Status
 configure_native_struct_array(NativeParquetStructArray *struct_array,
                               std::int64_t length, std::int64_t null_count) {
@@ -232,6 +245,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_map_node(
     const NativeRecursiveMaterializationTree &tree, std::size_t map_node_index,
     const NativeFlatRowWindow &window, NativeRecursiveArrayCursor *cursor);
 
+/// Dispatches one recursive child to its leaf, struct, list, or map
+/// materializer.
 sanitize::Result<ArrowArray *> materialize_native_recursive_child_node(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree,

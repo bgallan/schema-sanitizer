@@ -1,4 +1,6 @@
 // Declares helpers for hybrid schema-registry versioned field names.
+// The helpers normalize private planning state without leaking wire or layout
+// details into public APIs.
 
 #pragma once
 

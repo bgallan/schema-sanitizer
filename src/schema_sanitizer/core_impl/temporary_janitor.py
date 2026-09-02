@@ -1,4 +1,8 @@
-"""Quarantine and retry cleanup for temporary artifacts that resist deletion."""
+"""Quarantine temporary artifacts that resist immediate deletion and retry cleanup.
+
+Descriptor-pinned identities preserve exact storage and file-descriptor ownership while a
+governed worker handles retries, diagnostics, shutdown, and fork recovery.
+"""
 
 from __future__ import annotations
 
@@ -72,6 +76,7 @@ _JANITOR_RETRY_FORK_PREPARED: tuple[threading.Lock, dict[int, object]] | None = 
 
 
 def _retry_janitor_owner(token: int) -> None:
+    """Retry cleanup for a retained temporary-artifact owner."""
     with _JANITOR_RETRY_OWNERS_LOCK:
         owner = _JANITOR_RETRY_OWNERS.pop(token, None)
     if owner is None:
@@ -106,25 +111,18 @@ class TemporaryJanitorSnapshot:
 
 
 def _replace_into_root(source: Path, target_name: str, handle: _QuarantineRootHandle) -> None:
-    """Publish relative to the pinned root, with a test-double compatibility path."""
-    if os.replace is _ORIGINAL_OS_REPLACE:
-        os.replace(source, target_name, dst_dir_fd=handle.descriptor)
-    else:
-        # Historical tests patch os.replace with a two-argument barrier.  The
-        # production branch above remains descriptor-relative and fail-closed.
-        os.replace(source, handle.path / target_name)
+    """Publish relative to the pinned quarantine root."""
+    os.replace(source, target_name, dst_dir_fd=handle.descriptor)
 
 
 def _replace_from_root(source_name: str, target: Path, handle: _QuarantineRootHandle) -> None:
-    if os.replace is _ORIGINAL_OS_REPLACE:
-        os.replace(source_name, target, src_dir_fd=handle.descriptor)
-    else:
-        os.replace(handle.path / source_name, target)
+    """Move a quarantined entry relative to the trusted root descriptor."""
+    os.replace(source_name, target, src_dir_fd=handle.descriptor)
 
 
 class _StorageLeaseOwner(Protocol):
     def release(self) -> None:
-        """Release storage ownership."""
+        """Release exact storage ownership retained by this owner."""
 
 
 @dataclass(slots=True)
@@ -146,6 +144,7 @@ class _StaleArtifactLease:
     __slots__ = ()
 
     def release(self) -> None:
+        """Release resources owned by this stale artifact lease."""
         return None
 
 
@@ -176,29 +175,24 @@ _MAX_ROOT_GENERATIONS = 4
 
 
 class _Releasable(Protocol):
-    def release(self) -> None: ...
+    def release(self) -> None:
+        """Release resources owned by this releasable."""
+        ...
 
 
 _CLOSING_ROOT_OWNERS: deque[_Releasable] = deque()
 _MAX_CLOSING_ROOT_OWNERS = _MAX_ROOT_GENERATIONS
-_ORIGINAL_OS_REPLACE = os.replace
 
 
 def _configured_root_location() -> tuple[Path, str, Path]:
+    """Return the configured quarantine root and whether it was explicit."""
     configured_base = os.getenv(_ENV_DIRECTORY)
     base = Path(configured_base or tempfile.gettempdir())
     getuid = getattr(os, "geteuid", None)
     uid = getuid() if getuid is not None else None
     directory_name = "schema-sanitizer-quarantine"
-    legacy = base / directory_name
     if configured_base is None and uid is not None:
-        try:
-            legacy_metadata = os.lstat(legacy)
-        except FileNotFoundError:
-            directory_name = f"{directory_name}-{uid}"
-        else:
-            if not stat.S_ISDIR(legacy_metadata.st_mode) or legacy_metadata.st_uid != uid:
-                directory_name = f"{directory_name}-{uid}"
+        directory_name = f"{directory_name}-{uid}"
     return base, directory_name, base / directory_name
 
 
@@ -252,7 +246,7 @@ def _root_handle() -> _QuarantineRootHandle:
             base_fd = os.open(base, flags)
             record_physical_file_descriptors_opened(1)
             try:
-                os.mkdir(directory_name, 0o700, dir_fd=base_fd)
+                os.mkdir(directory_name, stat.S_IRWXU, dir_fd=base_fd)
             except FileExistsError:
                 pass
             try:
@@ -271,7 +265,7 @@ def _root_handle() -> _QuarantineRootHandle:
                 raise OSError("temporary quarantine must be a real directory")
             if uid is not None and metadata.st_uid != uid:
                 raise OSError("temporary quarantine must be owned by the current user")
-            os.fchmod(root_fd, 0o700)
+            os.fchmod(root_fd, stat.S_IRWXU)
 
             # The parent authority is no longer needed.  Prove its physical close
             # before shrinking the exact two-credit lease to the one persistent
@@ -404,6 +398,7 @@ class _JanitorDescriptorOwner:
     lock: threading.Lock = dataclass_field(default_factory=threading.Lock)
 
     def release(self) -> None:
+        """Release resources owned by this janitor descriptor owner."""
         with self.lock:
             descriptor = self.descriptor
             lease = self.lease
@@ -473,6 +468,7 @@ def _close_descriptor_bundle_or_retain(
 
 
 def _close_or_retain_descriptor(descriptor: int, lease: object | None) -> None:
+    """Close or retain descriptor."""
     owner = _JanitorDescriptorOwner(descriptor if descriptor >= 0 else None, lease)
     try:
         owner.release()
@@ -496,7 +492,7 @@ class _TemporaryArtifactJanitor:
     """Retain leases until failed-cleanup artifacts are actually removed."""
 
     def __init__(self) -> None:
-        """Initialize this helper."""
+        """Initialize the temporary artifact janitor and its owned runtime state."""
         self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
         self._scan_lock = threading.Lock()
@@ -533,6 +529,7 @@ class _TemporaryArtifactJanitor:
 
     @staticmethod
     def _new_fork_bank() -> tuple[object, ...]:
+        """Allocate a fresh janitor fork-quarantine bank."""
         lock = threading.RLock()
         return (
             lock,
@@ -553,35 +550,23 @@ class _TemporaryArtifactJanitor:
 
     @staticmethod
     def _private_delete_path(path: Path) -> Path:
+        """Return the private delete path."""
         if path.parent.name == ".delete":
             return path
         handle = _pinned_handle_for_path(path.parent)
-        if handle is not None:
-            try:
-                os.mkdir(".delete", 0o700, dir_fd=handle.descriptor)
-            except FileExistsError:
-                pass
-            metadata = os.stat(".delete", dir_fd=handle.descriptor, follow_symlinks=False)
-            root = handle.path / ".delete"
-        else:
-            # Compatibility for explicit/custom janitor roots.  Production's
-            # process-wide root takes the descriptor-relative branch above.
-            root = path.parent / ".delete"
-            try:
-                os.mkdir(root, 0o700)
-            except FileExistsError:
-                pass
-            metadata = os.lstat(root)
+        if handle is None:
+            raise OSError("temporary artifact is outside the pinned quarantine root")
+        try:
+            os.mkdir(".delete", stat.S_IRWXU, dir_fd=handle.descriptor)
+        except FileExistsError:
+            pass
+        metadata = os.stat(".delete", dir_fd=handle.descriptor, follow_symlinks=False)
+        root = handle.path / ".delete"
         if not stat.S_ISDIR(metadata.st_mode):
             raise OSError("temporary quarantine delete root must be a real directory")
         getuid = getattr(os, "geteuid", None)
         if getuid is not None and metadata.st_uid != getuid():
             raise OSError("temporary quarantine delete root must be owned by the current user")
-        if handle is None:
-            try:
-                os.chmod(root, 0o700, follow_symlinks=False)
-            except (NotImplementedError, TypeError):
-                os.chmod(root, 0o700)
         return root / f"delete-{os.getpid()}-{uuid.uuid4().hex}"
 
     @classmethod
@@ -665,16 +650,9 @@ class _TemporaryArtifactJanitor:
             return False, private, expected_identity or private_identity, False
         return False, private, expected_identity or private_identity, False
 
-    @classmethod
-    def _delete(
-        cls, path: Path, is_dir: bool, expected_identity: PathIdentity | None = None
-    ) -> bool:
-        """Compatibility wrapper around the verified private-delete transaction."""
-        deleted, _path, _identity, _mismatch = cls._delete_owned(path, is_dir, expected_identity)
-        return deleted
-
     @staticmethod
     def _metadata_charge(path: Path) -> int:
+        """Estimate control-plane bytes retained by a janitor artifact."""
         try:
             encoded = os.fsencode(str(path))
         except BaseException:
@@ -682,6 +660,7 @@ class _TemporaryArtifactJanitor:
         return _PENDING_METADATA_BASE + len(encoded)
 
     def _pending_fits_locked(self, charge: int, *, reserve_slot: bool = True) -> bool:
+        """Return whether another janitor entry fits while holding the janitor lock."""
         count = len(self._pending) + (self._quarantine_inflight if reserve_slot else 0)
         if count >= _MAX_PENDING_ARTIFACTS:
             return False
@@ -738,8 +717,7 @@ class _TemporaryArtifactJanitor:
 
     def _stale_scan_candidates(self) -> Iterator[Path]:
         """Yield crash leftovers while every live directory FD is governed."""
-        # Historical streaming invariant: this replaces iter(self.root().iterdir())
-        # with an equivalent scandir iterator whose descriptor owns a governor lease.
+        # Use a streaming scandir iterator whose descriptor owns a governor lease.
         root = self.root()
         for candidate_root in (root, root / ".delete"):
             try:
@@ -811,7 +789,12 @@ class _TemporaryArtifactJanitor:
                             self._rejected_artifacts += 1
                         return
                     transferred_ticket = False
-                    if self._delete(child, stat.S_ISDIR(metadata.st_mode), identity):
+                    deleted, _path, _identity, _mismatch = self._delete_owned(
+                        child,
+                        stat.S_ISDIR(metadata.st_mode),
+                        identity,
+                    )
+                    if deleted:
                         try:
                             release_path_identity(identity)
                         except BaseException:
@@ -957,18 +940,11 @@ class _TemporaryArtifactJanitor:
                     suffix = source.suffix if not is_dir else ""
                     selected_root = self.root()
                     handle = _pinned_handle_for_path(selected_root)
+                    if handle is None:
+                        raise OSError("temporary quarantine root is not pinned")
                     target_name = f"artifact-{os.getpid()}-{uuid.uuid4().hex}{suffix}"
                     target = selected_root / target_name
-                    if handle is not None:
-                        _replace_into_root(source, target_name, handle)
-                    else:
-                        root_metadata = os.lstat(selected_root)
-                        if not stat.S_ISDIR(root_metadata.st_mode):
-                            raise OSError("temporary quarantine must be a real directory")
-                        getuid = getattr(os, "geteuid", None)
-                        if getuid is not None and root_metadata.st_uid != getuid():
-                            raise OSError("temporary quarantine must be owned by the current user")
-                        os.replace(source, target)
+                    _replace_into_root(source, target_name, handle)
                     target_identity = lstat_identity(target)
                     if not transfer_identity_matches(source_identity, target_identity):
                         mismatch = True
@@ -977,10 +953,7 @@ class _TemporaryArtifactJanitor:
                                 lstat_identity(source) is None
                                 and lstat_identity(target) is not None
                             ):
-                                if handle is not None:
-                                    _replace_from_root(target.name, source, handle)
-                                else:
-                                    os.replace(target, source)
+                                _replace_from_root(target.name, source, handle)
                         except OSError:
                             pass
                     else:
@@ -1041,14 +1014,16 @@ class _TemporaryArtifactJanitor:
         if accepted:
             # Thread admission and startup use their own claim/work/commit and
             # therefore cannot hold the janitor's global lock while blocking.
-            self._ensure_thread_locked()
+            self._ensure_worker()
             self._wake.set()
         return accepted
 
     def _has_failed_thread_leases_locked(self) -> bool:
+        """Return whether failed thread leases remain while holding the janitor lock."""
         return bool(self._failed_thread_leases or self._terminal_failed_thread_lease is not None)
 
     def _retain_failed_thread_lease_locked(self, lease: _Releasable) -> None:
+        """Retain a failed janitor thread lease while holding the janitor lock."""
         if any(item is lease for item in self._failed_thread_leases):
             return
         if self._terminal_failed_thread_lease is lease:
@@ -1063,6 +1038,7 @@ class _TemporaryArtifactJanitor:
         raise RuntimeError("janitor thread lease ownership invariant exceeded")
 
     def _take_failed_thread_leases_locked(self) -> deque[_Releasable]:
+        """Remove retained janitor thread leases while holding the janitor lock."""
         failed = self._failed_thread_leases
         self._failed_thread_leases = deque()
         terminal = self._terminal_failed_thread_lease
@@ -1071,12 +1047,8 @@ class _TemporaryArtifactJanitor:
             failed.append(terminal)
         return failed
 
-    def _ensure_thread_locked(self) -> None:
-        """Start one worker through claim/work/commit outside the global lock.
-
-        The historical name is retained for tests and internal callers. It is
-        safe to call without holding ``_lock``; production callers do so.
-        """
+    def _ensure_worker(self) -> None:
+        """Start one worker through claim/work/commit outside the global lock."""
         with self._condition:
             if (
                 (self._closed and not self._pending)
@@ -1215,6 +1187,7 @@ class _TemporaryArtifactJanitor:
                 _JANITOR_RETRY_OWNERS[retry_token] = self
 
                 def retry_owner(token: int = retry_token) -> None:
+                    """Retry terminal cleanup for one retained owner."""
                     _retry_janitor_owner(token)
 
                 self._retry_scheduled = schedule_retry(
@@ -1234,9 +1207,11 @@ class _TemporaryArtifactJanitor:
     def _availability_wakeup(self) -> None:
         # Acknowledgment is owned by the sealed notifier delivery.  Do not
         # unregister before work succeeds or a transient wakeup would be lost.
+        """Retry starting the janitor worker when thread capacity becomes available."""
         self._retry_worker_start()
 
     def _unregister_availability(self) -> None:
+        """Remove the registered capacity-availability callback."""
         with self._condition:
             if not self._availability_registered:
                 return
@@ -1244,6 +1219,7 @@ class _TemporaryArtifactJanitor:
         unregister_project_thread_availability(AvailabilityEvent.TEMPORARY_JANITOR)
 
     def _retry_worker_start(self) -> None:
+        """Retry starting the governed temporary-janitor worker."""
         self._unregister_availability()
         with self._condition:
             self._retry_scheduled = False
@@ -1266,7 +1242,7 @@ class _TemporaryArtifactJanitor:
                 retry.extend(existing)
                 while retry:
                     self._retain_failed_thread_lease_locked(retry.popleft())
-        self._ensure_thread_locked()
+        self._ensure_worker()
         with self._condition:
             if (self._thread is None and self._pending) or self._has_failed_thread_leases_locked():
                 self._schedule_retry_locked()
@@ -1295,10 +1271,12 @@ class _TemporaryArtifactJanitor:
             remaining -= examined
             for key, artifact in batch:
                 if artifact.identity is None:
-                    deleted = self._delete(artifact.path, artifact.is_dir)
-                    retained_path = artifact.path
-                    retained_identity = None
-                    mismatch = False
+                    (
+                        deleted,
+                        retained_path,
+                        retained_identity,
+                        mismatch,
+                    ) = self._delete_owned(artifact.path, artifact.is_dir)
                 else:
                     (
                         deleted,
@@ -1354,35 +1332,8 @@ class _TemporaryArtifactJanitor:
         self._retiring_thread = threading.current_thread()
         return lease
 
-    def _retire_current_thread_locked(self) -> None:
-        """Compatibility-only direct retirement used by historical tests.
-
-        Production workers use ``_release_thread_lease_owner`` and therefore
-        never invoke user cleanup while holding the janitor lock.  This helper
-        is intentionally kept atomic for old direct callers: the permit result
-        and retired thread identity become visible in one lock handoff.
-        """
-        current = threading.current_thread()
-        lease = self._claim_current_thread_retirement_locked()
-        if lease is None:
-            return
-        release_failed = False
-        try:
-            lease.release()
-        except BaseException:
-            release_failed = True
-        if self._thread is current:
-            self._thread = None
-        if self._retiring_thread is current:
-            self._retiring_thread = None
-        if release_failed:
-            self._thread_lease = lease
-            self._schedule_retry_locked()
-        elif self._thread_lease is lease:
-            self._thread_lease = None
-        self._condition.notify_all()
-
     def _release_thread_lease_owner(self, lease: _Releasable | None) -> None:
+        """Release thread lease owner."""
         current = threading.current_thread()
         thread = self._thread
         if lease is not None and thread is current and thread.is_alive():
@@ -1466,7 +1417,7 @@ class _TemporaryArtifactJanitor:
         self._sweep_cycle()
 
     def snapshot(self) -> TemporaryJanitorSnapshot:
-        """Implement the internal snapshot helper."""
+        """Return a bounded snapshot of pending and quarantined artifacts."""
         with self._lock:
             pending_without_worker = int(
                 bool(self._pending) and (self._thread is None or not self._thread.is_alive())
@@ -1588,6 +1539,7 @@ class _TemporaryArtifactJanitor:
         self._fork_prepared = self._fork_banks[self._fork_bank_index]
 
     def clear_fork_preparation(self) -> None:
+        """Clear state established while preparing for a fork."""
         self._fork_prepared = None
 
     def reset_after_fork(self) -> None:
@@ -1670,7 +1622,7 @@ def quarantine_temporary_artifact(
 
 
 def temporary_janitor_snapshot() -> TemporaryJanitorSnapshot:
-    """Implement the internal temporary_janitor_snapshot helper."""
+    """Return the process-wide temporary janitor snapshot."""
     return _JANITOR.snapshot()
 
 
@@ -1681,16 +1633,19 @@ def sweep_temporary_quarantine() -> None:
 
 
 def _prepare_janitor_retry_owners_for_fork() -> None:
+    """Prepare janitor retry owners for fork."""
     global _JANITOR_RETRY_FORK_PREPARED
     _JANITOR_RETRY_FORK_PREPARED = _JANITOR_RETRY_FORK_BANKS[_JANITOR_RETRY_FORK_BANK_INDEX]
 
 
 def _clear_janitor_retry_fork_preparation() -> None:
+    """Clear janitor retry fork preparation."""
     global _JANITOR_RETRY_FORK_PREPARED
     _JANITOR_RETRY_FORK_PREPARED = None
 
 
 def _reset_janitor_retry_owners_after_fork() -> None:
+    """Reset janitor retry owners after fork."""
     global _JANITOR_RETRY_OWNERS_LOCK, _JANITOR_RETRY_OWNERS, _JANITOR_RETRY_FORK_PREPARED
     global _JANITOR_RETRY_FORK_BANK_INDEX
     prepared = _JANITOR_RETRY_FORK_PREPARED

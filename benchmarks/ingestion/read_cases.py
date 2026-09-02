@@ -1,4 +1,8 @@
-"""Read-side benchmark cases for the local ingestion benchmark CLI."""
+"""Read-side cases for the local ingestion benchmark CLI.
+
+It creates representative file and directory fixtures, exercises public read APIs, and
+records their input sizes without relying on private route-observation state.
+"""
 
 from __future__ import annotations
 
@@ -16,10 +20,7 @@ from benchmarks.ingestion.fixtures import (
     write_nested_jsonl,
     write_xml_folder,
 )
-from benchmarks.ingestion.route_details import (
-    native_directory_route_detail,
-    sink_source_route_detail,
-)
+from benchmarks.ingestion.route_details import result_route_details
 from benchmarks.ingestion.timing import time_call
 
 
@@ -88,7 +89,7 @@ def run_read_cases(root: Path, rows: int, width: int, repeats: int, case: str) -
             rows,
             repeats,
             input_bytes=jsonl_path,
-            describe=lambda _result: sink_source_route_detail(),
+            describe=result_route_details,
         )
 
     if case in {"all", "dirty-jsonl"}:
@@ -170,7 +171,7 @@ def run_read_cases(root: Path, rows: int, width: int, repeats: int, case: str) -
             rows,
             repeats,
             input_bytes=lambda: _path_bytes(folder_path),
-            describe=lambda _result: native_directory_route_detail(),
+            describe=result_route_details,
         )
 
     if case in {"all", "json-folder-many"}:
@@ -186,7 +187,7 @@ def run_read_cases(root: Path, rows: int, width: int, repeats: int, case: str) -
             max(rows, 256),
             repeats,
             input_bytes=lambda: _path_bytes(folder_path),
-            describe=lambda _result: native_directory_route_detail(),
+            describe=result_route_details,
         )
 
     if case in {"all", "xml-folder"}:
@@ -203,9 +204,7 @@ def run_read_cases(root: Path, rows: int, width: int, repeats: int, case: str) -
             rows,
             repeats,
             input_bytes=lambda: _path_bytes(folder_path),
-            describe=lambda _result: (
-                f"{sink_source_route_detail()} {native_directory_route_detail()}"
-            ),
+            describe=result_route_details,
         )
 
     if case in {"all", "csv"}:

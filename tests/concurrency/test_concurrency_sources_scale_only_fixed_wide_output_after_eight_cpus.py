@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency sources scale only fixed wide output after eight cpus."""
+"""Pin source-side high-core scaling to eligible fixed-wide output.
+
+A synthetic sixteen-worker arena must form distinct input and output lanes, while machines below
+nine CPUs keep deferred admission instead of paying the high-width scheduling cost.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,6 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import assert_logical_files_equivalent, semantic_stats
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
@@ -102,9 +105,10 @@ def test_sources_scale_only_fixed_wide_output_after_eight_cpus() -> None:
     assert "kOutputPrioritySubmissions" not in arena
 
 
-def test_synthetic_sixteen_worker_arena_separates_eight_plus_eight_lanes() -> None:
+def test_synthetic_sixteen_worker_arena_separates_eight_plus_eight_lanes(
+    require_native: None,
+) -> None:
     """Eight upstream and eight output workers share exactly sixteen threads."""
-    require_native()
     workers, peak, total_threads, overlap, upstream, output, submitted = (
         native_core.operation_task_arena_probe(16, 8, 8, 32)
     )
@@ -123,9 +127,9 @@ def test_synthetic_sixteen_worker_arena_separates_eight_plus_eight_lanes() -> No
 
 def test_fixed_wide_output_preserves_deferred_admission_below_nine_cpus(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """The high-core policy is dormant whenever memory/CPU policy stays below nine."""
-    require_native()
     contract_source = tmp_path / "contract.jsonl"
     _write_rows(contract_source, 64)
     contract = _contract(contract_source, tmp_path / "contract-output.jsonl")

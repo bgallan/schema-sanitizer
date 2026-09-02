@@ -1,4 +1,8 @@
-"""Flat-prefix modified-time CSV to analytical Parquet example."""
+"""Flat-prefix modified-time CSV to analytical Parquet example.
+
+The package groups cloud and local workflow components without opening provider sessions
+or processing files during import.
+"""
 
 from __future__ import annotations
 

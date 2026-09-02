@@ -1,28 +1,34 @@
-"""Parquet fallback observability and route-annotation tests."""
+"""Parquet fallback observability and route-annotation tests.
+
+It checks defensive counters, native writer recognition, fallback classification, footer
+failures, and final route annotations.
+"""
 
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 
 from schema_sanitizer.adapters.parquet import telemetry as recording
 
 
-def _make_native_try_factory(factory_module: object) -> object:
-    """Build a minimal ParquetRecordBatchStreamFactory for _try_native_stream tests."""
-    factory = object.__new__(factory_module.ParquetRecordBatchStreamFactory)
-    factory._filters = None
-    factory._local_path = "native-candidate.parquet"
-    factory._source = "path"
-    factory._native_source_kind = "path"
-    factory._columns = None
-    factory._batch_size = 1024
-    factory._memory_limit_bytes = None
-    factory._keepalive = ()
-    return factory
+def _native_try_state() -> object:
+    """Build the state consumed by the native-stream decision helper."""
+    return SimpleNamespace(
+        _filters=None,
+        _local_path="native-candidate.parquet",
+        _source="path",
+        _native_source_kind="path",
+        _columns=None,
+        _batch_size=1024,
+        _memory_limit_bytes=None,
+        _keepalive=(),
+    )
 
 
 def test_parquet_stream_factory_observability_counts_are_defensive() -> None:
-    """Verify Parquet route counters expose safe production observability."""
+    """Verify Parquet stream factory observability counts are defensive."""
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
@@ -103,7 +109,7 @@ def test_parquet_stream_factory_observability_counts_are_defensive() -> None:
 
 
 def test_parquet_fallback_observability_counts_attempts_successes_and_failures() -> None:
-    """Verify fallback observability has aggregate attempt/success/failure counts."""
+    """Verify Parquet fallback observability counts attempts successes and failures."""
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
@@ -163,12 +169,12 @@ def test_parquet_fallback_observability_counts_attempts_successes_and_failures()
 def test_native_parquet_stream_marks_schema_sanitizer_writer_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify native success records schema-sanitizer writer detection."""
+    """Verify native Parquet stream marks schema sanitizer writer contract."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
-    factory = _make_native_try_factory(stream_factory)
+    factory = _native_try_state()
 
     monkeypatch.setattr(
         stream_factory,
@@ -184,7 +190,7 @@ def test_native_parquet_stream_marks_schema_sanitizer_writer_contract(
     )
     monkeypatch.setattr(stream_factory, "PARQUET_STREAM_READ", lambda *args: "capsule")
 
-    assert factory._try_native_stream() == "capsule"
+    assert stream_factory.ParquetRecordBatchStreamFactory._try_native_stream(factory) == "capsule"
 
     snapshot = observability.parquet_stream_factory_observability()
     assert snapshot["last_route"] == "native_parquet_stream"
@@ -207,12 +213,12 @@ def test_native_parquet_stream_marks_schema_sanitizer_writer_contract(
 def test_parquet_native_reader_non_runtime_errors_fall_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify unexpected native failures become safe PyArrow fallback diagnostics."""
+    """Verify Parquet native reader non runtime errors fall back."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
-    factory = _make_native_try_factory(stream_factory)
+    factory = _native_try_state()
 
     monkeypatch.setattr(
         stream_factory,
@@ -227,12 +233,12 @@ def test_parquet_native_reader_non_runtime_errors_fall_back(
     )
 
     def failing_native_read(*args: object) -> object:
-        """Internal test helper."""
+        """Raise a native-read error to exercise the PyArrow fallback."""
         raise ValueError("corrupt native capsule")
 
     monkeypatch.setattr(stream_factory, "PARQUET_STREAM_READ", failing_native_read)
 
-    assert factory._try_native_stream() is None
+    assert stream_factory.ParquetRecordBatchStreamFactory._try_native_stream(factory) is None
 
     diagnostics = observability.last_parquet_native_reader_diagnostics()
     assert diagnostics["attempted"] is True
@@ -248,21 +254,21 @@ def test_parquet_native_reader_non_runtime_errors_fall_back(
 
 
 def test_parquet_native_footer_errors_fall_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify footer diagnostics failures are reported as fallback-safe skips."""
+    """Verify Parquet native footer errors fall back."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as stream_factory
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()
-    factory = _make_native_try_factory(stream_factory)
+    factory = _native_try_state()
 
     def failing_footer_info(*args: object, **kwargs: object) -> object:
-        """Internal test helper."""
+        """Raise a footer error to exercise the safe fallback route."""
         raise OSError("footer read failed")
 
     monkeypatch.setattr(stream_factory, "native_parquet_stream_preflight_info", failing_footer_info)
     monkeypatch.setattr(stream_factory, "PARQUET_STREAM_READ", object())
 
-    assert factory._try_native_stream() is None
+    assert stream_factory.ParquetRecordBatchStreamFactory._try_native_stream(factory) is None
 
     diagnostics = observability.last_parquet_native_reader_diagnostics()
     assert diagnostics["attempted"] is True
@@ -274,7 +280,7 @@ def test_parquet_native_footer_errors_fall_back(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_parquet_fallback_route_annotation_is_defensive() -> None:
-    """Verify successful PyArrow fallbacks are visible without losing native reason."""
+    """Verify Parquet fallback route annotation is defensive."""
     from schema_sanitizer.adapters.parquet import telemetry as observability
 
     observability.reset_parquet_stream_factory_observability()

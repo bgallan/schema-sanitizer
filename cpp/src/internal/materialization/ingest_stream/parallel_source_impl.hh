@@ -1,4 +1,6 @@
 // Declares the bounded ordered multi-threaded materialization stream state.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 
@@ -79,26 +81,54 @@ private:
     bool active = false;
   };
 
+  /// Derives row, output-byte, and input-capacity limits for the next batch.
   [[nodiscard]] BatchLimits batch_limits() const;
+  /// Reports whether row, byte, or ready-columnar output has filled the
+  /// appender.
   [[nodiscard]] bool appender_is_full(const BatchLimits &limits) const;
+  /// Reports whether a nonempty appender has reached its output-byte target.
   [[nodiscard]] bool byte_limit_reached(const BatchLimits &limits) const;
+  /// Returns the bounded number of column-partition packets retained
+  /// concurrently.
   [[nodiscard]] std::size_t column_partition_packet_window() const noexcept;
+  /// Reserves one reusable column-partition slot within the packet window.
   sanitize::Result<std::size_t>
   acquire_column_partition_slot(std::size_t packet_window);
+  /// Marks one column-partition slot available for a later packet.
   void release_column_partition_slot(std::size_t packet_slot) noexcept;
+  /// Drops incomplete column assemblies and releases all partition slots.
   void clear_column_partition_assemblies() noexcept;
+  /// Merges one completed column group and publishes its array when all groups
+  /// arrive.
   sanitize::Status consume_column_partition_packet(PreparedRowsPacket &&packet);
+  /// Propagates execution-context cancellation and records interrupt
+  /// diagnostics.
   sanitize::Status check_interrupt() const;
+  /// Submits available frontend work until ordered output or backpressure is
+  /// ready.
   sanitize::Result<bool> dispatch_available(const BatchLimits &limits);
+  /// Runs the bounded JSONL validation barrier for the current frontend batch.
   sanitize::Status validate_current_jsonl_batch(const BatchLimits &limits);
+  /// Moves validated JSONL packets into the materialization executor's dispatch
+  /// window.
   sanitize::Status
   submit_validated_jsonl_packets(std::size_t submission_window);
+  /// Cancels validation and materialization while clearing retained frontend
+  /// state.
   sanitize::Status abort_jsonl_validation(sanitize::Status status);
+  /// Closes validation and materialization submission exactly once.
   sanitize::Status finish_submission_once();
+  /// Releases a fully dispatched frontend batch once packet ownership is
+  /// sufficient.
   void release_current_batch_if_dispatched();
+  /// Takes and validates the next ordered worker result as the active packet.
   sanitize::Status activate_next_prepared_packet();
+  /// Reduces the next prepared row or columnar packet into the output batch.
   sanitize::Status consume_next_prepared_row();
+  /// Dispatches and consumes work until the current output batch reaches its
+  /// limits.
   sanitize::Status fill_appender(const BatchLimits &limits);
+  /// Smooths observed materialized bytes per row for future batch sizing.
   void update_observed_batch_size();
 
   std::vector<RuntimeFieldLayout> fields_;

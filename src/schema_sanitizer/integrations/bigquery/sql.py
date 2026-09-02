@@ -1,4 +1,8 @@
-"""BigQuery Standard SQL quoting and canonical type names."""
+"""BigQuery Standard SQL quoting and canonical type names.
+
+It validates and quotes identifiers, string literals, and canonical types so generated
+Standard SQL cannot be structurally altered by input.
+"""
 
 from __future__ import annotations
 

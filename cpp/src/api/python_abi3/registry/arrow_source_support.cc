@@ -1,5 +1,10 @@
-/* Arrow-source registry support: result packing, schema checks, and passthrough
- * streams. */
+/*
+ * Provides Arrow-source registry result packing, schema checks, and passthrough
+ * streams.
+ * The routines preserve source order and Arrow ownership while applying
+ * compiled registry plans.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -14,7 +19,6 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct.hh"
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
 #include "api/python_abi3/metadata/columns/api.hh"
@@ -22,7 +26,7 @@
 #include "api/python_abi3/registry/native_multi_source_stream.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 #include "internal/arrow_c/cdata_schema_builder.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/planning/options_schema_serialization.hh"
@@ -42,13 +46,15 @@ struct PassthroughArrowStreamState {
   bool closed = false;
 };
 
+/// Releases registry outputs and clears transferred ownership to prevent reuse.
 void release_registry_outputs(PyRegistrySinkOutputs *outputs) {
   release_sink_outputs(outputs->main_stream, outputs->diagnostics);
-  schema_sanitizer_free_string(outputs->registry_json);
-  schema_sanitizer_free_string(outputs->drifts_json);
-  schema_sanitizer_free_string(outputs->conversion_timestamp);
+  outputs->main_stream = nullptr;
+  outputs->diagnostics = nullptr;
 }
 
+/// Inserts a value into a Python dictionary, then releases the caller's
+/// reference.
 bool dict_set_steal(PyObject *dict, const char *key, PyObject *value) {
   if (!value) {
     return false;
@@ -58,6 +64,8 @@ bool dict_set_steal(PyObject *dict, const char *key, PyObject *value) {
   return rc == 0;
 }
 
+/// Packages a registry probe, diagnostics, and reusable native state for
+/// Python.
 PyObject *pack_registry_probe(const sanitize::SchemaRegistryMergeResult &merged,
                               const sanitize::IngestDiagnostics &diagnostics) {
   auto schema_payload_result =
@@ -112,6 +120,7 @@ PyObject *pack_registry_probe(const sanitize::SchemaRegistryMergeResult &merged,
   return dict;
 }
 
+/// Converts one logical field into the layout required by Arrow C Data export.
 sanitize::internal::CDataFieldLayout
 field_layout_from_logical_field(const sanitize::LogicalField &field) {
   sanitize::internal::CDataFieldLayout layout;
@@ -123,6 +132,7 @@ field_layout_from_logical_field(const sanitize::LogicalField &field) {
   return layout;
 }
 
+/// Converts every logical-schema field into an Arrow C Data export layout.
 std::vector<sanitize::internal::CDataFieldLayout>
 field_layouts_from_logical_schema(const sanitize::LogicalSchema &schema) {
   std::vector<sanitize::internal::CDataFieldLayout> fields;
@@ -133,6 +143,8 @@ field_layouts_from_logical_schema(const sanitize::LogicalSchema &schema) {
   return fields;
 }
 
+/// Compares one Arrow schema subtree with its planned logical field layout
+/// recursively.
 bool arrow_schema_node_matches_impl(const ArrowSchema *actual,
                                     const ArrowSchema *expected,
                                     std::int64_t depth,
@@ -183,12 +195,14 @@ bool arrow_schema_node_matches_impl(const ArrowSchema *actual,
   return true;
 }
 
+/// Compares one Arrow schema node with its planned registry field layout.
 bool arrow_schema_node_matches(const ArrowSchema *actual,
                                const ArrowSchema *expected) noexcept {
   std::int64_t nodes = 0;
   return arrow_schema_node_matches_impl(actual, expected, 0, &nodes);
 }
 
+/// Validates an Arrow stream schema against the compiled registry field layout.
 sanitize::Result<bool> arrow_stream_schema_matches_registry_plan(
     ArrowArrayStream *stream, const NativeRegistryPlan &plan,
     std::string_view timestamp_precision) {
@@ -223,6 +237,8 @@ sanitize::Result<bool> arrow_stream_schema_matches_registry_plan(
   return arrow_schema_node_matches(actual.get(), expected.get());
 }
 
+/// Exports the current schema through the schema-registry stream Arrow C Stream
+/// callback.
 int passthrough_get_schema(ArrowArrayStream *stream,
                            ArrowSchema *out) noexcept {
   if (!stream || !out) {
@@ -243,6 +259,8 @@ int passthrough_get_schema(ArrowArrayStream *stream,
   }
 }
 
+/// Produces the next array through the registry multi-source Arrow C Stream
+/// callback.
 int passthrough_get_next(ArrowArrayStream *stream, ArrowArray *out) noexcept {
   if (!stream || !out) {
     return EINVAL;
@@ -267,6 +285,8 @@ int passthrough_get_next(ArrowArrayStream *stream, ArrowArray *out) noexcept {
   }
 }
 
+/// Exposes the most recent schema-registry stream failure through the Arrow C
+/// Stream callback.
 const char *passthrough_get_last_error(ArrowArrayStream *stream) noexcept {
   if (!stream) {
     return "invalid Arrow passthrough stream";
@@ -292,6 +312,8 @@ const char *passthrough_get_last_error(ArrowArrayStream *stream) noexcept {
   }
 }
 
+/// Releases the schema-registry stream callback state and clears all
+/// transferred Arrow ownership.
 void passthrough_release(ArrowArrayStream *stream) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -309,6 +331,8 @@ void passthrough_release(ArrowArrayStream *stream) {
   sanitize::internal::cdata_stream::clear_stream(stream);
 }
 
+/// Wraps a schema-compatible Arrow stream so registry callbacks can forward it
+/// unchanged.
 sanitize::Result<ArrowArrayStream *> make_passthrough_arrow_stream(
     PyObject *stream_obj, ArrowArrayStream *inner, PyObject *capsule,
     std::shared_ptr<sanitize::IngestDiagnostics> diagnostics) {

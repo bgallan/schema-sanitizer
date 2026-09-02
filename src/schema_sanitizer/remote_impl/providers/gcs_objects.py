@@ -1,4 +1,8 @@
-"""GCS object references and immutable metadata decoding."""
+"""GCS object references and immutable metadata decoding.
+
+It parses immutable object references and decodes size, generation, ETag, and
+modification-time metadata from GCS responses.
+"""
 
 from __future__ import annotations
 

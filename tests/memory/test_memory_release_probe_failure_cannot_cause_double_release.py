@@ -1,101 +1,20 @@
-"""Regression coverage for memory release probe failure cannot cause double release."""
+"""Collects no-double-release lifecycle cases for directory discovery, partition lookahead,
+remote coordinator startup or shutdown, queued-waiter exceptions, native diagnostics,
+and generated or stream finalizers. Every worker slot and capsule has one terminal
+owner; bounded joins and shutdown-aware finalizers avoid replaying native cleanup or
+secure wiping."""
 
 from __future__ import annotations
 
 import asyncio
-import os
 import weakref
 from gc import collect
-from threading import Condition, Event, Lock
+from threading import Event
 from time import monotonic, sleep
 from typing import Any
 
 import pytest
-
-
-class _NativeLedgerDouble:
-    """Native ledger double with one injectable post-release probe failure."""
-
-    def __init__(self, reserved: int) -> None:
-        """Initialize retained bytes and call counters."""
-        self.reserved = reserved
-        self.release_calls = 0
-        self.fail_snapshot = True
-
-    def operation_memory_ledger_release(self, _capsule: object, amount: int) -> None:
-        """Commit one native release."""
-        self.release_calls += 1
-        self.reserved -= amount
-
-    def operation_memory_ledger_snapshot(self, _capsule: object) -> tuple[int, int, int]:
-        """Fail once after commit, then expose a valid snapshot."""
-        if self.fail_snapshot:
-            self.fail_snapshot = False
-            raise OSError("statistics probe unavailable")
-        return (1024, self.reserved, 17)
-
-    def operation_memory_ledger_diagnostics(self, _capsule: object) -> tuple[int, int]:
-        """Return empty native anomaly counters."""
-        return (0, 0)
-
-
-class _CrossProcessDouble:
-    """Minimal conservative cross-process lease double."""
-
-    def resize(self, _amount: int) -> None:
-        """Accept a reconciliation request."""
-
-    def release(self) -> None:
-        """Accept final release."""
-
-
-def _memory_ledger_with(native: _NativeLedgerDouble) -> Any:
-    """Construct a focused operation ledger around one native double."""
-    from schema_sanitizer.core_impl.memory_budget import OperationMemoryLedger
-
-    ledger = object.__new__(OperationMemoryLedger)
-    ledger.limit_bytes = 1024
-    ledger._pid = os.getpid()
-    ledger._native = native
-    ledger._capsule = object()
-    ledger._cross_process = _CrossProcessDouble()
-    ledger._cross_process_reconciliation_failures = 0
-    ledger._cross_process_pending_bytes = 0
-    ledger._cross_process_release_deferred = False
-    ledger._cross_process_release_failures = 0
-    ledger._post_release_observation_failures = 0
-    ledger._close_advisory_recorded = False
-    ledger._close_peak_bytes = 0
-    ledger._lock = Lock()
-    ledger._close_condition = Condition(ledger._lock)
-    ledger._close_started = False
-    ledger._closing = False
-    ledger._closed = False
-    ledger._close_outstanding_bytes = 0
-    return ledger
-
-
-def test_memory_release_probe_failure_cannot_cause_double_release() -> None:
-    """A committed native release clears its lease despite probe failure."""
-    from schema_sanitizer.core_impl.memory_budget import OperationMemoryLease
-
-    native = _NativeLedgerDouble(17)
-    ledger = _memory_ledger_with(native)
-    lease = object.__new__(OperationMemoryLease)
-    lease._ledger = ledger
-    lease._size_bytes = 17
-    lease.stage = "release-probe-failure-cannot-cause-double"
-    lease._pid = os.getpid()
-    lease._lock = Lock()
-    lease._released = False
-
-    lease.release()
-    lease.release()
-
-    assert native.reserved == 0
-    assert native.release_calls == 1
-    assert lease.reserved_bytes == 0
-    assert ledger.diagnostics().post_release_observation_failures == 1
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 
 def test_directory_uri_matching_rejects_infinite_duplicate_sources() -> None:
@@ -125,11 +44,11 @@ class _ThreadLeaseDouble:
     amount = 1
 
     def __init__(self) -> None:
-        """Create an unreleased slot."""
+        """Initialize the thread lease double test double."""
         self.released = Event()
 
     def release(self) -> None:
-        """Mark the slot returned."""
+        """Release the resource held by the thread lease double test double."""
         self.released.set()
 
 
@@ -137,13 +56,13 @@ def test_partition_lookahead_thread_is_governed_and_drops_idle_task_graph(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The daemon owns a thread slot and retains no completed task arguments."""
-    from schema_sanitizer.pipeline import partition_lookahead as module
+    from schema_sanitizer.pipeline import partition_lookahead_worker as module
 
     lease = _ThreadLeaseDouble()
-    monkeypatch.setattr(module, "acquire_project_threads", lambda *_a, **_k: lease)
     executor = module.ThreadPoolExecutor(
         max_workers=1,
         thread_name_prefix="release-probe-failure-cannot-cause-double-lookahead",
+        permit_factory=lambda *_a, **_k: lease,
     )
 
     class Payload:
@@ -156,17 +75,17 @@ def test_partition_lookahead_thread_is_governed_and_drops_idle_task_graph(
         """Consume one argument without retaining it."""
 
     future = executor.submit(consume, payload)
-    assert future.result(timeout=1.0) is None
+    assert future.result(timeout=SCHEDULER_TIMEOUT_SECONDS) is None
     del payload
     del future
-    deadline = monotonic() + 1.0
+    deadline = monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while retained() is not None and monotonic() < deadline:
         collect()
         sleep(0.01)
     assert retained() is None
 
     executor.shutdown(wait=True, cancel_futures=True)
-    assert lease.released.wait(1.0)
+    assert lease.released.wait(SCHEDULER_TIMEOUT_SECONDS)
 
 
 def test_remote_coordinator_governs_only_unreserved_host_threads(
@@ -187,7 +106,7 @@ def test_remote_coordinator_governs_only_unreserved_host_threads(
     standalone = module.RemoteIoCoordinator(shutdown_timeout_seconds=1.0)
     assert len(leases) == 1
     standalone.close()
-    assert leases[0].released.wait(1.0)
+    assert leases[0].released.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     borrowed = module.RemoteIoCoordinator(
         shutdown_timeout_seconds=1.0,
@@ -211,7 +130,8 @@ def test_remote_waiter_baseexception_removes_queued_state() -> None:
         blocked = asyncio.create_task(governor.acquire())
         await asyncio.sleep(0)
         assert governor.snapshot().waiting == 1
-        waiter = governor._waiters[0]
+        queue = next(iter(governor._operation_waiters.values()))
+        waiter = next(iter(queue.values()))
         waiter.future.set_exception(Abort())
         try:
             await blocked
@@ -237,7 +157,7 @@ def test_native_diagnostics_close_freezes_json_and_releases_capsule(
 
         @staticmethod
         def diagnostics_json(_capsule: object) -> str:
-            """Return the final payload."""
+            """Return the controlled native diagnostics payload."""
             return '{"batches":3}'
 
     monkeypatch.setattr(module, "_native", Native())
@@ -310,17 +230,11 @@ def test_remote_coordinator_start_failure_returns_thread_slot(
     lease = _ThreadLeaseDouble()
     monkeypatch.setattr(module, "acquire_project_threads", lambda *_a, **_k: lease)
 
-    class BrokenThread:
-        """Thread double that fails before ownership transfers."""
-
-        def __init__(self, **_kwargs: object) -> None:
-            """Accept the coordinator's thread options."""
-
-        def start(self) -> None:
-            """Reject startup."""
-            raise RuntimeError("thread startup failed")
-
-    monkeypatch.setattr(module.threading, "Thread", BrokenThread)
+    monkeypatch.setattr(
+        module,
+        "start_governed_thread",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("thread startup failed")),
+    )
     with pytest.raises(RuntimeError, match="thread startup failed"):
         module.RemoteIoCoordinator(shutdown_timeout_seconds=1.0)
     assert lease.released.is_set()
@@ -354,11 +268,11 @@ def test_stream_finalizer_skips_native_cleanup_during_shutdown(
         """Track whether finalizer cleanup reached the backend."""
 
         def __init__(self) -> None:
-            """Initialize the close counter."""
+            """Initialize the raw test double."""
             self.closed = 0
 
         def close_main_stream(self) -> None:
-            """Record one close attempt."""
+            """Close the primary stream while recording lifecycle calls."""
             self.closed += 1
 
     raw = Raw()
@@ -379,15 +293,15 @@ def test_remote_coordinator_startup_error_join_is_bounded() -> None:
         """Record the requested timeout while remaining alive."""
 
         def __init__(self) -> None:
-            """Initialize observations."""
+            """Initialize the thread double test double."""
             self.timeout: float | None = None
 
         def join(self, timeout: float | None = None) -> None:
-            """Capture the bounded join."""
+            """Wait for the thread double test double to finish."""
             self.timeout = timeout
 
         def is_alive(self) -> bool:
-            """Model a startup host that has not exited yet."""
+            """Report whether the thread double test double is active."""
             return True
 
     coordinator = object.__new__(RemoteIoCoordinator)

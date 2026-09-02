@@ -1,5 +1,7 @@
-// Records bounded, operation-local performance telemetry without changing
-// results.
+// Declares bounded operation-local performance telemetry that cannot change
+// results. Scoped helpers time phases and finalize one completion snapshot
+// when their retained collector leaves scope.
+
 #pragma once
 
 #include <array>
@@ -73,55 +75,87 @@ enum class PerformanceCounter : std::uint8_t {
 
 class PerformanceTelemetry final {
 public:
+  /// Captures immutable operation identity, memory, worker, and mode context.
   PerformanceTelemetry(std::uint64_t operation_id,
                        std::shared_ptr<MemoryPool> operation_pool,
                        std::int64_t memory_limit_bytes,
                        std::int64_t effective_workers, bool multi_mode);
 
+  /// Disables copying the operation performance telemetry collector.
   PerformanceTelemetry(const PerformanceTelemetry &) = delete;
+  /// Disables copy assignment for the operation performance
+  /// telemetry collector.
   PerformanceTelemetry &operator=(const PerformanceTelemetry &) = delete;
 
+  /// Returns a steady-clock timestamp for operation telemetry intervals.
   [[nodiscard]] static std::int64_t NowNs() noexcept;
 
+  /// Adds elapsed time to one operation phase counter.
   void RecordPhase(PerformancePhase phase, std::int64_t elapsed_ns) noexcept;
+  /// Adds a signed amount to one aggregate telemetry counter.
   void AddCounter(PerformanceCounter counter, std::int64_t amount = 1) noexcept;
+  /// Raises one telemetry counter's observed maximum.
   void ObserveCounterMaximum(PerformanceCounter counter,
                              std::int64_t value) noexcept;
 
+  /// Records a task submission and its aggregate queue depth.
   void RecordTaskSubmitted(TaskTelemetryKind kind,
                            std::size_t queue_depth) noexcept;
+  /// Records a submission in its worker-local telemetry shard.
   void RecordWorkerTaskSubmitted(std::size_t worker_index,
                                  TaskTelemetryKind kind,
                                  std::size_t queue_depth) noexcept;
+  /// Records queue wait when one task begins execution.
   void RecordTaskStarted(TaskTelemetryKind kind,
                          std::int64_t queue_wait_ns) noexcept;
+  /// Records run time when one task finishes execution.
   void RecordTaskFinished(TaskTelemetryKind kind, std::int64_t run_ns) noexcept;
+  /// Adds batched task counts, durations, and maxima to aggregate telemetry.
   void RecordTaskBatch(TaskTelemetryKind kind, std::int64_t task_count,
                        std::int64_t queue_wait_ns, std::int64_t run_ns,
                        std::int64_t max_queue_wait_ns,
                        std::int64_t max_run_ns) noexcept;
+  /// Adds batched task measurements to one worker-local telemetry shard.
   void RecordWorkerTaskBatch(std::size_t worker_index, TaskTelemetryKind kind,
                              std::int64_t task_count,
                              std::int64_t queue_wait_ns, std::int64_t run_ns,
                              std::int64_t max_queue_wait_ns,
                              std::int64_t max_run_ns) noexcept;
+  /// Admits one worker task whose batched measurements must precede finality.
+  [[nodiscard]] bool BeginWorkerTaskPublication() noexcept;
+  /// Releases worker-task publication ownership after its shard is visible.
+  void CompleteWorkerTaskPublications(std::size_t task_count) noexcept;
+  /// Increments the aggregate count of work-stealing executions.
   void RecordTaskStolen() noexcept;
+  /// Increments one worker shard's stolen-task count.
   void RecordWorkerTaskStolen(std::size_t worker_index) noexcept;
+  /// Increments one worker shard's active-streak count.
   void RecordWorkerActiveStreak(std::size_t worker_index) noexcept;
+  /// Increments the number of native workers that actually started.
   void RecordWorkerStarted() noexcept;
+  /// Updates the peak concurrently active task count.
   void ObserveActiveTasks(std::size_t active) noexcept;
 
+  /// Finalizes immutable duration and bottleneck fields once per operation.
   void Finish() noexcept;
+  /// Reports whether operation telemetry has already been finalized.
   [[nodiscard]] bool finished() const noexcept;
+  /// Serializes a coherent aggregate and worker-shard telemetry snapshot.
   [[nodiscard]] std::string ToJson() const;
+  /// Returns the operation memory pool sampled by this collector.
   [[nodiscard]] std::shared_ptr<MemoryPool> memory_pool() const noexcept {
     return operation_pool_;
   }
+  /// Returns the operation memory limit captured by this collector.
   [[nodiscard]] std::int64_t memory_limit_bytes() const noexcept {
     return memory_limit_bytes_;
   }
 
 private:
+  /// Publishes the final timestamp and releases the operation memory lease
+  /// once.
+  void Finalize() noexcept;
+
   static constexpr std::size_t kPhaseCount =
       static_cast<std::size_t>(PerformancePhase::kCount);
   static constexpr std::size_t kTaskKindCount =
@@ -136,6 +170,14 @@ private:
   bool multi_mode_ = false;
   std::int64_t started_ns_ = 0;
   std::atomic<std::int64_t> finished_ns_{0};
+  static constexpr std::uint64_t kFinishRequested = std::uint64_t{1} << 63U;
+  static constexpr std::uint64_t kTaskPublicationCountMask =
+      kFinishRequested - 1U;
+  // The high bit closes admission when Finish() is requested; the remaining
+  // bits count worker tasks whose completion batch is not yet public. Keeping
+  // both states in one atomic prevents Finish() from racing a worker between
+  // its admission and publication.
+  std::atomic<std::uint64_t> task_publication_state_{0};
 
   std::array<std::atomic<std::int64_t>, kPhaseCount> phase_ns_{};
   std::array<std::atomic<std::int64_t>, kPhaseCount> phase_calls_{};
@@ -202,11 +244,15 @@ private:
 
 class PerformancePhaseScope final {
 public:
+  /// Starts timing the selected operation phase for the supplied collector.
   PerformancePhaseScope(std::shared_ptr<PerformanceTelemetry> telemetry,
                         PerformancePhase phase) noexcept;
+  /// Records elapsed phase time when the timing scope exits.
   ~PerformancePhaseScope();
 
+  /// Disables copying the timed performance-phase scope.
   PerformancePhaseScope(const PerformancePhaseScope &) = delete;
+  /// Disables copy assignment for the timed performance-phase scope.
   PerformancePhaseScope &operator=(const PerformancePhaseScope &) = delete;
 
 private:
@@ -217,13 +263,18 @@ private:
 
 class PerformanceCompletionScope final {
 public:
+  /// Retains a collector that will be finalized when this scope exits.
   explicit PerformanceCompletionScope(
       std::shared_ptr<PerformanceTelemetry> telemetry) noexcept
       : telemetry_(std::move(telemetry)) {}
+  /// Finalizes retained operation telemetry when the completion scope exits.
   ~PerformanceCompletionScope();
+  /// Prevents scope destruction from finalizing the telemetry collector.
   void Dismiss() noexcept { telemetry_.reset(); }
 
+  /// Disables copying the operation-completion telemetry scope.
   PerformanceCompletionScope(const PerformanceCompletionScope &) = delete;
+  /// Disables copy assignment for the operation-completion telemetry scope.
   PerformanceCompletionScope &
   operator=(const PerformanceCompletionScope &) = delete;
 

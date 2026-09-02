@@ -1,7 +1,5 @@
 [build-system]
-requires = [
-  "scikit-build-core==0.11.6"
-]
+requires = ["scikit-build-core==0.11.6"]
 build-backend = "scikit_build_core.build"
 
 [project]
@@ -108,8 +106,12 @@ Issues = "https://github.com/bgallan/schema-sanitizer/issues"
 # runner does not need cibuildwheel's auxiliary virtualenv.pyz download.
 audit-command = ""
 build = "cp311-*"
-build-verbosity = 1
-test-requires = ["pyarrow==25.0.1"]
+build-frontend = {name = "build", args = ["--no-isolation"]}
+build-verbosity = 0
+before-build = 'python "{package}/meta/ci/quality/ensure_pinned_pip.py" && python -m pip --version && python "{package}/meta/ci/quality/install_locked_requirements.py" --lock "{package}/meta/ci/requirements/build-tools.txt" --artifact-lock "{package}/meta/ci/requirements/python-artifact-sha256.lock" --packages build auditwheel scikit-build-core cmake ninja'
+before-test = 'python "{project}/meta/ci/quality/ensure_pinned_pip.py" && python -m pip --version && python "{project}/meta/ci/quality/install_locked_requirements.py" --lock "{project}/meta/ci/requirements/build-tools.txt" --artifact-lock "{project}/meta/ci/requirements/python-artifact-sha256.lock" --packages pyarrow'
+dependency-versions = "meta/ci/requirements/build-tools.txt"
+test-requires = []
 test-command = "python {project}/meta/ci/parquet/check_parquet_compression_matrix.py"
 
 [tool.cibuildwheel.linux]
@@ -117,12 +119,29 @@ skip = "*-musllinux_*"
 manylinux-x86_64-image = "manylinux_2_28"
 
 [tool.cibuildwheel.macos]
-environment = {MACOSX_DEPLOYMENT_TARGET = "11.0"}
+environment = {DEVELOPER_DIR = "/Applications/Xcode_16.4.app/Contents/Developer", MACOSX_DEPLOYMENT_TARGET = "11.0", PIP_FIND_LINKS = "$GITHUB_WORKSPACE/.work/python-artifacts", PIP_NO_INDEX = "1"}
+
+[tool.cibuildwheel.windows]
+environment = {CMAKE_BUILD_PARALLEL_LEVEL = "1", CMAKE_GENERATOR = "Visual Studio 17 2022", CMAKE_GENERATOR_INSTANCE = "C:/Program Files/Microsoft Visual Studio/2022/Enterprise", CMAKE_GENERATOR_PLATFORM = "x64,version=10.0.26100.0", CMAKE_GENERATOR_TOOLSET = "v143,host=x64,version=14.44.35207", PIP_FIND_LINKS = "$GITHUB_WORKSPACE/.work/python-artifacts", PIP_NO_INDEX = "1"}
+repair-wheel-command = "python -W error -m delvewheel repair --extract-dir {project}/.work/delvewheel-extract --add-path {project}/.work/msvc-redist -w {dest_dir} -v {wheel}"
+
+[tool.coverage.html]
+directory = ".work/coverage/html"
+
+[tool.coverage.json]
+output = ".work/coverage/coverage.json"
+
+[tool.coverage.run]
+data_file = ".work/coverage/.coverage"
+
+[tool.coverage.xml]
+output = ".work/coverage/coverage.xml"
 
 [tool.mypy]
 python_version = "3.11"
 files = ["src/schema_sanitizer"]
-exclude = ["build", "dist", "wheelhouse", "cpp"]
+exclude = [".work", "build", "dist", "wheelhouse", "cpp"]
+cache_dir = ".work/mypy"
 warn_unused_ignores = true
 warn_redundant_casts = true
 warn_unreachable = true
@@ -133,6 +152,13 @@ show_error_codes = true
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src", "tests"]
+cache_dir = ".work/pytest"
+addopts = ["--strict-config", "--strict-markers"]
+xfail_strict = true
+filterwarnings = [
+  "error::pytest.PytestUnhandledThreadExceptionWarning",
+  "error::pytest.PytestUnraisableExceptionWarning"
+]
 markers = [
   "native_stress: high-volume native concurrency coverage run explicitly in CI"
 ]
@@ -140,6 +166,7 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+cache-dir = ".work/ruff"
 
 [tool.ruff.lint]
 select = ["F", "E", "I"]
@@ -150,13 +177,14 @@ ignore = ["E501"]
 
 [tool.scikit-build]
 # Keep builds predictable and fast.
-build-dir = "build/{wheel_tag}"
+build-dir = ".work/build/{wheel_tag}"
 
 [tool.scikit-build.build]
 verbose = true
 
 [tool.scikit-build.cmake]
-version = ">=4.3,<4.4"
+# Let scikit-build-core inject the exact native tools into isolated builds.
+version = "==4.3.4"
 
 [tool.scikit-build.cmake.define]
 SCHEMA_SANITIZER_REQUIRE_ZLIB = "ON"
@@ -167,6 +195,10 @@ provider = "scikit_build_core.metadata.regex"
 input = "meta/VERSION"
 regex = '^(?P<value>\d+\.\d+(?:\.\d+)?(?:\.post\d+)?)$'
 
+[tool.scikit-build.ninja]
+version = "==1.13.0"
+make-fallback = false
+
 [tool.scikit-build.sdist]
 # Let scikit-build-core collect the source tree through .gitignore semantics.
 # Broad force-includes override exclusions in 0.11.x and can accidentally pull
@@ -176,9 +208,12 @@ include = [
   "/cmake/SchemaSanitizerCompression.cmake",
   "/docs/**",
   "/meta/ci/parquet/check_parquet_compression_matrix.py",
+  "/meta/ci/requirements/build-tools.txt",
   "/meta/ci/requirements/downstream.txt",
   "/meta/ci/requirements/platform-tests.txt",
+  "/meta/ci/requirements/pre-commit-hooks.txt",
   "/meta/ci/requirements/quality.txt",
+  "/meta/ci/requirements/release-verification.txt",
   "/LICENSE",
   "/README.md",
   "/meta/VERSION",
@@ -188,14 +223,17 @@ exclude = [
   "**/__pycache__/",
   "**/*.pyc",
   "**/*.pyo",
-  "/.pytest_cache/",
-  "/.mypy_cache/",
-  "/.ruff_cache/",
+  "/.github/",
+  "/.work/",
+  "/benchmarks/",
   "/build/",
   "/build-*/",
   "/cmake-build-*/",
   "/.build*/",
   "/dist/",
+  "/examples/",
+  "/fuzz/corpus/",
+  "/fuzz/regressions/*.sha1.zip",
   "/release-dist/",
   "/wheelhouse/"
 ]

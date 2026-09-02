@@ -20,18 +20,12 @@ _CHILD_LOCK_BANK_INDEX = 0
 _PREPARED_CHILD_LOCK: Lock | None = None
 _MAX_FORK_CAPSULE_ENTRIES = 64
 _MAX_FORK_QUARANTINE_GENERATIONS = 2
-# Legacy monkeypatch/testing facade. Production keeps this as None so child-side
-# quarantine never grows a dict.
-_FORK_INHERITED_CAPSULE: dict[str, tuple[object, ...]] | None = None
 _MAX_INLINE_OWNERS = 8
 _FORK_LABELS: list[str | None] = [None] * (
     _MAX_FORK_CAPSULE_ENTRIES * _MAX_FORK_QUARANTINE_GENERATIONS
 )
 _FORK_OWNERS: list[object | None] = [None] * (
     _MAX_FORK_CAPSULE_ENTRIES * _MAX_FORK_QUARANTINE_GENERATIONS * _MAX_INLINE_OWNERS
-)
-_FORK_EXTRA: list[tuple[object, ...] | None] = [None] * (
-    _MAX_FORK_CAPSULE_ENTRIES * _MAX_FORK_QUARANTINE_GENERATIONS
 )
 # Each nested child gets a one-shot slab. Generation-2 quarantine can therefore
 # root generation-1 banks before swapping to B without deduplicating by label.
@@ -53,6 +47,7 @@ def _prepare_fork_child_state() -> None:
 
 
 def _clear_parent_fork_preparation() -> None:
+    """Clear parent fork preparation."""
     global _PREPARED_CHILD_LOCK
     _PREPARED_CHILD_LOCK = None
 
@@ -91,32 +86,14 @@ def quarantine_inherited_state(
     owner6: object | None = None,
     owner7: object | None = None,
     owner8: object | None = None,
-    *extra: object,
 ) -> bool:
     """Root inherited graphs in a bounded preallocated child quarantine.
 
-    The common path stores up to eight references directly into arrays that
-    were allocated at import time.  ``extra`` exists only for compatibility;
-    production at-fork callsites are kept within the inline bound so they do
-    not construct an additional retained tuple in the child.
+    Up to eight references are stored directly into arrays allocated at import
+    time, so the child callback never has to grow a container.
     """
     global _FORK_CAPSULE_COUNT, _REJECTED_FORK_CAPSULE_ENTRIES
     global _REJECTED_FORK_CAPSULE_OVERFLOWED
-    legacy = _FORK_INHERITED_CAPSULE
-    if isinstance(legacy, dict):
-        if _FORK_GENERATION > 1 or type(label) is not str or not label:
-            return False
-        if label in legacy:
-            return True
-        if len(legacy) >= _MAX_FORK_CAPSULE_ENTRIES:
-            _REJECTED_FORK_CAPSULE_OVERFLOWED = True
-            try:
-                _REJECTED_FORK_CAPSULE_ENTRIES += 1
-            except MemoryError:
-                pass
-            return False
-        legacy[label] = (owner1, owner2, owner3, owner4, owner5, owner6, owner7, owner8) + extra
-        return True
     if _FORK_GENERATION < 1 or _FORK_GENERATION > _MAX_FORK_QUARANTINE_GENERATIONS:
         return False
     if type(label) is not str or not label:
@@ -148,8 +125,6 @@ def quarantine_inherited_state(
     _FORK_OWNERS[base + 5] = owner6
     _FORK_OWNERS[base + 6] = owner7
     _FORK_OWNERS[base + 7] = owner8
-    if extra:
-        _FORK_EXTRA[index] = extra
     _FORK_CAPSULE_COUNTS[generation_index] = generation_count + 1
     _FORK_CAPSULE_COUNT += 1
     return True
@@ -162,14 +137,6 @@ def fork_inherited_capsule_snapshot() -> dict[str, int]:
         if _REJECTED_FORK_CAPSULE_OVERFLOWED
         else _REJECTED_FORK_CAPSULE_ENTRIES
     )
-    legacy = _FORK_INHERITED_CAPSULE
-    if isinstance(legacy, dict):
-        return {
-            "entries": len(legacy),
-            "capacity": _MAX_FORK_CAPSULE_ENTRIES,
-            "rejected": rejected,
-            "generation": _FORK_GENERATION,
-        }
     return {
         "entries": _FORK_CAPSULE_COUNT,
         "capacity": _MAX_FORK_CAPSULE_ENTRIES * _MAX_FORK_QUARANTINE_GENERATIONS,

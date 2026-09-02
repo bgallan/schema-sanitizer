@@ -1,4 +1,7 @@
-"""Runtime guarantees for the global per-operation memory limit."""
+"""Checks end-to-end memory-limit enforcement for multithreaded file output, oversized
+rows, and large streaming input. Native peak usage stays within the global limit,
+partial output is never published, and resident memory does not scale with the entire
+file."""
 
 from __future__ import annotations
 
@@ -10,10 +13,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import default_pool
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 _MIB = 1024 * 1024
 _MULTI_THREAD_LIMIT_BYTES = 32 * _MIB
@@ -56,7 +60,6 @@ def test_multithread_file_outputs_keep_native_peak_within_global_limit(
     tmp_path: Path,
 ) -> None:
     """All file sinks share one bounded pool, even when the source is larger."""
-    require_native()
     output = tmp_path / f"bounded.{output_format}"
 
     result = _writer(output_format)(
@@ -88,7 +91,6 @@ def test_oversized_row_is_rejected_without_publishing_partial_output(
     tmp_path: Path,
 ) -> None:
     """A single allocation that cannot fit fails before the final file exists."""
-    require_native()
     source = tmp_path / "oversized-row.jsonl"
     output = tmp_path / f"must-not-exist.{output_format}"
     source.write_text(
@@ -123,7 +125,6 @@ def test_large_file_does_not_cause_file_sized_resident_memory_growth(
     tmp_path: Path,
 ) -> None:
     """Catch regressions that read an input file wholesale outside the native pool."""
-    require_native()
     limit_bytes = 8 * _MIB
     source = tmp_path / "mostly-whitespace.jsonl"
     output = tmp_path / "bounded.jsonl"

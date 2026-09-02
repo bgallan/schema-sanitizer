@@ -1,4 +1,6 @@
-// Metadata columns and result packing for registry-backed streams.
+// Builds generated metadata columns and Python results for registry-backed
+// streams. It derives first-row values from native registry state and transfers
+// stream ownership.
 
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
 
@@ -18,6 +20,8 @@ namespace core_abi3_internal {
 
 namespace {
 
+/// Removes leading and trailing ASCII whitespace without allocating a
+/// replacement string.
 std::string_view trim_ascii_whitespace(std::string_view value) {
   while (!value.empty() && static_cast<unsigned char>(value.front()) <= ' ') {
     value.remove_prefix(1);
@@ -30,17 +34,16 @@ std::string_view trim_ascii_whitespace(std::string_view value) {
 
 } // namespace
 
+/// Packages a registry stream, diagnostics, and reusable native state for
+/// Python.
 PyObject *pack_registry_stream_result_with_state(
     PyObject *keepalive, ArrowArrayStream *main_stream,
-    schema_sanitizer_diagnostics *diagnostics, char *registry_json,
-    char *drifts_json, char *conversion_timestamp,
+    NativeDiagnostics *diagnostics, std::string_view registry_json,
+    std::string_view drifts_json, std::string_view conversion_timestamp,
     std::shared_ptr<const NativeRegistryPlan> registry_plan) {
   PyObject *state = wrap_native_registry_state(std::move(registry_plan));
   if (!state) {
     release_sink_outputs(main_stream, diagnostics);
-    schema_sanitizer_free_string(registry_json);
-    schema_sanitizer_free_string(drifts_json);
-    schema_sanitizer_free_string(conversion_timestamp);
     return nullptr;
   }
   PyObject *out = pack_registry_stream_result(
@@ -72,6 +75,7 @@ void append_json_array_items(std::string *out, std::string_view array_json) {
   out->append(array_json);
 }
 
+/// Appends registry and drift payloads as first-row metadata columns.
 void append_registry_first_row_columns(std::vector<MetadataColumn> *columns,
                                        const std::string &registry_json,
                                        const std::string &drifts_json) {
@@ -93,6 +97,8 @@ void append_registry_first_row_columns(std::vector<MetadataColumn> *columns,
   columns->push_back(std::move(drifts));
 }
 
+/// Derives generated metadata columns for one child of the schema-registry
+/// stream.
 std::vector<MetadataColumn> registry_child_metadata_columns(
     const std::vector<MetadataColumn> &first_row_columns,
     const std::vector<MetadataColumn> &timestamp_columns,

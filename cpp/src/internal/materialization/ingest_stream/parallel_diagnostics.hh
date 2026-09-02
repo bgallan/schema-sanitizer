@@ -1,4 +1,6 @@
 // Tracks diagnostics for ordered columnar packet handoff.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 
@@ -14,6 +16,8 @@ namespace sanitize::internal {
 
 class ParallelBatchDiagnostics final {
 public:
+  /// Initializes ordered packet diagnostics and their memory telemetry
+  /// counters.
   explicit ParallelBatchDiagnostics(
       std::shared_ptr<IngestDiagnostics> target) noexcept
       : target_(std::move(target)) {}

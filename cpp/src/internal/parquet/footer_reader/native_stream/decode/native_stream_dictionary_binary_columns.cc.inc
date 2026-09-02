@@ -1,6 +1,10 @@
-// Native Parquet decode owner: dictionary binary columns.
+// Resolves dictionary indexes into Arrow binary values for scalar and
+// simple-list columns. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
 
 // ---- native_stream_decode_dictionary_binary ----
+/// Resolves dictionary indices for a repeated byte-array leaf into Arrow
+/// list-element buffers.
 sanitize::Status materialize_simple_list_dictionary_byte_array_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,
@@ -146,6 +150,8 @@ sanitize::Status materialize_simple_list_dictionary_byte_array_column(
 }
 
 // ---- native_stream_decode_dictionary_byte_array ----
+/// Resolves a flat dictionary-encoded byte-array column into Arrow binary
+/// buffers.
 sanitize::Status materialize_dictionary_byte_array_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeFlatRowWindow &window, NativeParquetPageScratch *scratch,

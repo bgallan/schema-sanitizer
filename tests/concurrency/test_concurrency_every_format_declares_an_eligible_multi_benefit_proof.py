@@ -1,14 +1,17 @@
-"""Regression coverage for concurrency every format declares an eligible multi benefit proof."""
+"""Require every format to declare executable evidence for useful multi-worker execution.
+
+Parquet cases complement the coverage proof by routing small row groups through the common output
+arena, committing page indexes only after absolute output commit, and preserving logical results.
+"""
 
 from __future__ import annotations
 
 import csv
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
-from conftest import require_native
+from _support.resource_fakes import CapsuleStream
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import default_pool
@@ -31,19 +34,6 @@ _GENERATED_COLUMNS = {
     "source_file",
     "ingestion_timestamp",
 }
-
-
-class _CapsuleStream:
-    """Expose one owned Arrow C Stream capsule to a native consumer."""
-
-    def __init__(self, capsule: Any):
-        """Retain the owned Arrow C Stream capsule."""
-        self._capsule = capsule
-
-    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
-        """Return the capsule through the Arrow PyCapsule protocol."""
-        del requested_schema
-        return self._capsule
 
 
 def _write_wide_jsonl(path: Path, *, rows: int = 4_096, columns: int = 24) -> None:
@@ -113,9 +103,9 @@ def test_page_indexes_are_encoded_only_after_absolute_commit() -> None:
 
 def test_parquet_output_parallelizes_and_remains_logically_exact(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Eligible Parquet output uses output workers and remains natively readable."""
-    require_native()
     source = tmp_path / "wide.jsonl"
     _write_wide_jsonl(source)
 
@@ -143,9 +133,20 @@ def test_parquet_output_parallelizes_and_remains_logically_exact(
             "every-format-declares-an-eligible-multi-benefit row-group overlap requires at least four effective workers"
         )
 
-    assert int(stats["single"]["tasks"]["output"]["submitted"]) == 0
-    assert int(stats["multi"]["tasks"]["output"]["submitted"]) >= 2
-    assert int(stats["multi"]["counters"]["peak_active_tasks"]) >= 2
+    single_tasks = stats["single"]["tasks"]["output"]
+    multi_tasks = stats["multi"]["tasks"]["output"]
+    assert (
+        int(single_tasks["submitted"])
+        == int(single_tasks["started"])
+        == int(single_tasks["finished"])
+        == 0
+    )
+    assert (
+        int(multi_tasks["submitted"])
+        == int(multi_tasks["started"])
+        == int(multi_tasks["finished"])
+        >= 2
+    )
     for mode in ("single", "multi"):
         assert int(stats[mode]["memory"]["peak_bytes"]) <= 128 << 20
         assert footers[mode]["native_reader_ready"] == 1
@@ -173,7 +174,7 @@ def test_parquet_output_parallelizes_and_remains_logically_exact(
             memory_limit_bytes=128 << 20,
             on_error="stop",
         ).raw
-        stream = context.to_sink_arrow_stream("stream", "arrow", _CapsuleStream(capsule), options)
+        stream = context.to_sink_arrow_stream("stream", "arrow", CapsuleStream(capsule), options)
         CSV_STREAM_WRITE(stream, str(csv_output), 128 << 20, 0)
         stream.close_main_stream()
         normalized[mode] = _user_csv_rows(csv_output)

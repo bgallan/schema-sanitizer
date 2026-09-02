@@ -1,4 +1,8 @@
-"""Amazon S3 URI, discovery, and object operations."""
+"""Amazon S3 URI, discovery, and object operations.
+
+It parses S3 URIs, pools asynchronous clients, lists and probes objects, streams
+downloads, and publishes through bounded multipart upload.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ...core_impl.async_scheduler import (
+    AsyncResultMemoryContract,
     drain_ordered_iterable_results,
     ordered_indexed_results,
     retry_async,
@@ -19,12 +24,11 @@ from ...core_impl.governed_sort import governed_sort
 from ...core_impl.memory_budget import memory_budget
 from ...core_impl.safe_errors import add_bounded_note
 from ...core_impl.temporary_storage import StreamingStorageReservation
-from ...core_impl.uris import content_type_for_uri, name_matches, normalize_extensions
+from ...core_impl.uris import content_type_for_uri, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
     current_directory_metadata_budget,
-    split_parent_child,
 )
 from ...sources.models import RemoteFile
 from ..file_streams import write_async_reader_to_file
@@ -36,6 +40,14 @@ from ..upload_policy import (
     read_upload_part,
     release_upload_payload,
     remote_upload_policy,
+)
+from . import (
+    direct_child_items,
+    next_page_token,
+    requested_child_items,
+    requested_directory_groups,
+    retryable_sdk_error,
+    sdk_error_identity,
 )
 
 
@@ -53,6 +65,12 @@ def parse_uri(uri: str) -> S3Ref:
     if parsed.scheme.lower() != "s3" or not parsed.netloc:
         raise ValueError(f"not an S3 URI: {uri!r}")
     return S3Ref(parsed.netloc, parsed.path.lstrip("/"))
+
+
+def _directory_location(uri: str) -> tuple[tuple[str], str]:
+    """Return the stable grouping location and object name for an S3 URI."""
+    ref = parse_uri(uri)
+    return (ref.bucket,), ref.key
 
 
 def client_options() -> dict[str, Any]:
@@ -113,16 +131,7 @@ async def file_metadata(
             size = int(raw_size) if raw_size is not None else None
             return RemoteFile(uri, Path(ref.key).name, size)
         except Exception as exc:
-            response = getattr(exc, "response", None)
-            code = None
-            status = None
-            if isinstance(response, dict):
-                error = response.get("Error")
-                if isinstance(error, dict):
-                    code = error.get("Code")
-                metadata = response.get("ResponseMetadata")
-                if isinstance(metadata, dict):
-                    status = metadata.get("HTTPStatusCode")
+            status, code = sdk_error_identity(exc)
             if status == 404 or code in {"404", "NoSuchKey", "NotFound"}:
                 return None
             if status in {401, 403} or code in {"403", "AccessDenied"}:
@@ -172,27 +181,9 @@ async def download_file_with_client(
 
 def _should_retry_s3_part(exc: Exception) -> bool:
     """Return whether one idempotent UploadPart request may be retried."""
-    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
-        return True
-    if exc.__class__.__module__.split(".", 1)[0] in {"aiohttp", "aiobotocore"}:
-        return True
-    response = getattr(exc, "response", None)
-    if not isinstance(response, dict):
-        return False
-    metadata = response.get("ResponseMetadata")
-    status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
-    error = response.get("Error")
-    code = error.get("Code") if isinstance(error, dict) else None
-    return (
-        status == 429
-        or (isinstance(status, int) and status >= 500)
-        or code
-        in {
-            "InternalError",
-            "RequestTimeout",
-            "ServiceUnavailable",
-            "SlowDown",
-        }
+    return retryable_sdk_error(
+        exc,
+        transport_modules=frozenset({"aiohttp", "aiobotocore"}),
     )
 
 
@@ -262,7 +253,7 @@ async def _upload_file_multipart(
             tuning.part_count,
             upload_part,
             window=tuning.concurrency,
-            expected_retained_bytes=512,
+            memory_contract=AsyncResultMemoryContract(preflight_bytes=512),
         ):
             etag, part_number = completed
             manifest.append_part(parts, etag, part_number)
@@ -346,24 +337,25 @@ async def list_files(
             if token:
                 kwargs["ContinuationToken"] = token
             payload = await client.list_objects_v2(**kwargs)
-            for item in payload.get("Contents", ()):
-                key = item.get("Key")
-                if not isinstance(key, str):
-                    continue
-                relative = key[len(prefix) :] if key.startswith(prefix) else key
-                if not relative or "/" in relative or not name_matches(relative, suffixes):
-                    continue
+            for item, relative in direct_child_items(
+                payload.get("Contents", ()),
+                prefix,
+                suffixes,
+                "Key",
+            ):
+                key = item["Key"]
                 size = item.get("Size") if isinstance(item.get("Size"), int) else None
                 remote_file = RemoteFile(f"s3://{ref.bucket}/{key}", relative, size)
                 metadata_budget.charge_file(remote_file, associations=4)
                 files.append(remote_file)
-            if not payload.get("IsTruncated"):
+            token = next_page_token(
+                payload,
+                "NextContinuationToken",
+                truncated_key="IsTruncated",
+                missing_error=f"S3 list for {uri!r} was truncated without a continuation token",
+            )
+            if token is None:
                 break
-            token = payload.get("NextContinuationToken")
-            if not isinstance(token, str) or not token:
-                raise RuntimeError(
-                    f"S3 list for {uri!r} was truncated without a continuation token"
-                )
     governed_sort(files, key=lambda file: file.name, stage="remote_discovery_sort")
     return files
 
@@ -382,18 +374,11 @@ async def directories_containing_files(
         uris,
         metadata_budget=metadata_budget,
     )
-    groups: dict[tuple[str, str], dict[str, list[str]]] = {}
-    for uri in uris:
-        ref = parse_uri(uri)
-        parsed = split_parent_child(ref.key)
-        if parsed is None:
-            continue
-        parent_prefix, child = parsed
-        bucket = ref.bucket
-        # pass63 proof anchor: metadata_budget.charge_group_associations()
-        discovery.publish_group_association(
-            lambda: groups.setdefault((bucket, parent_prefix), {}).setdefault(child, []).append(uri)
-        )
+    groups = requested_directory_groups(
+        uris,
+        discovery,
+        _directory_location,
+    )
 
     if not groups:
         return discovery.finish()
@@ -423,26 +408,28 @@ async def directories_containing_files(
                         return await client.list_objects_v2(**kwargs)
 
                 payload = await retry_async(request_page, retries=retries, throttle_key="s3")
-                for item in payload.get("Contents", ()):
-                    key = item.get("Key")
-                    if not isinstance(key, str) or not key.startswith(prefix):
-                        continue
-                    relative = key[len(prefix) :]
-                    child, separator, filename = relative.partition("/")
-                    child_uris = children.get(child) if separator else None
-                    if not child_uris or "/" in filename or not name_matches(filename, accepted):
-                        continue
+                for item, child_uris, filename in requested_child_items(
+                    payload.get("Contents", ()),
+                    prefix,
+                    children,
+                    accepted,
+                    "Key",
+                ):
+                    key = item["Key"]
                     size = item.get("Size") if isinstance(item.get("Size"), int) else None
                     remote_file = RemoteFile(f"s3://{bucket}/{key}", filename, size)
                     discovery.add(child_uris, remote_file)
-                if not payload.get("IsTruncated"):
-                    break
-                token = payload.get("NextContinuationToken")
-                if not isinstance(token, str) or not token:
-                    raise RuntimeError(
+                token = next_page_token(
+                    payload,
+                    "NextContinuationToken",
+                    truncated_key="IsTruncated",
+                    missing_error=(
                         f"S3 bulk source discovery for {parent_prefix!r} was truncated "
                         "without a continuation token"
-                    )
+                    ),
+                )
+                if token is None:
+                    break
 
     async def scan_key(key: tuple[str, str]) -> None:
         """Scan one S3 parent group without materialising all group keys."""
@@ -453,6 +440,6 @@ async def directories_containing_files(
         groups,
         scan_key,
         window=concurrency,
-        expected_retained_bytes=64,
+        memory_contract=AsyncResultMemoryContract(preflight_bytes=64),
     )
     return discovery.finish()

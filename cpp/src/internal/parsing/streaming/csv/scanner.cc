@@ -1,4 +1,6 @@
 // Implements lifecycle and chunk flow for the streaming CSV scanner.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/streaming/csv/scanner.hh"
 
@@ -8,6 +10,8 @@
 
 namespace sanitize::internal {
 
+/// Initializes incremental CSV scanning with source, delimiter, and budgeted
+/// storage.
 CsvStreamingScanner::CsvStreamingScanner(ChunkSourcePtr source,
                                          int64_t chunk_bytes,
                                          std::size_t max_record_bytes,
@@ -31,6 +35,8 @@ void CsvStreamingScanner::clear_segments() noexcept {
   }
 }
 
+/// Returns the incremental scanner to its initial state without retaining
+/// source progress.
 sanitize::Status CsvStreamingScanner::Reset() {
   eof_ = false;
   have_chunk_ = false;
@@ -46,6 +52,8 @@ sanitize::Status CsvStreamingScanner::Reset() {
   return source_->Reset();
 }
 
+/// Returns the next complete CSV record, refilling bounded scanner storage as
+/// required.
 sanitize::Result<TextSlice> CsvStreamingScanner::next_record(BumpArena *arena) {
   if (!arena) {
     return sanitize::Status::Invalid("CSV scanner: arena is null");
@@ -58,6 +66,7 @@ sanitize::Result<TextSlice> CsvStreamingScanner::next_record(BumpArena *arena) {
   return scan_csv_record_span(*this, arena);
 }
 
+/// Reports whether the streaming scanner has consumed its complete input.
 bool CsvStreamingScanner::done() const noexcept {
   if (!eof_) {
     return false;

@@ -1,4 +1,8 @@
-"""Regression coverage for memory coordinator waiters are scoped to the live close generation."""
+"""Tests generation-scoped coordinator waiters together with prefetch cleanup callbacks,
+staged-directory symlinks, cancelled session bridges, pressure refresh, upload errors,
+and zero-timeout polling. Waiters and retries attach only to the live close generation,
+while cleanup failures remain secondary and pressure sampling stays single-flight and
+nonblocking."""
 
 from __future__ import annotations
 
@@ -12,7 +16,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, WaitObservedCondition
+from _support.resource_fakes import DeadThread
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    WaitObservedCondition,
+    join_thread_or_fail,
+)
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -28,23 +37,15 @@ _NATIVE_STUB_MODULES = (
 )
 
 
-class _DeadThread:
-    ident = None
-
-    def is_alive(self) -> bool:
-        return False
-
-    def join(self, timeout: float | None = None) -> None:
-        return None
-
-
 class _GenerationRelease:
     def __init__(self) -> None:
+        """Initialize the generation release test double."""
         self.calls = 0
         self.recovery_entered = Event()
         self.allow_recovery = Event()
 
     def release(self) -> None:
+        """Release the resource held by the generation release test double."""
         self.calls += 1
         if self.calls == 1:
             raise OSError("first generation failed")
@@ -54,6 +55,7 @@ class _GenerationRelease:
 
 
 def test_coordinator_waiters_are_scoped_to_the_live_close_generation() -> None:
+    """Verify coordinator waiters are scoped to the live close generation."""
     from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
 
     owner = _GenerationRelease()
@@ -69,10 +71,23 @@ def test_coordinator_waiters_are_scoped_to_the_live_close_generation() -> None:
     coordinator._shutdown_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
     coordinator._loop = None
     coordinator._futures = set()
+    coordinator._submissions = {}
     coordinator._failed_submissions = deque()
+    coordinator._failed_permits = deque()
+    coordinator._callbackless_submissions = {}
+    coordinator._submission_callbacks_inflight = 0
+    coordinator._deferred_terminal_callbacks = deque()
+    coordinator._terminal_callback_owners = set()
+    coordinator._failed_terminal_callbacks = deque()
+    coordinator._shutdown_future = None
+    coordinator._close_generation = 0
+    coordinator._completed_close_generation = 0
+    coordinator._close_results = {}
+    coordinator._close_waiters = {}
     coordinator._permit_registration = owner
     coordinator._thread_lease = None
-    coordinator._thread = _DeadThread()
+    coordinator._runtime_registration = None
+    coordinator._thread = DeadThread()
     coordinator._protocol_violations = 0
 
     with pytest.raises(OSError, match="first generation"):
@@ -81,6 +96,7 @@ def test_coordinator_waiters_are_scoped_to_the_live_close_generation() -> None:
     errors: list[BaseException] = []
 
     def close_once() -> None:
+        """Close the coordinator once from the competing thread."""
         try:
             coordinator.close()
         except BaseException as exc:
@@ -95,20 +111,22 @@ def test_coordinator_waiters_are_scoped_to_the_live_close_generation() -> None:
     assert coordinator._close_condition.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert waiter.is_alive(), "waiter observed the previous generation's event"
     owner.allow_recovery.set()
-    recovery.join(SCHEDULER_TIMEOUT_SECONDS)
-    waiter.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(recovery)
+    join_thread_or_fail(waiter)
     assert not errors
     assert coordinator._permit_registration is None
 
 
 class _BlockingRetryLease:
     def __init__(self) -> None:
+        """Initialize the blocking retry lease test double."""
         self.calls = 0
         self.first_entered = Event()
         self.allow_first = Event()
         self.released = False
 
     def release(self) -> None:
+        """Release the resource held by the blocking retry lease test double."""
         self.calls += 1
         if self.calls == 1:
             self.first_entered.set()
@@ -120,6 +138,7 @@ class _BlockingRetryLease:
 def test_prefetch_close_waits_for_cleanup_callbacks_before_commit(
     native_stub: None,
 ) -> None:
+    """Verify prefetch close waits for cleanup callbacks before commit."""
     from schema_sanitizer.api_impl.source_plan.remote import RemoteChunkPrefetchIterator
 
     submitted: Future[Any] = Future()
@@ -128,11 +147,14 @@ def test_prefetch_close_waits_for_cleanup_callbacks_before_commit(
         shutdown_timeout_seconds = 1.0
 
         def submit(self, *_args: Any, **_kwargs: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             return submitted
 
     iterator = object.__new__(RemoteChunkPrefetchIterator)
     iterator._pid = os.getpid()
-    iterator._manifest = SimpleNamespace()
+    iterator._manifest = SimpleNamespace(estimated_chunk_bytes=lambda _start: 1)
+    iterator._policy = SimpleNamespace(async_concurrency=1)
+    iterator._io_chunk_bytes = 1
     iterator._coordinator = Coordinator()
     iterator._owns_coordinator = False
     iterator._download_session = None
@@ -142,8 +164,18 @@ def test_prefetch_close_waits_for_cleanup_callbacks_before_commit(
     iterator._close_started = False
     iterator._closed = False
     iterator._failed_storage_leases = deque()
+    iterator._callbackless_storage_futures = {}
     iterator._futures = deque()
     iterator._remote_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
+    iterator._close_in_progress = False
+    iterator._cleanup_callbacks_inflight = 0
+    iterator._admissions_inflight = 0
+    iterator._consumers_inflight = 0
+    iterator._protocol_violations = 0
+    iterator._starting = False
+    iterator._fill_in_progress = False
+    iterator._finalizer_ticket = None
+    iterator._finalizer_capsule = None
 
     lease = _BlockingRetryLease()
     future = iterator._submit_stage(0, lease)
@@ -155,6 +187,7 @@ def test_prefetch_close_waits_for_cleanup_callbacks_before_commit(
     close_errors: list[BaseException] = []
 
     def close_iterator() -> None:
+        """Close the iterator while its cleanup callback is pending."""
         try:
             iterator.close()
         except BaseException as exc:
@@ -166,8 +199,8 @@ def test_prefetch_close_waits_for_cleanup_callbacks_before_commit(
     assert closer.is_alive()
     assert not iterator._closed
     lease.allow_first.set()
-    setter.join(SCHEDULER_TIMEOUT_SECONDS)
-    closer.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(setter)
+    join_thread_or_fail(closer)
     assert not close_errors
     assert lease.released
     assert iterator._closed
@@ -175,6 +208,7 @@ def test_prefetch_close_waits_for_cleanup_callbacks_before_commit(
 
 
 def test_staged_directory_owner_unlinks_dangling_symlink(tmp_path: Path) -> None:
+    """Verify staged directory owner unlinks dangling symlink."""
     from schema_sanitizer.remote_impl.staging_paths import StagedPath
 
     target = tmp_path / "missing-target"
@@ -185,6 +219,7 @@ def test_staged_directory_owner_unlinks_dangling_symlink(tmp_path: Path) -> None
         released = False
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released = True
 
     lease = Lease()
@@ -198,6 +233,7 @@ def test_staged_directory_owner_unlinks_dangling_symlink(tmp_path: Path) -> None
 def test_staged_directory_never_follows_substituted_symlink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify staged directory never follows substituted symlink."""
     from schema_sanitizer.remote_impl import staging_paths as module
 
     staged_path = tmp_path / "staged-directory"
@@ -211,11 +247,13 @@ def test_staged_directory_never_follows_substituted_symlink(
         released = False
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released = True
 
     lease = Lease()
 
     def substitute_with_symlink(path: Path) -> None:
+        """Replace the staged destination with a symlink before publication."""
         path.rmdir()
         path.symlink_to(external, target_is_directory=True)
         raise OSError("entry substituted")
@@ -235,6 +273,7 @@ def test_staged_directory_never_follows_substituted_symlink(
 
 
 def test_cancelled_session_bridge_is_not_resubmitted_until_task_terminal() -> None:
+    """Verify cancelled session bridge is not resubmitted until task terminal."""
     from schema_sanitizer.remote_impl.session_lifecycle import SharedDownloadSessionCloser
 
     cancelled: Future[Any] = Future()
@@ -242,9 +281,11 @@ def test_cancelled_session_bridge_is_not_resubmitted_until_task_terminal() -> No
 
     class Coordinator:
         def __init__(self) -> None:
+            """Initialize the coordinator test double."""
             self.submissions = 0
 
         def submit(self, _operation: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             self.submissions += 1
             return cancelled if self.submissions == 1 else Future()
 
@@ -261,6 +302,7 @@ def test_cancelled_session_bridge_is_not_resubmitted_until_task_terminal() -> No
 
 
 def test_cancelled_session_bridge_retries_after_real_task_cancellation() -> None:
+    """Verify cancelled session bridge retries after real task cancellation."""
     from schema_sanitizer.remote_impl.session_lifecycle import SharedDownloadSessionCloser
 
     cancelled: Future[Any] = Future()
@@ -268,9 +310,11 @@ def test_cancelled_session_bridge_retries_after_real_task_cancellation() -> None
 
     class Coordinator:
         def __init__(self) -> None:
+            """Initialize the coordinator test double."""
             self.submissions = 0
 
         def submit(self, _operation: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             self.submissions += 1
             return cancelled if self.submissions == 1 else Future()
 
@@ -289,22 +333,24 @@ def test_cancelled_session_bridge_retries_after_real_task_cancellation() -> None
 def test_permit_release_never_samples_system_pressure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify permit release never samples system pressure."""
     from schema_sanitizer.remote_impl import io_permits as module
 
     governor = module.RemoteIoPermitGovernor(4)
-    governor._in_use = 1
+    permit = asyncio.run(governor.acquire())
     monkeypatch.setattr(
         module,
         "system_pressure_snapshot",
         lambda: (_ for _ in ()).throw(AssertionError("release sampled pressure")),
     )
-    governor._release(1)
+    permit.release()
     assert governor._in_use == 0
 
 
 def test_pressure_refresh_is_single_flight_and_nonblocking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify pressure refresh is single flight and nonblocking."""
     from schema_sanitizer.core_impl import system_pressure as module
 
     module._prepare_pressure_for_fork()
@@ -312,14 +358,17 @@ def test_pressure_refresh_is_single_flight_and_nonblocking(
 
     class FailOnContentionLock:
         def __init__(self) -> None:
+            """Initialize the fail on contention lock test double."""
             self._lock = Lock()
 
         def __enter__(self) -> FailOnContentionLock:
+            """Enter the context managed by the fail on contention lock test double."""
             if not self._lock.acquire(blocking=False):
                 raise AssertionError("pressure snapshot waited on the sampling lock")
             return self
 
         def __exit__(self, *_args: object) -> None:
+            """Exit the context managed by the fail on contention lock test double and run cleanup."""
             self._lock.release()
 
     monkeypatch.setattr(module, "_lock", FailOnContentionLock())
@@ -328,10 +377,11 @@ def test_pressure_refresh_is_single_flight_and_nonblocking(
     parse_calls = 0
 
     def blocked_psi(_path: Path) -> tuple[float | None, float | None]:
+        """Pause at the blocked psi synchronization point."""
         nonlocal parse_calls
         parse_calls += 1
         entered.set()
-        assert release.wait(2)
+        assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
         return None, None
 
     monkeypatch.setattr(module, "_parse_psi", blocked_psi)
@@ -342,18 +392,18 @@ def test_pressure_refresh_is_single_flight_and_nonblocking(
     monkeypatch.setattr(module, "_cgroup_usage_ratio", lambda: None)
     refresher = Thread(target=lambda: module.system_pressure_snapshot(refresh=True))
     refresher.start()
-    assert entered.wait(1)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     snapshot = module.system_pressure_snapshot(refresh=True)
     assert parse_calls == 1
     assert snapshot.scale == 1.0
     release.set()
-    refresher.join(1)
-    assert not refresher.is_alive()
+    join_thread_or_fail(refresher)
 
 
 def test_pressure_refresh_releases_claim_for_control_flow_exception(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify pressure refresh releases claim for control flow exception."""
     from schema_sanitizer.core_impl import system_pressure as module
 
     class StopSampling(BaseException):
@@ -370,6 +420,7 @@ def test_pressure_refresh_releases_claim_for_control_flow_exception(
 def test_output_upload_error_remains_primary_when_cleanup_fails(
     native_stub: None,
 ) -> None:
+    """Verify output upload error remains primary when cleanup fails."""
     from schema_sanitizer.remote_impl.staging import finalize_output_target
 
     class Target:
@@ -381,9 +432,11 @@ def test_output_upload_error_remains_primary_when_cleanup_fails(
         local_path = "unused"
 
         def close(self) -> None:
+            """Close the resources owned by the target test double."""
             raise OSError("cleanup failed")
 
     def fail_before_upload() -> None:
+        """Raise the deliberate failure during before upload."""
         raise ValueError("upload preparation failed")
 
     with pytest.raises(ValueError, match="upload preparation failed") as caught:
@@ -394,12 +447,14 @@ def test_output_upload_error_remains_primary_when_cleanup_fails(
 def test_session_close_zero_timeout_is_a_nonblocking_poll(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify session close zero timeout is a nonblocking poll."""
     from schema_sanitizer.remote_impl import session_lifecycle as module
 
     result_timeouts: list[float | None] = []
 
     class PendingFuture(Future[Any]):
         def result(self, timeout: float | None = None) -> Any:
+            """Return the terminal result retained by the fake future."""
             result_timeouts.append(timeout)
             raise TimeoutError
 
@@ -407,6 +462,7 @@ def test_session_close_zero_timeout_is_a_nonblocking_poll(
 
     class Coordinator:
         def submit(self, _operation: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             return pending
 
     monkeypatch.setattr(module, "monotonic", lambda: 100.0)

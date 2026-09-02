@@ -1,4 +1,8 @@
-"""Remote staging packet boundaries and memory-derived policy."""
+"""Remote staging packet boundaries and memory-derived policy.
+
+It verifies file-count and byte caps, oversized isolation, unknown-size handling,
+deterministic packets, and memory-derived policy limits.
+"""
 
 from __future__ import annotations
 

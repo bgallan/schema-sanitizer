@@ -1,4 +1,8 @@
-"""Parquet output compression option normalization."""
+"""Parquet output compression option normalization.
+
+It validates codec names and gzip levels, resolves defaults, and produces the exact
+settings consumed by native and PyArrow writers.
+"""
 
 from __future__ import annotations
 

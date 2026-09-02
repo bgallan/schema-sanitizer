@@ -1,4 +1,8 @@
-"""Direct Parquet directory, schema, and batch runtime tests."""
+"""Direct Parquet directory, schema, and batch runtime tests.
+
+It covers direct directory routing, mixed schemas, native payload caching, lazy batches,
+nested and decimal types, and reader lifetime.
+"""
 
 from __future__ import annotations
 
@@ -9,15 +13,16 @@ from pathlib import Path
 
 from _support.parquet_runtime import pa, pq
 from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
-from conftest import read_test_parquet, require_native
+from conftest import read_test_parquet
 
 import schema_sanitizer as ss
 
 
 @_requires_pyarrow
-def test_parquet_directory_converter_uses_direct_arrow_path(tmp_path: Path) -> None:
-    """Verify Parquet directory file conversion bypasses the JSONL bridge."""
-    require_native()
+def test_parquet_directory_converter_uses_direct_arrow_path(
+    tmp_path: Path, require_native: None
+) -> None:
+    """Verify Parquet directory converter uses direct arrow path."""
     folder = tmp_path / "parquet"
     folder.mkdir()
     pq.write_table(pa.table({"id": [1, 2]}), folder / "a.parquet")
@@ -36,9 +41,10 @@ def test_parquet_directory_converter_uses_direct_arrow_path(tmp_path: Path) -> N
 
 
 @_requires_pyarrow
-def test_parquet_directory_mismatched_schemas_use_native_child_arrow_path(tmp_path: Path) -> None:
-    """Verify mixed Parquet child schemas bypass the JSONL bridge."""
-    require_native()
+def test_parquet_directory_mismatched_schemas_use_native_child_arrow_path(
+    tmp_path: Path, require_native: None
+) -> None:
+    """Verify Parquet directory mismatched schemas use native child arrow path."""
     folder = tmp_path / "parquet"
     folder.mkdir()
     pq.write_table(pa.table({"id": [1]}), folder / "a.parquet")
@@ -61,9 +67,9 @@ def test_parquet_directory_mismatched_schemas_use_native_child_arrow_path(tmp_pa
 @_requires_pyarrow
 def test_parquet_directory_mismatched_schema_converter_uses_native_child_arrow_path(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify mixed-schema Parquet directory conversion bypasses the JSONL bridge."""
-    require_native()
+    """Verify Parquet directory mismatched schema converter uses native child arrow path."""
     folder = tmp_path / "parquet"
     folder.mkdir()
     pq.write_table(pa.table({"id": [1]}), folder / "a.parquet")
@@ -86,7 +92,7 @@ def test_parquet_directory_mismatched_schema_converter_uses_native_child_arrow_p
 
 @_requires_pyarrow
 def test_direct_parquet_supports_nested_and_explicit_scalar_types() -> None:
-    """Verify direct Parquet support is decided by the native schema checker."""
+    """Verify direct Parquet supports nested and explicit scalar types."""
     from schema_sanitizer.adapters.parquet import status as pyarrow_adapter
 
     schema = pa.schema(
@@ -113,7 +119,7 @@ def test_direct_parquet_supports_nested_and_explicit_scalar_types() -> None:
 
 @_requires_pyarrow
 def test_direct_parquet_schema_support_uses_native_payload_cache(monkeypatch) -> None:
-    """Verify equivalent schemas avoid repeated native support calls."""
+    """Verify direct Parquet schema support uses native payload cache."""
     from schema_sanitizer.adapters.parquet import status as direct_schema_support
 
     direct_schema_support._DIRECT_SCHEMA_SUPPORT_CACHE = direct_schema_support.SchemaDecisionCache()
@@ -149,7 +155,7 @@ def test_direct_parquet_schema_support_uses_native_payload_cache(monkeypatch) ->
 
 
 def test_schema_decision_cache_retains_exact_object_identity() -> None:
-    """Verify object-id decisions cannot leak to later objects after id reuse."""
+    """Verify schema decision cache retains exact object identity."""
     import weakref
 
     from schema_sanitizer.adapters.pyarrow.schema_decision_cache import SchemaDecisionCache
@@ -158,7 +164,7 @@ def test_schema_decision_cache_retains_exact_object_identity() -> None:
         """Weak-referenceable stand-in for a PyArrow schema object."""
 
         def __str__(self) -> str:
-            """Return one stable schema-text cache key."""
+            """Return the human-readable instance representation."""
             return "schema-token"
 
     cache = SchemaDecisionCache(max_size=2)
@@ -173,7 +179,7 @@ def test_schema_decision_cache_retains_exact_object_identity() -> None:
 
 @_requires_pyarrow
 def test_direct_parquet_schema_support_rejects_empty_native_payload(monkeypatch) -> None:
-    """Verify direct Parquet support has no Python recursive fallback."""
+    """Verify direct Parquet schema support rejects empty native payload."""
     from schema_sanitizer.adapters.parquet import status as direct_schema_support
 
     direct_schema_support._DIRECT_SCHEMA_SUPPORT_CACHE = direct_schema_support.SchemaDecisionCache()
@@ -192,7 +198,7 @@ def test_direct_parquet_schema_support_rejects_empty_native_payload(monkeypatch)
 
 @_requires_pyarrow
 def test_direct_parquet_record_batch_reader_keeps_iterable_lazy() -> None:
-    """Verify direct Parquet reader construction does not pre-load batches."""
+    """Verify direct Parquet record batch reader keeps iterable lazy."""
     from schema_sanitizer.adapters.pyarrow.streams import record_batch_reader_from_iterable
 
     batch = pa.record_batch({"a": [1, 2, 3]})
@@ -212,9 +218,8 @@ def test_direct_parquet_record_batch_reader_keeps_iterable_lazy() -> None:
 
 
 @_requires_pyarrow
-def test_nested_read_parquet_uses_direct_arrow_path(tmp_path: Path) -> None:
-    """Verify nested Parquet reads bypass the JSONL bridge."""
-    require_native()
+def test_nested_read_parquet_uses_direct_arrow_path(tmp_path: Path, require_native: None) -> None:
+    """Verify nested read Parquet uses direct arrow path."""
     path = tmp_path / "nested.parquet"
     table = pa.table(
         {
@@ -235,10 +240,10 @@ def test_nested_read_parquet_uses_direct_arrow_path(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_direct_parquet_normalizes_empty_lists_to_null(tmp_path: Path) -> None:
-    """Verify typed Parquet columns remain while empty list values become null."""
-    require_native()
-
+def test_direct_parquet_normalizes_empty_lists_to_null(
+    tmp_path: Path, require_native: None
+) -> None:
+    """Verify direct Parquet normalizes empty lists to null."""
     path = tmp_path / "empty-list.parquet"
     pq.write_table(
         pa.table({"items": pa.array([[], [1]], type=pa.list_(pa.int64()))}),
@@ -253,9 +258,8 @@ def test_direct_parquet_normalizes_empty_lists_to_null(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_direct_parquet_scales_timestamp_units(tmp_path: Path) -> None:
-    """Verify direct Parquet scales timestamp units to requested output precision."""
-    require_native()
+def test_direct_parquet_scales_timestamp_units(tmp_path: Path, require_native: None) -> None:
+    """Verify direct Parquet scales timestamp units."""
     path = tmp_path / "timestamps.parquet"
     values = [dt.datetime(2024, 1, 2, 3, 4, 5, 123456)]
     table = pa.table({"ts": pa.array(values, type=pa.timestamp("ns"))})
@@ -268,9 +272,10 @@ def test_direct_parquet_scales_timestamp_units(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_direct_parquet_binary_and_uint64_have_explicit_text_semantics(tmp_path: Path) -> None:
-    """Verify direct Parquet handles binary and uint64 without JSONL fallback."""
-    require_native()
+def test_direct_parquet_binary_and_uint64_have_explicit_text_semantics(
+    tmp_path: Path, require_native: None
+) -> None:
+    """Verify direct Parquet binary and uint64 have explicit text semantics."""
     path = tmp_path / "scalars.parquet"
     table = pa.table(
         {
@@ -288,8 +293,9 @@ def test_direct_parquet_binary_and_uint64_have_explicit_text_semantics(tmp_path:
 @_requires_pyarrow
 def test_native_parquet_stream_materializes_deep_requiredness_level_matrix(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify recursive required/optional levels survive deep native materialization."""
+    """Verify native Parquet stream materializes deep requiredness level matrix."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -303,7 +309,6 @@ def test_native_parquet_stream_materializes_deep_requiredness_level_matrix(
         write_parquet_native_first_stream,
     )
 
-    require_native()
     path = tmp_path / "native-recursive-requiredness-level-matrix.parquet"
     required_score = pa.struct(
         [
@@ -418,9 +423,10 @@ def test_native_parquet_stream_materializes_deep_requiredness_level_matrix(
 
 
 @_requires_pyarrow
-def test_direct_parquet_decimal_values_are_lossless_strings(tmp_path: Path) -> None:
-    """Verify direct Parquet preserves decimal values as strings."""
-    require_native()
+def test_direct_parquet_decimal_values_are_lossless_strings(
+    tmp_path: Path, require_native: None
+) -> None:
+    """Verify direct Parquet decimal values are lossless strings."""
     path = tmp_path / "decimal.parquet"
     table = pa.table(
         {

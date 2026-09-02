@@ -1,6 +1,6 @@
 """Bounded terminal ownership for synchronous provider resources.
 
-Pass61 reserves an escrow slot and its network-FD capability *before* an SDK
+Cleanup reserves an escrow slot and its network-FD capability *before* an SDK
 resource is created.  A constructor, context-body, physical close, or logical
 release failure therefore always leaves one authoritative retry owner.
 """
@@ -52,6 +52,7 @@ class _Slot:
     )
 
     def __init__(self) -> None:
+        """Initialize one free escrow slot with no owner or descriptor capability."""
         self.state = _FREE
         self.owner: Any | None = None
         self.descriptor_lease: Any | None = None
@@ -60,6 +61,7 @@ class _Slot:
         self.attempts = 0
 
     def reset(self) -> None:
+        """Reset this slot to its initial process-local state."""
         if self.owner is not None or self.descriptor_lease is not None:
             raise RuntimeError("cannot recycle live synchronous cleanup owner")
         self.state = _FREE
@@ -74,17 +76,20 @@ class SyncCleanupReservation:
     __slots__ = ("_escrow", "_index", "_pid", "_closed")
 
     def __init__(self, escrow: "_SyncCleanupEscrow", index: int) -> None:
+        """Bind one pre-reserved escrow slot to its process-local reservation handle."""
         self._escrow = escrow
         self._index = index
         self._pid = os.getpid()
         self._closed = False
 
     def bind_owner(self, owner: object) -> None:
+        """Bind the cleanup owner to this sync cleanup reservation."""
         if self._closed or os.getpid() != self._pid:
             raise RuntimeError("synchronous cleanup reservation is not bindable")
         self._escrow.bind_owner(self._index, owner)
 
     def close_and_commit(self) -> None:
+        """Close the owned resource and commit its terminal state."""
         if self._closed or os.getpid() != self._pid:
             return
         self._escrow.close_slot(self._index)
@@ -96,11 +101,13 @@ class SyncCleanupReservation:
 
     @property
     def slot_index(self) -> int:
+        """Return the slot index."""
         return self._index
 
 
 class _SyncCleanupEscrow:
     def __init__(self) -> None:
+        """Allocate the fixed cleanup slots and initialize reservation and retry counters."""
         self._pid = os.getpid()
         self._lock = Lock()
         self._slots = [_Slot() for _ in range(_CAPACITY)]
@@ -109,12 +116,14 @@ class _SyncCleanupEscrow:
         self._retries = 0
 
     def _ensure_process(self) -> None:
+        """Ensure the owner still belongs to the active process."""
         if self._pid != os.getpid():
             # Quarantine inherited resources: never close/release parent-owned
             # sockets or capabilities in the child.
             raise RuntimeError("synchronous provider cleanup escrow is quarantined after fork")
 
     def reserve(self, *, label: str, network_fds: int = 1) -> SyncCleanupReservation:
+        """Reserve governed capacity through this sync cleanup escrow."""
         self._ensure_process()
         if type(network_fds) is not int or network_fds <= 0:
             raise ValueError("synchronous cleanup network_fds must be a positive integer")
@@ -154,6 +163,7 @@ class _SyncCleanupEscrow:
         return SyncCleanupReservation(self, index)
 
     def bind_owner(self, index: int, owner: object) -> None:
+        """Bind the cleanup owner to this sync cleanup escrow."""
         with self._lock:
             slot = self._slots[index]
             if slot.state != _RESERVED or slot.owner is not None:
@@ -162,6 +172,7 @@ class _SyncCleanupEscrow:
             slot.state = _LIVE
 
     def close_slot(self, index: int) -> None:
+        """Close the reserved cleanup slot and commit its terminal state."""
         self._ensure_process()
         with self._lock:
             slot = self._slots[index]
@@ -199,6 +210,7 @@ class _SyncCleanupEscrow:
             slot.reset()
 
     def retry_noexcept(self) -> int:
+        """Retry cleanup without propagating exceptions."""
         progressed = 0
         for index in range(_CAPACITY):
             with self._lock:
@@ -217,6 +229,7 @@ class _SyncCleanupEscrow:
         return progressed
 
     def snapshot(self) -> SyncCleanupEscrowSnapshot:
+        """Return a bounded snapshot of the current sync cleanup escrow."""
         reserved = 0
         live = 0
         oldest = 0
@@ -243,6 +256,7 @@ class _SyncCleanupEscrow:
             )
 
     def _runtime_shutdown(self, *, deadline_seconds: float) -> RuntimeCloseStatus:
+        """Shut down the process-local runtime during teardown."""
         del deadline_seconds
         before = self.snapshot().active
         if before == 0:
@@ -278,15 +292,9 @@ def reserve_sync_cleanup(*, label: str, network_fds: int = 1) -> SyncCleanupRese
     return _SYNC_CLEANUP_ESCROW.reserve(label=label, network_fds=network_fds)
 
 
-def sync_cleanup_escrow_snapshot() -> SyncCleanupEscrowSnapshot:
-    """Return the synchronous provider cleanup escrow snapshot."""
-    return _SYNC_CLEANUP_ESCROW.snapshot()
-
-
 __all__ = [
     "SyncCleanupEscrowSnapshot",
     "SyncCleanupReservation",
     "process_sync_cleanup_escrow_snapshot",
     "reserve_sync_cleanup",
-    "sync_cleanup_escrow_snapshot",
 ]

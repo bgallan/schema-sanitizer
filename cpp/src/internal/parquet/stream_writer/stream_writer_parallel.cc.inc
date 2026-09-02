@@ -1,9 +1,14 @@
-// Prepares Parquet column chunks concurrently and commits them in column order.
+// Prepares Parquet column slices concurrently and commits encoded bytes in
+// physical order. This fragment is included by the consolidated writer to
+// isolate format-specific implementation details.
 
 class StringParquetOutput final : public Output {
 public:
+  /// Wraps a string as a Parquet output target for worker-local preparation.
   explicit StringParquetOutput(std::string *target) : target_(target) {}
 
+  /// Appends bytes to the in-memory Parquet staging target and reports
+  /// allocation failures.
   sanitize::Status Write(std::string_view data) override {
     if (!target_) {
       return sanitize::Status::Invalid(
@@ -18,6 +23,8 @@ public:
     return sanitize::Status::OK();
   }
 
+  /// Writes the buffered Parquet bytes to the wrapped output and resets the
+  /// staging buffer.
   sanitize::Status Flush() override { return sanitize::Status::OK(); }
 
 private:
@@ -37,6 +44,8 @@ struct ParquetColumnTask {
   bool final_slice = true;
 };
 
+/// Adds page base offset with checked offsets, counts, and retained-capacity
+/// accounting.
 void add_page_base_offset(PageInfo *page, std::int64_t base) noexcept {
   if (!page) {
     return;
@@ -48,6 +57,8 @@ void add_page_base_offset(PageInfo *page, std::int64_t base) noexcept {
   }
 }
 
+/// Reports whether one leaf column can be encoded as independent parallel page
+/// slices.
 bool parquet_column_can_slice(const LeafColumn &column) noexcept {
   if (!column.node ||
       column.node->arrow_kind == jsonl::JsonlKind::kDictionary) {
@@ -60,6 +71,8 @@ bool parquet_column_can_slice(const LeafColumn &column) noexcept {
   return column.max_repetition_level > 0 || column.max_definition_level > 2;
 }
 
+/// Returns the row capacity assigned to each independently prepared column
+/// slice.
 std::size_t parquet_column_slice_capacity(const LeafColumn &column,
                                           std::int64_t row_count) noexcept {
   constexpr std::int64_t kRowsPerSlice = 4096;
@@ -70,6 +83,8 @@ std::size_t parquet_column_slice_capacity(const LeafColumn &column,
       std::clamp<std::int64_t>(row_count / kRowsPerSlice, 1, 4));
 }
 
+/// Derives rows per parallel writer unit from row-group bounds and worker
+/// count.
 std::size_t
 parquet_parallel_unit_capacity(const std::vector<LeafColumn> &columns,
                                std::int64_t row_count) noexcept {
@@ -81,6 +96,8 @@ parquet_parallel_unit_capacity(const std::vector<LeafColumn> &columns,
   return units;
 }
 
+/// Returns stable slice counts whose aggregate work fits writer parallelism and
+/// memory.
 std::vector<std::size_t>
 parquet_column_slice_counts(const std::vector<LeafColumn> &columns,
                             std::int64_t row_count, std::size_t worker_count) {
@@ -139,6 +156,8 @@ parquet_column_slice_counts(const std::vector<LeafColumn> &columns,
 }
 
 template <class T>
+/// Orders fixed-width encoded values according to their Parquet logical
+/// statistics semantics.
 bool parquet_encoded_fixed_less(std::string_view left,
                                 std::string_view right) noexcept {
   if (left.size() != sizeof(T) || right.size() != sizeof(T)) {
@@ -154,6 +173,8 @@ bool parquet_encoded_fixed_less(std::string_view left,
   return left_value < right_value;
 }
 
+/// Orders encoded Parquet statistics according to the leaf's physical and
+/// logical type.
 bool parquet_encoded_stat_less(const LeafColumn &column, std::string_view left,
                                std::string_view right) noexcept {
   const auto kind = leaf_value_kind(column);
@@ -190,6 +211,7 @@ bool parquet_encoded_stat_less(const LeafColumn &column, std::string_view left,
   }
 }
 
+/// Expands row-group statistics with one page's encoded minimum and maximum.
 void merge_column_bounds(const LeafColumn &column, const PageInfo &source,
                          std::optional<std::string> *minimum,
                          std::optional<std::string> *maximum) {
@@ -206,6 +228,8 @@ void merge_column_bounds(const LeafColumn &column, const PageInfo &source,
   }
 }
 
+/// Commits prepared slice only after preparation succeeds, preserving physical
+/// output order.
 sanitize::Status commit_prepared_slice(CountingOutput &out,
                                        PreparedColumnChunk *prepared,
                                        ColumnChunkInfo *column,
@@ -228,6 +252,8 @@ sanitize::Status commit_prepared_slice(CountingOutput &out,
   return sanitize::Status::OK();
 }
 
+/// Selects bounded column-worker parallelism from operation policy and
+/// available work.
 std::size_t
 parquet_column_worker_count(const WriterOptions &options,
                             const sanitize::internal::MemoryBudget &budget,
@@ -272,6 +298,8 @@ parquet_column_worker_count(const WriterOptions &options,
                                  memory_workers, row_workers})));
 }
 
+/// Writes row group columns in physical Parquet order after all offsets and
+/// metadata sizes are validated.
 sanitize::Status write_row_group_columns(
     CountingOutput &out, const ParquetNode &root,
     const std::vector<LeafColumn> &columns, const ArrowArray &batch,

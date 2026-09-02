@@ -1,4 +1,8 @@
-"""Shared synchronous and HTTP transport primitives for remote providers."""
+"""Shared synchronous and HTTP transport primitives for remote providers.
+
+It centralizes HTTP sessions, retry classification, response cleanup, size checks, and
+bounded reader consumption for provider adapters.
+"""
 
 from __future__ import annotations
 
@@ -27,7 +31,6 @@ from ..core_impl.temporary_storage import StreamingStorageReservation
 from ..core_impl.uris import content_type_for_uri
 from ..errors import SchemaSanitizerResourceError
 from ..sources.models import RemoteFile
-from .async_bridge import run_sync as run_sync
 from .file_streams import write_async_reader_to_file
 from .io_footprint import open_remote_local_file
 from .provider_session_pool import current_provider_session_pool
@@ -39,9 +42,6 @@ MAX_ERROR_RESPONSE_BYTES = 64 * 1024
 
 class _BudgetedBytes(bytes):
     """Bytes retaining an operation-memory lease for their Python lifetime."""
-
-    # Pass46 source-contract breadcrumb: prepare_resource_finalizer_cleanup(lease)
-    # was replaced by the allocation-safe single-capsule reserve API in pass70.
 
     _operation_memory_lease: Any | None
     _finalizer_ticket: int
@@ -62,6 +62,7 @@ class _BudgetedBytes(bytes):
         return obj
 
     def _cancel_finalizer_slot(self) -> None:
+        """Cancel the finalizer escrow slot for a synchronously closed owner."""
         ticket = getattr(self, "_finalizer_ticket", 0)
         capsule = getattr(self, "_finalizer_capsule", None)
         if ticket and capsule is not None:
@@ -70,6 +71,7 @@ class _BudgetedBytes(bytes):
             self._finalizer_capsule = None
 
     def _acknowledge_finalizer_slot(self) -> None:
+        """Acknowledge cleanup and retire the associated finalizer slot."""
         ticket = getattr(self, "_finalizer_ticket", 0)
         capsule = getattr(self, "_finalizer_capsule", None)
         if ticket and capsule is not None:
@@ -131,6 +133,7 @@ class _BudgetedText(str):
         return obj
 
     def _acknowledge_finalizer_slot(self) -> None:
+        """Acknowledge cleanup and retire the associated finalizer slot."""
         ticket = getattr(self, "_finalizer_ticket", 0)
         capsule = getattr(self, "_finalizer_capsule", None)
         if ticket and capsule is not None:
@@ -301,17 +304,12 @@ async def read_bounded_response_bytes(
     lease = acquire_operation_memory((limit + 1) * 2 + 256, stage=stage)
     payload_size = 0
     try:
-        content = getattr(response, "content", None)
-        reader = getattr(content, "read", None)
-        if not callable(reader):
-            # Never fall back to ClientResponse.read()/text(): those APIs have
-            # no byte ceiling and can materialize an attacker-controlled body.
-            raise TypeError("response does not expose bounded content.read(size)")
+        content = response.content
+        reader = content.read
         # aiohttp StreamReader.read(n) may legally return fewer than n bytes
         # before EOF. Accumulate only into the precharged limit+1 window and
         # consult at_eof() before deciding the bounded body is complete.
         payload_buffer = bytearray()
-        at_eof = getattr(content, "at_eof", None)
         while len(payload_buffer) <= limit:
             remaining = limit + 1 - len(payload_buffer)
             chunk = await reader(remaining)
@@ -328,14 +326,8 @@ async def read_bounded_response_bytes(
                     break
             if not chunk:
                 break
-            if callable(at_eof):
-                if at_eof():
-                    break
-                continue
-            # Compatibility with minimal bounded test doubles: a sized read is
-            # treated as their complete body when no EOF signal exists. Real
-            # aiohttp responses always expose StreamReader.at_eof().
-            break
+            if content.at_eof():
+                break
         else:
             payload_size = len(payload_buffer)
         if len(payload_buffer) <= limit:

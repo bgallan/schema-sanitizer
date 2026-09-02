@@ -1,4 +1,8 @@
-"""Operation-lifetime provider session pooling contracts."""
+"""Operation-lifetime provider session pooling contracts.
+
+It checks key compatibility, concurrent single-flight construction, borrower
+cancellation, ordered closure, and provider-owner reuse per operation.
+"""
 
 from __future__ import annotations
 
@@ -12,21 +16,21 @@ class _FakeClient:
     """Record provider client closure without real network resources."""
 
     def __init__(self) -> None:
-        """Initialize close accounting."""
+        """Initialize fake client state for close calls and uses."""
         self.close_calls = 0
         self.uses = 0
 
     async def close(self) -> None:
-        """Record the operation-final close."""
+        """Close the fake client and update close calls."""
         self.close_calls += 1
 
     async def __aenter__(self) -> _FakeClient:
-        """Record one borrowed use."""
+        """Return the managed fake client value from context entry."""
         self.uses += 1
         return self
 
     async def __aexit__(self, *_exc: object) -> None:
-        """The raw client would normally close per use."""
+        """Finalize the fake client context without suppressing exceptions."""
         await self.close()
 
 
@@ -118,7 +122,7 @@ def test_provider_pool_initializes_distinct_keys_concurrently() -> None:
     )
 
     async def exercise() -> tuple[int, list[_FakeClient]]:
-        """Exercise pooled provider-session behavior."""
+        """Borrow two distinct keys and measure concurrent factory execution."""
         active = 0
         peak = 0
         both_started = asyncio.Event()
@@ -164,7 +168,7 @@ def test_provider_pool_keeps_single_flight_for_one_key() -> None:
     )
 
     async def exercise() -> tuple[int, _FakeClient]:
-        """Exercise pooled provider-session behavior."""
+        """Borrow one key concurrently and count single-flight client creation."""
         calls = 0
         client = _FakeClient()
 
@@ -251,10 +255,10 @@ def test_operation_close_cancels_active_use_before_closing_provider(monkeypatch)
                 raise
 
     future = operation.submit_remote(block)
-    assert started.wait(timeout=2)
+    assert started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     operation.close()
 
-    assert future.cancelled() or future.done()
+    assert future.done()
     assert cancelled == [True]
     assert client.close_calls == 1
 
@@ -263,18 +267,18 @@ class _FakeManager:
     """Record one provider manager entry and final exit."""
 
     def __init__(self, value: Any) -> None:
-        """Store the entered provider value."""
+        """Initialize fake manager state for value, enter calls, and exit calls."""
         self.value = value
         self.enter_calls = 0
         self.exit_calls = 0
 
     async def __aenter__(self) -> Any:
-        """Enter the provider manager once."""
+        """Return the managed fake manager value from context entry."""
         self.enter_calls += 1
         return self.value
 
     async def __aexit__(self, *_exc: object) -> None:
-        """Close the provider manager once."""
+        """Finalize the fake manager context without suppressing exceptions."""
         self.exit_calls += 1
 
 

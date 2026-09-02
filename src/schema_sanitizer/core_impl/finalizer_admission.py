@@ -1,4 +1,8 @@
-"""Cross-subsystem teardown-capacity invariants for finalizable owners."""
+"""Check cross-subsystem teardown capacity for finalizable resource owners.
+
+Escrow capacities are aggregated from every participating subsystem and reported against active,
+available, and overflow invariants before new finalizable work is admitted.
+"""
 
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ class FinalizerAdmissionDomain:
 
     @property
     def invariant_ok(self) -> bool:
+        """Return whether the snapshot satisfies its capacity invariant."""
         return (
             self.capacity >= 0
             and 0 <= self.active <= self.capacity
@@ -53,6 +58,7 @@ class FinalizerAdmissionSnapshot:
 
 
 def _domain(name: str, escrow: ReservedFinalizerEscrow[object]) -> FinalizerAdmissionDomain:
+    """Build one finalizer-admission domain from its escrow capacity snapshot."""
     snapshot: FinalizerEscrowCapacitySnapshot = escrow.capacity_snapshot()
     return FinalizerAdmissionDomain(
         name,

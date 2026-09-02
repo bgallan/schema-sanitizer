@@ -1,8 +1,8 @@
 /*
- * Python ABI3 schema-probe wrappers.
- *
- * Native frontend inference for pipeline warm-up schema and registry probes.
+ * Exposes Python ABI3 wrappers for schema and registry probes. The wrappers run
+ * native frontend inference for pipeline warm-up schemas and registry state.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -17,12 +17,11 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/path_sources/path_sources.hh"
 #include "api/python_abi3/registry/native_multi_source_stream.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 #include "internal/planning/options_schema_serialization.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/core/logical_schema.hh"
@@ -38,6 +37,7 @@
 namespace core_abi3_internal::schema_probe_detail {
 // clang-format off
 
+/// Inserts a newly owned Python value into a dictionary and releases its reference.
 bool dict_set_steal(PyObject *dict, const char *key, PyObject *value) {
   if (!value)
     return false;
@@ -46,6 +46,7 @@ bool dict_set_steal(PyObject *dict, const char *key, PyObject *value) {
   return rc == 0;
 }
 
+/// Serializes an inferred schema and translates failures into Python exceptions.
 std::optional<std::string>
 serialize_schema_or_set_error(const sanitize::LogicalSchema &schema) {
   auto payload =
@@ -60,6 +61,7 @@ serialize_schema_or_set_error(const sanitize::LogicalSchema &schema) {
   return std::nullopt;
 }
 
+/// Packages a schema probe and its diagnostics into a Python dictionary.
 PyObject *pack_schema_probe(const sanitize::LogicalSchema &schema,
                             const sanitize::IngestDiagnostics &diagnostics) {
   auto schema_payload = serialize_schema_or_set_error(schema);
@@ -83,6 +85,7 @@ PyObject *pack_schema_probe(const sanitize::LogicalSchema &schema,
   return dict;
 }
 
+/// Packages a registry probe, diagnostics, and reusable native state for Python.
 PyObject *pack_registry_probe(const sanitize::SchemaRegistryMergeResult &merged,
                               const sanitize::IngestDiagnostics &diagnostics) {
   auto schema_payload = serialize_schema_or_set_error(merged.schema);
@@ -126,6 +129,7 @@ PyObject *pack_registry_probe(const sanitize::SchemaRegistryMergeResult &merged,
   return dict;
 }
 
+/// Converts a Python sequence of path-like objects into filesystem-encoded strings.
 sanitize::Result<std::vector<std::string>> paths_from_py(PyObject *paths_obj) {
   if (!PySequence_Check(paths_obj)) {
     return sanitize::Status::Invalid(
@@ -161,13 +165,16 @@ sanitize::Result<std::vector<std::string>> paths_from_py(PyObject *paths_obj) {
   return paths;
 }
 
+/// Prepares one frontend and chunk source for schema inference.
 sanitize::Result<sanitize::PreparedIngest>
-prepare_probe(schema_sanitizer_context *ctx, const char *frontend_name,
+prepare_probe(NativeContext *ctx, const char *frontend_name,
               sanitize::ChunkSourcePtr src,
               sanitize::PreparedOptionsPtr prepared_options);
 
 PyObject *raise_status(const sanitize::Status &status, const char *where);
 
+/// Removes leading and trailing ASCII whitespace without allocating a replacement
+/// string.
 std::string_view trim_ascii_ws(std::string_view value) {
   while (!value.empty() &&
          std::isspace(static_cast<unsigned char>(value.front())) != 0) {
@@ -180,6 +187,7 @@ std::string_view trim_ascii_ws(std::string_view value) {
   return value;
 }
 
+/// Concatenates items from one JSON array into the accumulated drift payload.
 void append_json_array_items(std::string &items, std::string_view array_json) {
   array_json = trim_ascii_ws(array_json);
   if (array_json.size() < 2 || array_json.front() != '[' ||
@@ -198,6 +206,7 @@ void append_json_array_items(std::string &items, std::string_view array_json) {
   items.append(array_json.data(), array_json.size());
 }
 
+/// Wraps accumulated registry-drift items in a JSON array.
 std::string json_array_from_items(const std::string &items) {
   if (items.empty()) {
     return "[]";
@@ -213,13 +222,18 @@ std::string json_array_from_items(const std::string &items) {
 struct ProviderCloseGuard {
   PyObject *provider = nullptr;
 
+  /// Retains the Python provider until probing finishes or unwinds.
   explicit ProviderCloseGuard(PyObject *obj) : provider(obj) {
     Py_XINCREF(provider);
   }
 
+  /// Disables copying so exactly one guard closes the provider.
   ProviderCloseGuard(const ProviderCloseGuard &) = delete;
+
+  /// Disables copy assignment so provider ownership cannot be duplicated.
   ProviderCloseGuard &operator=(const ProviderCloseGuard &) = delete;
 
+  /// Closes the provider while preserving any active Python exception.
   ~ProviderCloseGuard() {
     if (!provider) {
       return;
@@ -238,8 +252,10 @@ struct ProviderCloseGuard {
     PyErr_Restore(type, value, traceback);
   }
 };
+
+/// Probes explicit path sources and translates registry merge failures into Python.
 PyObject *registry_probe_path_sources_or_raise(
-    schema_sanitizer_context *ctx, const std::vector<PathSourceSpec> &sources,
+    NativeContext *ctx, const std::vector<PathSourceSpec> &sources,
     sanitize::PreparedOptionsPtr prepared_options, const char *registry_json,
     const char *field_name_policy, const char *schema_mode, const char *where,
     bool skip_invalid_json_sources) {
@@ -247,11 +263,10 @@ PyObject *registry_probe_path_sources_or_raise(
     PyErr_SetString(PyExc_RuntimeError, "context is null");
     return nullptr;
   }
-  char *err = nullptr;
-  const int valid =
-      validate_registry_sink_mode(schema_mode, registry_json, &err, where);
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(valid, err);
+  const auto valid =
+      validate_registry_sink_mode(schema_mode, registry_json, where);
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
   auto probe =
@@ -265,8 +280,10 @@ PyObject *registry_probe_path_sources_or_raise(
   auto value = std::move(probe).ValueOrDie();
   return pack_registry_probe(std::move(value.merged), value.diagnostics);
 }
+
+/// Probes paths against existing native registry state or raise a Python error.
 PyObject *registry_probe_path_sources_state_or_raise(
-    schema_sanitizer_context *ctx, const std::vector<PathSourceSpec> &sources,
+    NativeContext *ctx, const std::vector<PathSourceSpec> &sources,
     sanitize::PreparedOptionsPtr prepared_options,
     std::shared_ptr<const NativeRegistryPlan> base_registry_plan,
     const char *field_name_policy, const char *schema_mode, const char *where,
@@ -280,11 +297,10 @@ PyObject *registry_probe_path_sources_state_or_raise(
                     "native registry state does not contain a compiled plan");
     return nullptr;
   }
-  char *err = nullptr;
-  const int valid = validate_registry_sink_mode(
-      schema_mode, base_registry_plan->registry_json.c_str(), &err, where);
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(valid, err);
+  const auto valid = validate_registry_sink_mode(
+      schema_mode, base_registry_plan->registry_json, where);
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
   auto probe = merge_path_source_schemas(
@@ -298,8 +314,10 @@ PyObject *registry_probe_path_sources_state_or_raise(
   auto value = std::move(probe).ValueOrDie();
   return pack_registry_probe(std::move(value.merged), value.diagnostics);
 }
+
+/// Consumes provider chunks and merges their path-source schemas into registry state.
 PyObject *registry_probe_path_source_provider_or_raise(
-    schema_sanitizer_context *ctx, PyObject *provider,
+    NativeContext *ctx, PyObject *provider,
     sanitize::PreparedOptionsPtr prepared_options, const char *registry_json,
     const char *field_name_policy, const char *schema_mode, const char *where,
     bool skip_invalid_json_sources,
@@ -316,11 +334,10 @@ PyObject *registry_probe_path_source_provider_or_raise(
   const char *base_registry_json =
       base_registry_plan ? base_registry_plan->registry_json.c_str()
                          : registry_json;
-  char *err = nullptr;
-  const int valid =
-      validate_registry_sink_mode(schema_mode, base_registry_json, &err, where);
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(valid, err);
+  const auto valid =
+      validate_registry_sink_mode(schema_mode, base_registry_json, where);
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
   ProviderCloseGuard close_provider(provider);
@@ -383,6 +400,8 @@ PyObject *registry_probe_path_source_provider_or_raise(
   merged.detected_at = std::move(conversion_timestamp);
   return pack_registry_probe(merged, diagnostics);
 }
+
+/// Adapts a Python path, bytes value, or reader into a native probe source.
 sanitize::Result<sanitize::ChunkSourcePtr>
 chunk_source_from_source_py(const char *source_name, PyObject *payload_obj,
                             const sanitize::PreparedOptionsPtr &prepared) {
@@ -428,7 +447,7 @@ chunk_source_from_source_py(const char *source_name, PyObject *payload_obj,
 }
 
 sanitize::Result<sanitize::PreparedIngest>
-prepare_probe(schema_sanitizer_context *ctx, const char *frontend_name,
+prepare_probe(NativeContext *ctx, const char *frontend_name,
               sanitize::ChunkSourcePtr src,
               sanitize::PreparedOptionsPtr prepared_options) {
   auto fe = sanitize::make_builtin_frontend(frontend_name, std::move(src),
@@ -437,13 +456,15 @@ prepare_probe(schema_sanitizer_context *ctx, const char *frontend_name,
                                   std::move(prepared_options), ctx->ctx.get());
 }
 
+/// Translates the current schema probe failure into the native or Python error channel.
 PyObject *raise_status(const sanitize::Status &status, const char *where) {
   PyErr_SetString(PyExc_RuntimeError,
                   (std::string(where) + ": " + status.ToString()).c_str());
   return nullptr;
 }
 
-PyObject *schema_probe_or_raise(schema_sanitizer_context *ctx,
+/// Runs schema probe and translates any native failure into Python.
+PyObject *schema_probe_or_raise(NativeContext *ctx,
                                 const char *frontend_name,
                                 sanitize::ChunkSourcePtr src,
                                 sanitize::PreparedOptionsPtr prepared_options,
@@ -462,7 +483,8 @@ PyObject *schema_probe_or_raise(schema_sanitizer_context *ctx,
   return pack_schema_probe(ingest.logical_schema, *ingest.diagnostics);
 }
 
-PyObject *registry_probe_or_raise(schema_sanitizer_context *ctx,
+/// Runs registry probe and translates any native failure into Python.
+PyObject *registry_probe_or_raise(NativeContext *ctx,
                                   const char *frontend_name,
                                   sanitize::ChunkSourcePtr src,
                                   sanitize::PreparedOptionsPtr prepared_options,
@@ -473,11 +495,10 @@ PyObject *registry_probe_or_raise(schema_sanitizer_context *ctx,
     PyErr_SetString(PyExc_RuntimeError, "context is null");
     return nullptr;
   }
-  char *err = nullptr;
-  const int valid =
-      validate_registry_sink_mode(schema_mode, registry_json, &err, where);
-  if (valid != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(valid, err);
+  const auto valid =
+      validate_registry_sink_mode(schema_mode, registry_json, where);
+  if (!valid.ok()) {
+    raise_status_error(valid);
     return nullptr;
   }
   auto prepared = call_without_gil([&] {

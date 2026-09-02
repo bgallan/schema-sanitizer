@@ -1,4 +1,6 @@
-// Validates user options and prepares derived runtime lookup state.
+// Validates public options and prepares immutable runtime lookup state.
+// The implementation compiles parsing policies, schemas, field-name rules,
+// and token catalogs once so ingestion paths can remain allocation-bounded.
 
 #include "sanitize/options/options.hh"
 
@@ -22,7 +24,7 @@ namespace {
 
 constexpr int32_t kMaxConfiguredNestingDepth = 512;
 
-// Validates scalar options before derived state is prepared.
+/// Validates scalar options before derived state is prepared.
 static sanitize::Status validate_option_values(const Options &opts) {
   const auto invalid_float_separator = [](const std::string &separator) {
     if (separator.size() != 1)
@@ -125,7 +127,7 @@ static sanitize::Status validate_option_values(const Options &opts) {
   return sanitize::Status::OK();
 }
 
-// Adds case-folded token hashes to a prepared option set.
+/// Adds case-folded token hashes to a prepared option set.
 static void add_token_hashes(const std::vector<std::string> &tokens,
                              std::unordered_set<uint64_t> *hashes) {
   hashes->reserve(tokens.size());
@@ -134,7 +136,7 @@ static void add_token_hashes(const std::vector<std::string> &tokens,
   }
 }
 
-// Validates that true and false token sets are disjoint.
+/// Validates that true and false token sets are disjoint.
 static sanitize::Status
 validate_boolean_token_sets(const PreparedOptions &options) {
   for (const uint64_t h : options.true_hashes) {
@@ -146,7 +148,7 @@ validate_boolean_token_sets(const PreparedOptions &options) {
   return sanitize::Status::OK();
 }
 
-// Prepares case-folded boolean-token hash sets.
+/// Prepares case-folded boolean-token hash sets.
 static sanitize::Status prepare_boolean_token_hashes(const Options &opts,
                                                      PreparedOptions *out) {
   add_token_hashes(opts.true_tokens, &out->true_hashes);
@@ -154,7 +156,7 @@ static sanitize::Status prepare_boolean_token_hashes(const Options &opts,
   return validate_boolean_token_sets(*out);
 }
 
-// Compiles one temporal regex option group.
+/// Compiles one temporal regex option group.
 static sanitize::Status
 compile_regexes(const std::vector<std::string> &patterns,
                 std::vector<std::regex> *target, const char *label) {
@@ -173,7 +175,7 @@ compile_regexes(const std::vector<std::string> &patterns,
   return sanitize::Status::OK();
 }
 
-// Compiles all temporal regex option groups.
+/// Compiles all temporal regex option groups.
 static sanitize::Status prepare_temporal_regexes(const Options &opts,
                                                  PreparedOptions *out) {
   SAN_RETURN_NOT_OK(compile_regexes(opts.timestamp_regexps,

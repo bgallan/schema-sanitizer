@@ -1,4 +1,8 @@
-"""Regression coverage for internal Parquet streams and safe replay fallback."""
+"""Regression coverage for internal Parquet streams and safe replay fallback.
+
+It proves supported internal streams avoid replay, safe declines create replay lazily,
+and late native failures are never retried.
+"""
 
 from __future__ import annotations
 
@@ -12,11 +16,11 @@ class _ReplayStream:
     """Minimal replay stream used to record lifecycle events."""
 
     def __init__(self, events: list[str]):
-        """Store the shared event recorder."""
+        """Initialize replay stream state for events."""
         self._events = events
 
     def close_main_stream(self) -> None:
-        """Record closure of the replay reader."""
+        """Record closure of the primary Parquet stream."""
         self._events.append("stream-close")
 
 
@@ -24,34 +28,35 @@ class _Replay:
     """Minimal replay owner used by fallback lifecycle tests."""
 
     def __init__(self, events: list[str]):
-        """Create a replay owner and its stream."""
+        """Initialize replay state for events and stream."""
         self._events = events
         self._stream = _ReplayStream(events)
 
     def reader(self) -> _ReplayStream:
-        """Return the replay reader while recording access."""
+        """Create the replay reader while recording its lifecycle."""
         self._events.append("replay-reader")
         return self._stream
 
     def close(self) -> None:
-        """Record release of the replay owner."""
+        """Close the replay and release its retained resources."""
         self._events.append("replay-close")
 
 
 def test_supported_internal_parquet_stream_skips_replay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify operation-owned streams reach native Parquet without IPC replay."""
+    """Verify supported internal Parquet stream skips replay."""
     from schema_sanitizer.api_impl import stream_output
+    from schema_sanitizer.api_impl.file_conversion.direct_writers import FileWriteOutcome
     from schema_sanitizer.core_impl.native_results import SinkOutput
 
     raw = SinkOutput(sink="stream")
     calls: list[tuple[Any, bool]] = []
 
-    def fake_native(raw_arg: Any, _path: Any, **kwargs: Any) -> bool:
+    def fake_native(raw_arg: Any, _path: Any, **kwargs: Any) -> FileWriteOutcome:
         """Record the direct native writer invocation."""
         calls.append((raw_arg, kwargs["parquet_retry_is_safe"]))
-        return True
+        return FileWriteOutcome({}, "native_direct", "none")
 
     monkeypatch.setattr(stream_output, "try_write_raw_native_file_output", fake_native)
     monkeypatch.setattr(
@@ -76,7 +81,7 @@ def test_supported_internal_parquet_stream_skips_replay(
 def test_internal_parquet_replay_is_created_only_after_safe_decline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify a pre-consumption native decline may still create one replay."""
+    """Verify internal Parquet replay is created only after safe decline."""
     from schema_sanitizer.api_impl import stream_output
     from schema_sanitizer.core_impl.native_results import SinkOutput
 
@@ -89,12 +94,11 @@ def test_internal_parquet_replay_is_created_only_after_safe_decline(
         assert isinstance(stream, _ReplayStream)
         return {"materialized_rows": 0}
 
-    def fake_native(raw_arg: Any, _path: Any, **kwargs: Any) -> bool:
+    def fake_native(raw_arg: Any, _path: Any, **kwargs: Any) -> None:
         """Decline safely before consuming the internal stream."""
         assert raw_arg is raw
         assert kwargs["parquet_retry_is_safe"] is False
         events.append("native-decline")
-        return False
 
     def fake_replay(raw_arg: Any, *, feature: str, memory_limit_bytes: int | None) -> _Replay:
         """Create and record the fallback replay."""
@@ -125,7 +129,7 @@ def test_internal_parquet_replay_is_created_only_after_safe_decline(
 def test_internal_parquet_late_failure_is_not_retried(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify a possibly consuming native failure cannot fall back on the stream."""
+    """Verify internal Parquet late failure is not retried."""
     from schema_sanitizer.api_impl.file_conversion import direct_writers, writers
 
     def fail_after_consumption(*_args: Any, **_kwargs: Any) -> bool:

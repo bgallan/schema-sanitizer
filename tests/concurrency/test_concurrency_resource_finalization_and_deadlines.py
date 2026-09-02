@@ -1,16 +1,23 @@
-"""Regression coverage for concurrency resource finalization and deadlines."""
+"""Exercise finalizer recovery and hard deadlines across memory, storage, and remote work.
+
+Lease races and close barriers must conserve exact accounting; upload and response buffers remain
+budgeted, while scheduler failures, cancellation-resistant threads, transport timeouts, and late
+staging entries terminate without leaking owners.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import gc
+import signal
 import threading
 from pathlib import Path
 from time import monotonic, sleep
 from types import SimpleNamespace
 
+import _support.synchronization as synchronization
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
@@ -22,11 +29,11 @@ from schema_sanitizer.core_impl.memory_budget import (
     process_resident_memory_snapshot,
 )
 from schema_sanitizer.core_impl.temporary_storage import (
-    _MINIMUM_FREE_BYTES,
     _PROCESS_TEMPORARY_STORAGE,
     TemporaryStoragePermitPool,
     process_temporary_storage_snapshot,
 )
+from schema_sanitizer.core_impl.temporary_storage_governor import _MINIMUM_FREE_BYTES
 from schema_sanitizer.errors import SchemaSanitizerResourceError
 from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
 from schema_sanitizer.remote_impl.transport import read_bounded_response_text
@@ -34,6 +41,89 @@ from schema_sanitizer.remote_impl.upload_policy import (
     read_upload_range,
     release_upload_payload,
 )
+
+
+def test_process_exit_fuse_never_falls_back_to_an_unbounded_reap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child resisting SIGKILL leaves the test bounded and diagnostically failed."""
+    wait_nohang = 1
+    wait_options: list[int] = []
+    signals: list[tuple[int, int]] = []
+    times = iter((0.0, 11.0, 11.0, 22.0))
+
+    def never_reaped(_pid: int, options: int) -> tuple[int, int]:
+        """Model a child that remains unreapable across both bounded phases."""
+        wait_options.append(options)
+        return 0, 0
+
+    monkeypatch.setattr(synchronization.os, "waitpid", never_reaped)
+    monkeypatch.setattr(synchronization, "_WAIT_NOHANG", wait_nohang)
+    monkeypatch.setattr(
+        synchronization.os,
+        "kill",
+        lambda pid, signum: signals.append((pid, signum)),
+    )
+    monkeypatch.setattr(synchronization, "monotonic", lambda: next(times))
+
+    with pytest.raises(TimeoutError, match="could not be reaped"):
+        synchronization.wait_for_process_exit(12345)
+
+    assert signals == [(12345, getattr(signal, "SIGKILL", signal.SIGTERM))]
+    assert wait_options == [wait_nohang, wait_nohang]
+
+
+def test_synchronization_helpers_reject_missed_events_and_live_workers() -> None:
+    """Expected handshakes and worker shutdowns fail closed at their deadlock fuse."""
+    signal_event = threading.Event()
+    with pytest.raises(TimeoutError, match="event was not signaled"):
+        synchronization.wait_event_or_fail(signal_event, timeout=0)
+    signal_event.set()
+    synchronization.wait_event_or_fail(signal_event, timeout=0)
+
+    release = threading.Event()
+    thread = threading.Thread(target=release.wait)
+    thread.start()
+    try:
+        with pytest.raises(TimeoutError, match="thread did not exit"):
+            synchronization.join_thread_or_fail(thread, timeout=0)
+    finally:
+        release.set()
+        synchronization.join_thread_or_fail(thread)
+
+    class StubbornProcess:
+        """Model a child requiring emergency termination and a final kill."""
+
+        def __init__(self) -> None:
+            """Initialize an alive fake process with observable cleanup calls."""
+            self.alive = True
+            self.joins: list[float | None] = []
+            self.terminations = 0
+            self.kills = 0
+
+        def join(self, timeout: float | None = None) -> None:
+            """Record one bounded reap attempt without exiting."""
+            self.joins.append(timeout)
+
+        def is_alive(self) -> bool:
+            """Report whether emergency cleanup has killed the fake process."""
+            return self.alive
+
+        def terminate(self) -> None:
+            """Record an ineffective graceful termination request."""
+            self.terminations += 1
+
+        def kill(self) -> None:
+            """Model a successful final kill request."""
+            self.kills += 1
+            self.alive = False
+
+    process = StubbornProcess()
+    with pytest.raises(TimeoutError, match="child did not exit"):
+        synchronization.join_process_or_fail(process, timeout=0)
+    assert process.joins == [0, 0, 0]
+    assert process.terminations == 1
+    assert process.kills == 1
 
 
 def test_operation_memory_lease_resize_racing_release_has_no_drift() -> None:
@@ -63,8 +153,7 @@ def test_operation_memory_lease_resize_racing_release_has_no_drift() -> None:
             thread.start()
         barrier.wait()
         for thread in threads:
-            thread.join(timeout=2)
-            assert not thread.is_alive()
+            join_thread_or_fail(thread)
         assert len(resize_errors) <= 1
         assert ledger.snapshot().reserved_bytes == 0
         ledger.close()
@@ -106,6 +195,7 @@ def test_operation_memory_close_is_a_barrier_for_inflight_reserve() -> None:
         """Authenticate the close thread's failed non-blocking lock acquisition."""
 
         def __enter__(self) -> bool:
+            """Enter the context managed by the observed close condition test double."""
             if threading.current_thread() is close_thread:
                 acquired_without_wait = self.acquire(blocking=False)
                 contention_observations.append(not acquired_without_wait)
@@ -119,14 +209,14 @@ def test_operation_memory_close_is_a_barrier_for_inflight_reserve() -> None:
 
     ledger._close_condition = ObservedCloseCondition(ledger._lock)  # noqa: SLF001
 
-    def reserve(capsule: object, size: int, stage: str) -> None:
+    def reserve(capsule: object, size: int, stage: str) -> tuple[int, int, int]:
         """Pause the native reserve while the Python ledger lock is held."""
         entered.set()
-        assert release.wait(timeout=2)
-        original.operation_memory_ledger_reserve(capsule, size, stage)
+        assert release.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+        return original.operation_memory_ledger_reserve_snapshot(capsule, size, stage)
 
     ledger._native = SimpleNamespace(  # noqa: SLF001
-        operation_memory_ledger_reserve=reserve,
+        operation_memory_ledger_reserve_snapshot=reserve,
         operation_memory_ledger_release=original.operation_memory_ledger_release,
         operation_memory_ledger_snapshot=original.operation_memory_ledger_snapshot,
     )
@@ -146,8 +236,8 @@ def test_operation_memory_close_is_a_barrier_for_inflight_reserve() -> None:
     assert not close_lock_acquired.is_set()
     assert not closed.is_set()
     release.set()
-    reserve_thread.join(timeout=2)
-    close_thread.join(timeout=2)
+    synchronization.join_thread_or_fail(reserve_thread)
+    synchronization.join_thread_or_fail(close_thread)
     assert close_lock_acquired.is_set()
     assert closed.is_set()
     ledger.release(1024)
@@ -246,8 +336,12 @@ def test_bounded_response_text_accounts_final_unicode_object() -> None:
         """Return one bounded UTF-8 response body."""
 
         async def read(self, _maximum: int) -> bytes:
-            """Return deterministic multibyte text."""
+            """Read bounded data from the content test double."""
             return "áβ中".encode() * 64
+
+        def at_eof(self) -> bool:
+            """Report whether the controlled response reached end of input."""
+            return True
 
     response = SimpleNamespace(content=Content(), charset="utf-8")
     ledger = OperationMemoryLedger(8 << 20)
@@ -288,7 +382,7 @@ def test_async_scheduler_surfaces_non_exception_failure_without_hanging() -> Non
             pass
 
     with pytest.raises(WorkerFatal, match="fatal worker"):
-        asyncio.run(asyncio.wait_for(run(), timeout=1))
+        asyncio.run(asyncio.wait_for(run(), timeout=SCHEDULER_TIMEOUT_SECONDS))
 
 
 def test_remote_close_forcibly_stops_cancellation_resistant_host_thread(
@@ -336,8 +430,7 @@ def test_remote_close_forcibly_stops_cancellation_resistant_host_thread(
     assert not release.is_set()
     release.set()
     coordinator.close()
-    coordinator._thread.join(timeout=SCHEDULER_TIMEOUT_SECONDS)  # noqa: SLF001
-    assert not coordinator._thread.is_alive()  # noqa: SLF001
+    join_thread_or_fail(coordinator._thread)  # noqa: SLF001
 
 
 def test_abandoned_remote_startup_has_a_hard_thread_lifetime_bound() -> None:
@@ -349,7 +442,7 @@ def test_abandoned_remote_startup_has_a_hard_thread_lifetime_bound() -> None:
         """Async manager whose entry ignores cancellation forever."""
 
         async def __aenter__(self) -> object:
-            """Never finish entering the provider context."""
+            """Enter the asynchronous context managed by the context test double."""
             while not release.is_set():
                 try:
                     await asyncio.sleep(0.01)
@@ -357,7 +450,8 @@ def test_abandoned_remote_startup_has_a_hard_thread_lifetime_bound() -> None:
                     continue
 
         async def __aexit__(self, *_exc: object) -> None:
-            """No-op exit for completeness."""
+            """Exit the asynchronous context managed by the context test double and run cleanup."""
+            pass
 
     with pytest.raises(RuntimeError, match="startup exceeded its deadline"):
         RemoteIoCoordinator(
@@ -366,7 +460,7 @@ def test_abandoned_remote_startup_has_a_hard_thread_lifetime_bound() -> None:
             shutdown_timeout_seconds=0.01,
         )
     release.set()
-    deadline = monotonic() + 2.0
+    deadline = monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while monotonic() < deadline:
         if not any(
             thread.name == thread_name and thread.is_alive() for thread in threading.enumerate()
@@ -448,11 +542,12 @@ def test_operation_remote_wait_has_a_hard_transport_deadline(
         """Record the bounded wait and model its exact timeout branch."""
 
         def result(self, *, timeout: float | None = None) -> None:
+            """Return the terminal result retained by the fake future."""
             observed_timeouts.append(timeout)
             raise FutureTimeoutError
 
         def cancel(self) -> bool:
-            """Record the required cancellation of timed-out transport work."""
+            """Cancel work retained by the timed out future test double."""
             observed_timeouts.append(-1.0)
             return True
 
@@ -510,6 +605,7 @@ def test_operation_remote_timeout_cancels_a_live_coordinator_coroutine(
         submitted.append(future)
 
         def timeout_after_start(*, timeout: float | None = None) -> None:
+            """Raise the timeout only after the operation has started."""
             assert operation_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
             observed_timeouts.append(timeout)
             raise FutureTimeoutError
@@ -547,7 +643,7 @@ def test_shared_staging_session_late_entry_is_closed_after_timeout() -> None:
         """Delay entry beyond the iterator deadline and record cleanup."""
 
         async def __aenter__(self) -> Session:
-            """Ignore cancellation until the test releases the entry."""
+            """Enter the asynchronous context managed by the session test double."""
             while not release.is_set():
                 try:
                     await asyncio.sleep(0.005)
@@ -556,7 +652,7 @@ def test_shared_staging_session_late_entry_is_closed_after_timeout() -> None:
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
-            """Record closure of the late-entered manager."""
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
             exited.set()
 
     class Manifest:
@@ -570,12 +666,12 @@ def test_shared_staging_session_late_entry_is_closed_after_timeout() -> None:
 
         @staticmethod
         def open_staging_session() -> Session:
-            """Return the delayed session."""
+            """Open the controlled staging session for the sink."""
             return Session()
 
         @staticmethod
         async def stage_chunk_async(*_args: object, **_kwargs: object) -> None:
-            """Never stage because session startup times out first."""
+            """Stage one chunk through the controlled asynchronous session."""
             raise AssertionError("staging should not start")
 
     iterator = RemoteChunkPrefetchIterator(Manifest())

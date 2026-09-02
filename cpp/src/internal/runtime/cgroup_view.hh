@@ -1,5 +1,7 @@
-// Resolves files and effective limits relative to the cgroup hierarchy that
-// actually constrains this process.
+// Resolves controller files relative to the cgroup hierarchy constraining
+// this process. Ancestor walks distinguish finite, unbounded, missing, and
+// invalid values for both cgroup versions.
+
 #pragma once
 
 #include <algorithm>
@@ -19,15 +21,16 @@ enum class ValueState : std::uint8_t { kValue, kUnbounded, kUnknown };
 struct UnsignedSample final {
   ValueState state = ValueState::kUnknown;
   std::uint64_t value = 0U;
-  // ENOENT is meaningful only for a controller file at the cgroup2 mount
-  // root: that root is exempt from resource control and normally omits those
-  // files. Keep it distinct from permission, I/O and parse failures so every
+  // Keep open-time ENOENT distinct from permission, I/O and parse failures.
+  // A narrowly documented controller-root omission can be unbounded; every
   // other failure remains UNKNOWN.
   bool missing = false;
 };
 
 #if defined(__linux__)
 
+/// Reports whether a fixed-buffer file read captured the complete
+/// current line.
 [[nodiscard]] inline bool line_is_complete(const char *line,
                                            std::FILE *file) noexcept {
   if (line == nullptr || file == nullptr) {
@@ -42,6 +45,8 @@ struct UnsignedSample final {
   return std::strlen(line) + 1U < 4096U && std::feof(file) != 0;
 }
 
+/// Checks a whitespace-delimited cgroup controller list for an exact
+/// controller name.
 [[nodiscard]] inline bool
 controller_list_contains(const char *list,
                          std::string_view controller) noexcept {
@@ -64,6 +69,8 @@ controller_list_contains(const char *list,
   return false;
 }
 
+/// Reads this process's cgroup membership path for the
+/// requested controller.
 [[nodiscard]] inline bool current_membership(std::string_view controller,
                                              char *path, std::size_t capacity,
                                              bool &unified) noexcept {
@@ -109,6 +116,8 @@ controller_list_contains(const char *list,
   return found;
 }
 
+/// Determines whether the requested controller uses cgroup v1, v2,
+/// or neither.
 [[nodiscard]] inline int current_version(std::string_view controller) noexcept {
   char membership[4096]{};
   bool unified = false;
@@ -119,6 +128,7 @@ controller_list_contains(const char *list,
   return unified ? 2 : 1;
 }
 
+/// Decodes octal escapes used in procfs mount-table path fields in place.
 inline void unescape_mount_field(char *value) noexcept {
   if (value == nullptr) {
     return;
@@ -139,6 +149,8 @@ inline void unescape_mount_field(char *value) noexcept {
   *write = '\0';
 }
 
+/// Resolves a process membership beneath its matching cgroup mount
+/// and root.
 [[nodiscard]] inline bool join_cgroup_directory(const char *mountpoint,
                                                 const char *mount_root,
                                                 const char *membership,
@@ -161,8 +173,8 @@ inline void unescape_mount_field(char *value) noexcept {
       ++relative;
     }
   } else {
-    // Pass57: this mount does not contain the process membership subtree.
-    // Never fabricate mountpoint + unrelated membership and accidentally read
+    // This mount does not contain the process membership subtree. Never
+    // fabricate mountpoint + unrelated membership and accidentally read
     // another cgroup that happens to exist at that path.
     return false;
   }
@@ -172,6 +184,7 @@ inline void unescape_mount_field(char *value) noexcept {
   return written > 0 && static_cast<std::size_t>(written) < capacity;
 }
 
+/// Appends a controller filename to a resolved cgroup membership directory.
 [[nodiscard]] inline bool
 join_cgroup_path(const char *mountpoint, const char *mount_root,
                  const char *membership, std::string_view filename,
@@ -187,6 +200,8 @@ join_cgroup_path(const char *mountpoint, const char *mount_root,
   return written > 0 && static_cast<std::size_t>(written) < capacity;
 }
 
+/// Finds the mounted cgroup directory constraining this process for
+/// a controller.
 [[nodiscard]] inline bool
 resolve_directory(std::string_view controller, char *output,
                   std::size_t capacity, char *mount_output,
@@ -313,6 +328,8 @@ resolve_directory(std::string_view controller, char *output,
   return true;
 }
 
+/// Resolves a controller file relative to this process's effective
+/// cgroup directory.
 [[nodiscard]] inline bool resolve_file(std::string_view controller,
                                        std::string_view filename, char *output,
                                        std::size_t capacity) noexcept {
@@ -328,6 +345,8 @@ resolve_directory(std::string_view controller, char *output,
   return written > 0 && static_cast<std::size_t>(written) < capacity;
 }
 
+/// Reads a cgroup unsigned value while distinguishing missing, unbounded,
+/// and invalid data.
 [[nodiscard]] inline UnsignedSample
 read_unsigned_file(const char *path) noexcept {
   if (path == nullptr) {
@@ -367,6 +386,7 @@ read_unsigned_file(const char *path) noexcept {
   return {ValueState::kValue, static_cast<std::uint64_t>(parsed)};
 }
 
+/// Moves a cgroup path to its parent without crossing the controller mount.
 inline bool parent_directory_in_place(char *current,
                                       const char *mountpoint) noexcept {
   if (!current || !mountpoint || std::strcmp(current, mountpoint) == 0) {
@@ -404,6 +424,24 @@ inline bool parent_directory_in_place(char *current,
   return std::strlen(current) >= mount_length;
 }
 
+/// Recognizes only controller-root omissions whose documented meaning is
+/// unbounded capacity.
+[[nodiscard]] inline bool missing_controller_file_is_unbounded_root(
+    std::string_view controller, std::string_view filename, bool unified,
+    bool at_mount_root, bool missing) noexcept {
+  if (!at_mount_root || !missing) {
+    return false;
+  }
+  // A cgroup2 root is exempt from resource control and normally omits
+  // controller interface files. The legacy cgroup-v1 pids controller has the
+  // same root-only contract specifically for pids.max. Keep the exception
+  // exact so missing files below the root, usage files, and all other errors
+  // continue to fail closed.
+  return unified || (controller == "pids" && filename == "pids.max");
+}
+
+/// Returns the tightest finite value found while walking the effective
+/// cgroup ancestry.
 [[nodiscard]] inline UnsignedSample
 effective_unsigned(std::string_view controller,
                    std::string_view filename) noexcept {
@@ -436,10 +474,8 @@ effective_unsigned(std::string_view controller,
       const auto sample = read_unsigned_file(path);
       if (sample.state == ValueState::kUnknown) {
         const bool at_mount_root = std::strcmp(current, mountpoint) == 0;
-        if (unified && at_mount_root && sample.missing) {
-          // The cgroup2 root is exempt from resource control and normally has
-          // no controller interface files. Only its exact ENOENT is a known
-          // unbounded level; all non-root and non-ENOENT failures stay closed.
+        if (missing_controller_file_is_unbounded_root(
+                controller, filename, unified, at_mount_root, sample.missing)) {
           break;
         }
         read_failed = true;
@@ -476,6 +512,8 @@ effective_unsigned(std::string_view controller,
   return {};
 }
 
+/// Returns the smallest limit-minus-usage headroom across effective
+/// cgroup ancestors.
 [[nodiscard]] inline UnsignedSample
 effective_headroom(std::string_view controller, std::string_view limit_filename,
                    std::string_view usage_filename) noexcept {
@@ -514,9 +552,9 @@ effective_headroom(std::string_view controller, std::string_view limit_filename,
       const auto limit = read_unsigned_file(limit_path);
       if (limit.state == ValueState::kUnknown) {
         const bool at_mount_root = std::strcmp(current, mountpoint) == 0;
-        if (unified && at_mount_root && limit.missing) {
-          // See effective_unsigned(): a missing controller file is expected
-          // only at the exempt cgroup2 root.
+        if (missing_controller_file_is_unbounded_root(
+                controller, limit_filename, unified, at_mount_root,
+                limit.missing)) {
           break;
         }
         read_failed = true;

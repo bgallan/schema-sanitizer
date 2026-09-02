@@ -11,98 +11,309 @@ inputs:
   shard:
     description: Functional workload (concurrency, memory-parquet, or io-pipeline).
     required: true
+  producer-result:
+    description: Result of the exact platform-wheel producer dependency.
+    required: true
 runs:
   using: composite
   steps:
-    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-      with:
-        # Match the interpreter used to build every release wheel.
-        python-version: 3.11.9
-        cache: pip
-        cache-dependency-path: meta/ci/requirements/platform-tests.txt
-    - name: Download the certified platform wheel
+    - name: Require a supported platform-test tuple
+      env:
+        PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        PLATFORM_NAME: ${{ inputs.platform-name }}
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        RUNNER_SYSTEM: ${{ runner.os }}
+        TEST_SHARD: ${{ inputs.shard }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        platform_tuple="${RUNNER_SYSTEM}:${RUNNER_ARCHITECTURE}:${PLATFORM_NAME}:${PLATFORM_ARTIFACT}"
+        case "${platform_tuple}" in
+          Linux:X64:linux-x86_64:linux | \
+          Windows:X64:windows-amd64:windows | \
+          macOS:X64:macos-x86_64:macos-x86_64 | \
+          macOS:ARM64:macos-arm64:macos-arm64) ;;
+          *)
+            echo "Unsupported platform-test tuple: ${platform_tuple}" >&2
+            exit 2
+            ;;
+        esac
+        case "${TEST_SHARD}" in
+          concurrency | memory-parquet | io-pipeline) ;;
+          *)
+            echo "Unknown platform test shard: ${TEST_SHARD}" >&2
+            exit 2
+            ;;
+        esac
+    - name: Reset generated platform-test paths
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- wheelhouse artifacts
+        mkdir -p artifacts
+    - name: Download the candidate certified platform wheel
       id: download-platform-wheel
       continue-on-error: true
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
       with:
-        name: dist-wheels-${{ inputs.platform-name }}
+        name: candidate-wheels-${{ inputs.platform-name }}
         path: wheelhouse
     - name: Remove a partial platform-wheel download before retrying
+      id: reset-platform-wheel-download
       if: ${{ always() && steps.download-platform-wheel.outcome == 'failure' }}
       shell: bash
       run: |-
         set -euo pipefail
         rm -rf -- wheelhouse
-    - name: Retry the certified platform-wheel download
-      if: ${{ always() && steps.download-platform-wheel.outcome == 'failure' }}
+    - name: Retry the candidate platform-wheel download
+      id: retry-platform-wheel-download
+      if: ${{ always() && steps.download-platform-wheel.outcome == 'failure' && steps.reset-platform-wheel-download.outcome == 'success' }}
+      continue-on-error: true
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        name: candidate-wheels-${{ inputs.platform-name }}
+        path: wheelhouse
+    - name: Remove candidate download state before retained-bundle fallback
+      id: reset-before-retained-platform-wheel
+      if: ${{ always() && inputs.producer-result == 'success' && steps.download-platform-wheel.outcome == 'failure' && steps.retry-platform-wheel-download.outcome == 'failure' }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- wheelhouse
+    - name: Download the retained certified wheel bundle
+      id: download-retained-platform-wheel
+      if: ${{ always() && inputs.producer-result == 'success' && steps.download-platform-wheel.outcome == 'failure' && steps.retry-platform-wheel-download.outcome == 'failure' && steps.reset-before-retained-platform-wheel.outcome == 'success' }}
+      continue-on-error: true
       uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
       with:
         name: dist-wheels-${{ inputs.platform-name }}
         path: wheelhouse
-    - name: Install the wheel and full-suite dependencies
+    - name: Remove a partial retained wheel-bundle download before retrying
+      id: reset-retained-platform-wheel-download
+      if: ${{ always() && steps.download-retained-platform-wheel.outcome == 'failure' }}
       shell: bash
       run: |-
         set -euo pipefail
-        python -m pip install pip==26.1.2
-        python -m pip install \
-          --retries 10 \
-          --timeout 60 \
-          -r meta/ci/requirements/platform-tests.txt \
-          wheelhouse/*.whl
+        rm -rf -- wheelhouse
+    - name: Retry the retained certified wheel-bundle download
+      id: retry-retained-platform-wheel-download
+      if: ${{ always() && steps.download-retained-platform-wheel.outcome == 'failure' && steps.reset-retained-platform-wheel-download.outcome == 'success' }}
+      continue-on-error: true
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        name: dist-wheels-${{ inputs.platform-name }}
+        path: wheelhouse
+    - name: Require the certified platform-wheel artifact
+      id: platform-wheel-availability
+      if: ${{ always() }}
+      env:
+        FIRST_DOWNLOAD_OUTCOME: ${{ steps.download-platform-wheel.outcome }}
+        PLATFORM_NAME: ${{ inputs.platform-name }}
+        PRODUCER_RESULT: ${{ inputs.producer-result }}
+        RETAINED_DOWNLOAD_OUTCOME: ${{ steps.download-retained-platform-wheel.outcome }}
+        RETRY_DOWNLOAD_OUTCOME: ${{ steps.retry-platform-wheel-download.outcome }}
+        RETRY_RETAINED_DOWNLOAD_OUTCOME: ${{ steps.retry-retained-platform-wheel-download.outcome }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        case "${PRODUCER_RESULT}" in
+          success | failure | skipped | cancelled) ;;
+          *)
+            echo "Unexpected ${PLATFORM_NAME} producer result: ${PRODUCER_RESULT}" >&2
+            exit 2
+            ;;
+        esac
+        if [[ "${FIRST_DOWNLOAD_OUTCOME}" != 'success' && \
+          "${RETRY_DOWNLOAD_OUTCOME}" != 'success' && \
+          "${RETAINED_DOWNLOAD_OUTCOME}" != 'success' && \
+          "${RETRY_RETAINED_DOWNLOAD_OUTCOME}" != 'success' ]]; then
+          if [[ "${PRODUCER_RESULT}" == 'success' ]]; then
+            echo "The successful ${PLATFORM_NAME} candidate and retained wheel artifacts remained unavailable after bounded downloads" >&2
+            exit 2
+          fi
+          echo "::notice title=Skipped ${PLATFORM_NAME} shard::The upstream ${PLATFORM_NAME} build did not publish its certified artifact after two bounded download attempts. The wheel build and validation gate retain the root-cause failures; this dependent shard is a clean no-op."
+          echo 'available=false' >> "${GITHUB_OUTPUT}"
+        else
+          echo 'available=true' >> "${GITHUB_OUTPUT}"
+        fi
+    - name: Verify the downloaded platform wheel before installation
+      if: steps.platform-wheel-availability.outputs.available == 'true'
+      env:
+        PLATFORM_NAME: ${{ inputs.platform-name }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        shopt -s nullglob dotglob
+        wheels=(wheelhouse/*.whl)
+        certificates=(wheelhouse/platform-wheel-certificate-*.json)
+        entries=(wheelhouse/*)
+        expected_certificate="wheelhouse/platform-wheel-certificate-${PLATFORM_NAME}.json"
+        if [[ "${#wheels[@]}" -ne 1 || "${#certificates[@]}" -ne 1 || \
+          "${certificates[0]:-}" != "${expected_certificate}" ]]; then
+          echo "Expected only one ${PLATFORM_NAME} wheel and its matching certificate" >&2
+          exit 2
+        fi
+        bundle_manifest='wheelhouse/certified-wheel-bundle.json'
+        if [[ -f "${bundle_manifest}" && ! -L "${bundle_manifest}" ]]; then
+          if [[ "${#entries[@]}" -ne 4 || ! -d wheelhouse/rerun-state || \
+            -L wheelhouse/rerun-state ]]; then
+            echo "Retained platform-wheel bundle has an invalid root inventory" >&2
+            exit 2
+          fi
+          python meta/ci/release/certified_wheel_bundle.py verify \
+            --bundle wheelhouse \
+            --platform "${PLATFORM_NAME}" \
+            --github-sha "${GITHUB_SHA}" \
+            --github-run-id "${GITHUB_RUN_ID}" \
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+        elif [[ "${#entries[@]}" -ne 2 ]]; then
+          echo "Candidate platform-wheel artifact has an invalid root inventory" >&2
+          exit 2
+        fi
+        python meta/ci/native/certify_platform_wheel.py verify \
+          --certificate "${expected_certificate}" \
+          --wheel-directory wheelhouse \
+          --platform "${PLATFORM_NAME}" \
+          --github-sha "${GITHUB_SHA}" \
+          --github-run-id "${GITHUB_RUN_ID}" \
+          --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+    - name: Install the wheel and functional-suite dependencies
+      if: steps.platform-wheel-availability.outputs.available == 'true'
+      env:
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/platform-tests.txt
+        TEST_SHARD: ${{ inputs.shard }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        # Pass every transitive requirement explicitly: pip's hash-checking mode
+        # does not inherit hashes from constraints for an implicit dependency.
+        packages=(
+          colorama
+          duckdb
+          iniconfig
+          numpy
+          packaging
+          pandas
+          pluggy
+          polars
+          polars-runtime-32
+          pyarrow
+          pygments
+          pytest
+          python-dateutil
+          six
+          tzdata
+        )
+        case "${TEST_SHARD}" in
+          concurrency) ;;
+          memory-parquet) packages+=(defusedxml) ;;
+          io-pipeline)
+            packages+=(
+              aiohappyeyeballs
+              aiohttp
+              aiosignal
+              attrs
+              frozenlist
+              idna
+              multidict
+              propcache
+              typing-extensions
+              yarl
+            )
+            ;;
+          *)
+            echo "Unknown platform test shard: ${TEST_SHARD}" >&2
+            exit 2
+            ;;
+        esac
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/platform-tests.txt \
+          --packages "${packages[@]}"
+        python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
+        python -m pip check
     - name: Assert tests import the installed wheel
+      if: steps.platform-wheel-availability.outputs.available == 'true'
       shell: bash
       run: |
         set -euo pipefail
         python - <<'PY'
+        import importlib
+        import sys
         from pathlib import Path
-        import schema_sanitizer as package
-        import schema_sanitizer._core_abi3 as core
+        required = (
+            "schema_sanitizer",
+            "schema_sanitizer._core_abi3",
+            "schema_sanitizer.api_impl.execution_context",
+            "schema_sanitizer.core_impl.native_runtime",
+        )
+        for name in required:
+            importlib.import_module(name)
         checkout = Path.cwd().resolve()
-        extension = Path(core.__file__).resolve()
-        if extension.is_relative_to(checkout):
-            raise SystemExit(f"native extension came from checkout, not wheel: {extension}")
-        print(package.__version__, extension)
+        provenance = {}
+        for name, module in sorted(sys.modules.items()):
+            if name != "schema_sanitizer" and not name.startswith("schema_sanitizer."):
+                continue
+            raw_path = getattr(module, "__file__", None)
+            if not raw_path:
+                continue
+            path = Path(raw_path).resolve()
+            provenance[name] = str(path)
+            if path.is_relative_to(checkout):
+                raise SystemExit(f"{name} came from checkout, not wheel: {path}")
+        missing = sorted(set(required) - set(provenance))
+        if missing:
+            raise SystemExit(f"wheel provenance is incomplete: {missing}")
+        print(provenance["schema_sanitizer"], provenance["schema_sanitizer._core_abi3"])
         PY
-    - name: Compile and certify the Parquet runtime
-      if: inputs.shard == 'memory-parquet'
-      env:
-        PLATFORM_ARTIFACT: ${{ inputs.artifact }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        python -m compileall -q src
-        python meta/ci/parquet/check_parquet_contract_runtime.py
-        mkdir -p artifacts
-        python meta/ci/parquet/check_parquet_contract_runtime_suite.py \
-          --certificate-output "artifacts/parquet-contract-runtime-certificate-${PLATFORM_ARTIFACT}.json"
     - name: Record runner CPU environment
+      if: steps.platform-wheel-availability.outputs.available == 'true'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
         TEST_SHARD: ${{ inputs.shard }}
       shell: bash
       run: >-
         python meta/ci/quality/record_runner_environment.py
+        --shard "${TEST_SHARD}"
         "artifacts/runner-cpu-${PLATFORM_ARTIFACT}-${TEST_SHARD}.json"
-    - name: Cross-platform reader linear-scaling smoke
-      if: inputs.shard == 'io-pipeline'
+    - name: Record a cross-platform reader scaling measurement
+      if: steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard
+        == 'io-pipeline'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
       shell: bash
-      run: >-
-        python -I benchmarks/readers/linear_scaling.py
-        --sizes 1024,2048
-        --repeats 3
-        --maximum-normalized-growth 8
-        --latency-budget benchmarks/readers/linear_scaling_budget.json
-        --wheel wheelhouse/*.whl
-        --output "artifacts/reader-linear-scaling-${PLATFORM_ARTIFACT}.json"
+      run: |
+        set -euo pipefail
+        report="artifacts/reader-linear-scaling-${PLATFORM_ARTIFACT}.json"
+        if python -I benchmarks/readers/linear_scaling.py \
+          --sizes 1024,2048 \
+          --repeats 3 \
+          --maximum-normalized-growth 8 \
+          --failure-confirmations 0 \
+          --latency-budget benchmarks/readers/linear_scaling_budget.json \
+          --wheel wheelhouse/*.whl \
+          --commit-sha "${GITHUB_SHA}" \
+          --output "${report}"; then
+          exit 0
+        fi
+        python - "${report}" <<'PY'
+        import json
+        import sys
+        from pathlib import Path
+        report = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+        failures = report.get("failures")
+        if not isinstance(failures, dict) or not failures:
+            raise SystemExit("reader measurement failed without a timing-policy report")
+        print(f"::warning title=Non-gating reader timing::host timing exceeded policy: {failures}")
+        PY
     - name: Cross-platform threading benchmark smoke
-      if: inputs.shard == 'concurrency'
+      if: steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard
+        == 'concurrency'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
       shell: bash
       run: >-
-        python -m benchmarks.concurrency.threading.matrix
+        benchmarks/concurrency/threading/run_matrix.sh
         --profile ci
         --rows 256
         --warmups 0
@@ -110,9 +321,16 @@ runs:
         --only parquet
         --output "artifacts/threading-matrix-${PLATFORM_ARTIFACT}.json"
     - name: Cross-platform native completion stress
-      if: inputs.shard == 'concurrency'
+      if: steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard
+        == 'concurrency'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        SCHEMA_SANITIZER_EXPECT_NATIVE_STRESS_NODEIDS: tests/concurrency/test_ordered_executor_completion_probe.py::test_completion_probe_sustains_many_ring_generations
+        SCHEMA_SANITIZER_INTEGRITY_EVIDENCE: artifacts/integrity-native-stress-${{ inputs.artifact }}.json
+        SCHEMA_SANITIZER_PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        SCHEMA_SANITIZER_STRICT_TEST_RUNTIME: '1'
+        SCHEMA_SANITIZER_TEST_SHARD: native-stress
       shell: bash
       run: |
         set -euo pipefail
@@ -121,24 +339,51 @@ runs:
           --durations=10 \
           --durations-min=0.05 \
           --junitxml="artifacts/pytest-native-stress-${PLATFORM_ARTIFACT}.xml" \
-          tests/concurrency/test_ordered_executor_completion_probe.py \
+          tests/concurrency \
           2>&1 | tee "artifacts/pytest-native-stress-durations-${PLATFORM_ARTIFACT}.log"
-    - name: Run functional test shard
+    - name: Run the clean public 8-by-7 release matrix
+      if: steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard
+        == 'concurrency'
       env:
         PLATFORM_ARTIFACT: ${{ inputs.artifact }}
-        TEST_SHARD: ${{ inputs.shard }}
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        SCHEMA_SANITIZER_INTEGRITY_EVIDENCE: artifacts/integrity-release-matrix-${{ inputs.artifact }}.json
+        SCHEMA_SANITIZER_PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        SCHEMA_SANITIZER_STRICT_TEST_RUNTIME: '1'
+        SCHEMA_SANITIZER_TEST_SHARD: release-matrix
       shell: bash
       run: |
         set -euo pipefail
+        pytest -q -o pythonpath=. \
+          --durations=5 \
+          --durations-min=0.05 \
+          --junitxml="artifacts/pytest-release-matrix-${PLATFORM_ARTIFACT}.xml" \
+          tests/concurrency/test_concurrency_route_release_gate.py \
+          2>&1 | tee "artifacts/pytest-release-matrix-durations-${PLATFORM_ARTIFACT}.log"
+    - name: Run functional test shard
+      if: steps.platform-wheel-availability.outputs.available == 'true'
+      env:
+        PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+        SCHEMA_SANITIZER_INTEGRITY_EVIDENCE: artifacts/integrity-${{ inputs.artifact }}-${{
+          inputs.shard }}.json
+        SCHEMA_SANITIZER_PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        SCHEMA_SANITIZER_STRICT_TEST_RUNTIME: '1'
+        SCHEMA_SANITIZER_TEST_SHARD: ${{ inputs.shard }}
+        TEST_SHARD: ${{ inputs.shard }}
+      shell: bash
+      run: |-
+        set -euo pipefail
         case "${TEST_SHARD}" in
           concurrency)
-            test_paths=(tests/concurrency)
+            test_paths=(
+              tests/concurrency
+            )
             ;;
           memory-parquet)
             test_paths=(
               tests/memory
               tests/parquet
-              tests/quality
               tests/sinks
             )
             ;;
@@ -156,29 +401,85 @@ runs:
             exit 2
             ;;
         esac
-        pytest -q -o pythonpath=. \
-          -m 'not native_stress' \
-          --durations=50 \
-          --durations-min=0.05 \
-          --junitxml="artifacts/pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml" \
+        # Bash 3.2 treats an empty-array expansion as unbound under nounset.
+        pytest_command=(
+          pytest -q -o pythonpath=.
+          -m 'not native_stress'
+          --durations=50
+          --durations-min=0.05
+          --junitxml="artifacts/pytest-${PLATFORM_ARTIFACT}-${TEST_SHARD}.xml"
+        )
+        if [[ "${TEST_SHARD}" == 'concurrency' ]]; then
+          # Independent gates and the IO shard own these exact selections.
+          pytest_command+=(
+            --ignore=tests/concurrency/test_concurrency_route_release_gate.py
+            --ignore=tests/concurrency/test_concurrency_groups_only_sustained_fixed_cost_columns.py
+            --ignore=tests/concurrency/test_concurrency_sources_define_bounded_immutable_token_handoff.py
+            --ignore=tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py
+          )
+        elif [[ "${TEST_SHARD}" == 'memory-parquet' ]]; then
+          pytest_command+=(
+            --ignore=tests/memory/test_memory_process_identity_includes_linux_boot_id.py
+          )
+        elif [[ "${TEST_SHARD}" == 'io-pipeline' ]]; then
+          test_paths+=(
+            tests/concurrency/test_concurrency_groups_only_sustained_fixed_cost_columns.py
+            tests/concurrency/test_concurrency_sources_define_bounded_immutable_token_handoff.py
+            tests/concurrency/test_concurrency_wide_fixed_jsonl_matches_single_oracle.py
+            tests/memory/test_memory_process_identity_includes_linux_boot_id.py
+            tests/quality/test_fuzz_regression_runner.py::test_standalone_mutation_stream_matches_its_cross_library_golden
+          )
+        fi
+        "${pytest_command[@]}" \
           "${test_paths[@]}" \
           2>&1 | tee "artifacts/pytest-durations-${PLATFORM_ARTIFACT}-${TEST_SHARD}.log"
-    - name: Upload platform-shard evidence
-      id: upload-platform-shard-evidence
-      if: ${{ success() || (failure() && hashFiles('artifacts/**') != '') }}
+    - name: Certify the Parquet runtime from functional evidence
+      if: ${{ !cancelled() && steps.platform-wheel-availability.outputs.available == 'true' && inputs.shard == 'memory-parquet' }}
+      env:
+        PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        python meta/ci/parquet/check_parquet_contract_runtime_suite.py \
+          --junit-xml "artifacts/pytest-${PLATFORM_ARTIFACT}-memory-parquet.xml" \
+          --certificate-output "artifacts/parquet-contract-runtime-certificate-${PLATFORM_ARTIFACT}.json"
+    - name: Consolidate the exact platform-job evidence
+      if: ${{ always() && steps.platform-wheel-availability.outputs.available == 'true' }}
+      env:
+        PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        TEST_SHARD: ${{ inputs.shard }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        python meta/ci/quality/platform_test_evidence.py create \
+          --evidence-dir artifacts \
+          --certificate "artifacts/platform-test-certificate-${PLATFORM_ARTIFACT}-${TEST_SHARD}.json" \
+          --platform "${PLATFORM_ARTIFACT}" \
+          --shard "${TEST_SHARD}" \
+          --github-sha "${GITHUB_SHA}" \
+          --github-run-id "${GITHUB_RUN_ID}" \
+          --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+    - name: Upload compact platform-test evidence
+      if: ${{ always() && steps.platform-wheel-availability.outputs.available == 'true' }}
+      id: upload-platform-test-evidence
       continue-on-error: true
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
-        name: platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}
-        path: artifacts/
+        name: platform-test-evidence-${{ inputs.platform-name }}-${{ inputs.shard
+          }}
+        path: artifacts
         if-no-files-found: error
-        retention-days: 14
-    - name: Retry platform-shard evidence upload
-      if: ${{ always() && steps.upload-platform-shard-evidence.outcome == 'failure' }}
+        retention-days: 7
+        compression-level: 6
+        overwrite: true
+    - name: Retry the exact platform-test evidence upload
+      if: ${{ always() && steps.platform-wheel-availability.outputs.available == 'true' && steps.upload-platform-test-evidence.outcome == 'failure' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
-        name: platform-evidence-${{ inputs.artifact }}-${{ inputs.shard }}
-        path: artifacts/
+        name: platform-test-evidence-${{ inputs.platform-name }}-${{ inputs.shard
+          }}
+        path: artifacts
         if-no-files-found: error
-        retention-days: 14
+        retention-days: 7
+        compression-level: 6
         overwrite: true

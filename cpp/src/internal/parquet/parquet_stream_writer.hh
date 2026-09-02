@@ -1,4 +1,6 @@
 // Declares a small native Parquet writer for supported Arrow C streams.
+// These definitions support the internal pipeline without expanding its public
+// interface.
 
 #pragma once
 
@@ -15,11 +17,11 @@ namespace sanitize::internal::parquet_stream_writer {
 
 class Output {
 public:
-  // Destroys the output abstraction.
+  /// Destroys the output abstraction.
   virtual ~Output() = default;
-  // Writes bytes to the output target.
+  /// Writes bytes to the output target.
   virtual sanitize::Status Write(std::string_view data) = 0;
-  // Flushes the output target.
+  /// Flushes the output target.
   virtual sanitize::Status Flush() = 0;
 };
 
@@ -30,7 +32,7 @@ struct WriterOptions {
   sanitize::ThreadingMode threading_mode = sanitize::ThreadingMode::kSingle;
 };
 
-// Writes supported Arrow C streams as native Parquet.
+/// Writes supported Arrow C streams as native Parquet.
 sanitize::Status write_stream(ArrowArrayStream *stream, Output &out_file,
                               const WriterOptions &options = {});
 

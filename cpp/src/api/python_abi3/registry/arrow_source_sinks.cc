@@ -1,4 +1,10 @@
-/* Arrow-source registry multi-stream runtime. */
+/*
+ * Implements the Arrow-source registry multi-stream runtime.
+ *
+ * The routines preserve source order and Arrow ownership while applying
+ * compiled registry plans.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -14,7 +20,6 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct.hh"
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
 #include "api/python_abi3/metadata/columns/api.hh"
@@ -22,7 +27,7 @@
 #include "api/python_abi3/registry/native_multi_source_stream.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 #include "internal/arrow_c/cdata_schema_builder.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "internal/arrow_c/cdata_stream_runtime.hh"
@@ -31,6 +36,7 @@
 #include "internal/runtime/execution_policy.hh"
 #include "internal/runtime/operation_task_arena.hh"
 #include "internal/runtime/performance_telemetry.hh"
+#include "sanitize/ingest/ingest.hh"
 #include "sanitize/registry/registry.hh"
 #include "sanitize/runtime/execution_context.hh"
 
@@ -38,12 +44,18 @@
 
 namespace core_abi3_internal::arrow_registry_detail {
 
+/// Releases resources retained by `NativeArrowSourcesStreamState` without
+/// propagating cleanup failures.
 NativeArrowSourcesStreamState::~NativeArrowSourcesStreamState() {
+  close_arrow_chunk_provider(this);
+  decref_arrow_sources(&sources);
   if (telemetry) {
     telemetry->Finish();
   }
 }
 
+/// Lazily creates the task arena and memory accounting for an Arrow-source
+/// stream.
 sanitize::Status
 ensure_operation_task_arena(NativeArrowSourcesStreamState *state) {
   if (!state || !state->prepared) {
@@ -86,6 +98,8 @@ ensure_operation_task_arena(NativeArrowSourcesStreamState *state) {
   return sanitize::Status::OK();
 }
 
+/// Derives generated metadata columns for one child of the schema-registry
+/// stream.
 std::vector<MetadataColumn>
 metadata_columns_for_child(const NativeArrowSourcesStreamState *state,
                            const ArrowSourceSpec &source) {
@@ -95,6 +109,8 @@ metadata_columns_for_child(const NativeArrowSourcesStreamState *state,
       /*include_source_file=*/true);
 }
 
+/// Closes current source idempotently and preserves any prior schema-registry
+/// stream failure.
 void close_current_source(NativeArrowSourcesStreamState *state) noexcept {
   if (!state) {
     return;
@@ -105,6 +121,7 @@ void close_current_source(NativeArrowSourcesStreamState *state) noexcept {
   state->diagnostics = nullptr;
 }
 
+/// Initializes generated metadata state around the newly opened Arrow source.
 sanitize::Status
 finish_opened_source_metadata(NativeArrowSourcesStreamState *state,
                               const ArrowSourceSpec &source) {
@@ -122,6 +139,8 @@ finish_opened_source_metadata(NativeArrowSourcesStreamState *state,
   return sanitize::Status::OK();
 }
 
+/// Attempts to forward a schema-compatible Arrow source without
+/// materialization.
 sanitize::Result<bool>
 try_open_passthrough_arrow_source(NativeArrowSourcesStreamState *state,
                                   const ArrowSourceSpec &source) {
@@ -150,8 +169,8 @@ try_open_passthrough_arrow_source(NativeArrowSourcesStreamState *state,
     return false;
   }
 
-  auto diagnostics = std::unique_ptr<schema_sanitizer_diagnostics>(
-      new (std::nothrow) schema_sanitizer_diagnostics());
+  auto diagnostics = std::unique_ptr<NativeDiagnostics>(
+      new (std::nothrow) NativeDiagnostics());
   if (!diagnostics) {
     return sanitize::Status::OutOfMemory(
         "context_to_registry_sink_arrow_sources: diagnostics allocation "
@@ -178,6 +197,8 @@ try_open_passthrough_arrow_source(NativeArrowSourcesStreamState *state,
   return true;
 }
 
+/// Materializes one Arrow source under the compiled registry plan and retains
+/// its diagnostics.
 sanitize::Result<sanitize::IngestStream>
 ingest_arrow_source_with_registry_plan(NativeArrowSourcesStreamState *state,
                                        sanitize::FrontendHandle frontend) {
@@ -217,6 +238,8 @@ ingest_arrow_source_with_registry_plan(NativeArrowSourcesStreamState *state,
   prepared.inference_consumed = false;
   return sanitize::ingest_to_stream(std::move(prepared));
 }
+
+/// Opens the next Arrow source and initializes its registry-stream state.
 sanitize::Status open_next_source(NativeArrowSourcesStreamState *state) {
   if (!state) {
     return sanitize::Status::Invalid("native Arrow sources stream is closed");
@@ -273,49 +296,51 @@ sanitize::Status open_next_source(NativeArrowSourcesStreamState *state) {
     return out_r.status();
   }
 
-  SinkOutputs outputs{.stream = &state->inner,
-                      .diagnostics = &state->diagnostics};
-  char *err = nullptr;
-  const int rc =
-      ingest_stream_to_streams(std::move(out_r).ValueOrDie(), outputs, &err,
-                               "context_to_registry_sink_arrow_sources");
-  if (rc != SCHEMA_SANITIZER_STATUS_OK) {
-    std::string message = err ? err : "native Arrow source failed";
-    schema_sanitizer_free_string(err);
-    return sanitize::Status::Invalid(message);
+  auto sink = native_sink_from_ingest_stream(std::move(out_r).ValueOrDie());
+  if (!sink.ok()) {
+    return sink.status();
   }
+  auto output = std::move(sink).ValueOrDie();
+  state->inner = output.stream.release();
+  state->diagnostics = output.diagnostics.release();
   return finish_opened_source_metadata(state, source);
 }
 
+/// Opens the next input and binds it to the active schema-registry stream
+/// state.
 sanitize::Status arrow_sources_open_next(void *state) {
   return open_next_source(static_cast<NativeArrowSourcesStreamState *>(state));
 }
 
+/// Closes the current input and finalizes its schema-registry stream
+/// diagnostics.
 void arrow_sources_close_current(void *state) noexcept {
   close_current_source(static_cast<NativeArrowSourcesStreamState *>(state));
 }
 
+/// Returns the metadata columns associated with the current schema-registry
+/// stream source.
 MetadataStreamState *arrow_sources_metadata(void *state) noexcept {
   auto *typed = static_cast<NativeArrowSourcesStreamState *>(state);
   return typed && typed->metadata ? typed->metadata.get() : nullptr;
 }
 
+/// Returns the error text retained by the current registry source state.
 std::string &arrow_sources_error(void *state) noexcept {
   return static_cast<NativeArrowSourcesStreamState *>(state)->last_error;
 }
 
+/// Reports whether the current source still owes its generated first metadata
+/// row.
 bool *arrow_sources_first_row_pending(void *state) noexcept {
   return &static_cast<NativeArrowSourcesStreamState *>(state)
               ->first_row_pending;
 }
 
+/// Destroys the heap-owned schema-registry stream state after its final
+/// callback completes.
 void arrow_sources_destroy_state(void *state) noexcept {
-  auto *typed = static_cast<NativeArrowSourcesStreamState *>(state);
-  if (typed) {
-    close_arrow_chunk_provider(typed);
-    decref_arrow_sources(&typed->sources);
-  }
-  delete typed;
+  delete static_cast<NativeArrowSourcesStreamState *>(state);
 }
 
 const NativeMultiSourceStreamOps kArrowSourcesOps{
@@ -331,24 +356,79 @@ const NativeMultiSourceStreamOps kArrowSourcesOps{
     .destroy_state = &arrow_sources_destroy_state,
 };
 
+/// Exposes the most recent schema-registry stream failure through the Arrow C
+/// Stream callback.
 const char *arrow_sources_last_error(ArrowArrayStream *stream) {
   return native_multi_source_last_error(stream, kArrowSourcesOps);
 }
 
+/// Releases the schema-registry stream callback state and clears all
+/// transferred Arrow ownership.
 void arrow_sources_release(ArrowArrayStream *stream) {
   native_multi_source_release(stream, kArrowSourcesOps);
 }
 
+/// Exports the current schema through the schema-registry stream Arrow C Stream
+/// callback.
 int arrow_sources_get_schema(ArrowArrayStream *stream, ArrowSchema *out) {
   return native_multi_source_get_schema(stream, out, kArrowSourcesOps);
 }
 
+/// Produces the next array through the registry multi-source Arrow C Stream
+/// callback.
 int arrow_sources_get_next(ArrowArrayStream *stream, ArrowArray *out) {
   return native_multi_source_get_next(stream, out, kArrowSourcesOps);
 }
+
+/// Packages an Arrow-source registry stream and diagnostics for Python.
+PyObject *pack_arrow_source_registry_stream(
+    PyObject *keepalive, std::unique_ptr<NativeArrowSourcesStreamState> state,
+    PyObject *chunk_provider) {
+  if (!state || !state->registry_plan) {
+    PyErr_SetString(PyExc_RuntimeError,
+                    "Arrow-source stream has no compiled registry plan");
+    return nullptr;
+  }
+
+  if (chunk_provider) {
+    Py_INCREF(chunk_provider);
+    state->chunk_provider = chunk_provider;
+  }
+
+  auto *stream = new (std::nothrow) ArrowArrayStream();
+  if (!stream) {
+    PyErr_NoMemory();
+    return nullptr;
+  }
+  std::memset(stream, 0, sizeof(*stream));
+  stream->get_schema = &arrow_sources_get_schema;
+  stream->get_next = &arrow_sources_get_next;
+  stream->get_last_error = &arrow_sources_last_error;
+  stream->release = &arrow_sources_release;
+
+  PyRegistrySinkOutputs outputs;
+  outputs.main_stream = stream;
+  outputs.diagnostics = new (std::nothrow) NativeDiagnostics();
+  if (!outputs.diagnostics) {
+    release_arrow_stream(stream);
+    PyErr_NoMemory();
+    return nullptr;
+  }
+  outputs.registry_json = state->registry_plan->registry_json;
+  outputs.drifts_json = state->registry_plan->drifts_json;
+  outputs.conversion_timestamp = state->registry_plan->conversion_timestamp;
+
+  auto registry_plan = state->registry_plan;
+  stream->private_data = state.release();
+  return pack_registry_stream_result_with_state(
+      keepalive, outputs.main_stream, outputs.diagnostics,
+      outputs.registry_json, outputs.drifts_json, outputs.conversion_timestamp,
+      std::move(registry_plan));
+}
+
+/// Packages an Arrow-provider registry stream and diagnostics for Python.
 PyObject *pack_arrow_source_provider_registry_stream(
-    PyObject *ctx_obj, schema_sanitizer_context *ctx,
-    PyObject *stream_provider_obj,
+    PyObject *ctx_obj, NativeContext *ctx, PyObject *stream_provider_obj,
     const sanitize::PreparedOptionsPtr &prepared_options,
     std::shared_ptr<NativeRegistryPlan> registry_plan,
     const char *field_name_policy, const char *schema_mode,
@@ -368,43 +448,8 @@ PyObject *pack_arrow_source_provider_registry_stream(
   append_registry_first_row_columns(&state->first_row_columns,
                                     registry_plan->registry_json,
                                     registry_plan->drifts_json);
-
-  auto *stream = new (std::nothrow) ArrowArrayStream();
-  if (!stream) {
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  std::memset(stream, 0, sizeof(*stream));
-  stream->get_schema = &arrow_sources_get_schema;
-  stream->get_next = &arrow_sources_get_next;
-  stream->get_last_error = &arrow_sources_last_error;
-  stream->release = &arrow_sources_release;
-
-  PyRegistrySinkOutputs outputs;
-  outputs.main_stream = stream;
-  outputs.diagnostics = new (std::nothrow) schema_sanitizer_diagnostics();
-  if (!outputs.diagnostics) {
-    schema_sanitizer_stream_free(stream);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-  outputs.registry_json = dup_cstr(registry_plan->registry_json);
-  outputs.drifts_json = dup_cstr(registry_plan->drifts_json);
-  outputs.conversion_timestamp = dup_cstr(registry_plan->conversion_timestamp);
-  if (!outputs.registry_json || !outputs.drifts_json ||
-      !outputs.conversion_timestamp) {
-    release_registry_outputs(&outputs);
-    PyErr_NoMemory();
-    return nullptr;
-  }
-
-  Py_INCREF(stream_provider_obj);
-  state->chunk_provider = stream_provider_obj;
-  stream->private_data = state.release();
-  return pack_registry_stream_result_with_state(
-      ctx_obj, outputs.main_stream, outputs.diagnostics, outputs.registry_json,
-      outputs.drifts_json, outputs.conversion_timestamp,
-      std::move(registry_plan));
+  return pack_arrow_source_registry_stream(ctx_obj, std::move(state),
+                                           stream_provider_obj);
 }
 
 } // namespace core_abi3_internal::arrow_registry_detail

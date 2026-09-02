@@ -1,4 +1,6 @@
 // Declares CSV serialization for Arrow C streams.
+// The writer validates Arrow inputs and escapes records while preserving stream
+// ownership and diagnostics.
 
 #pragma once
 
@@ -19,20 +21,21 @@ struct WriteStats {
 
 class Output {
 public:
-  // Destroys the output target.
+  /// Destroys the output target.
   virtual ~Output() = default;
-  // Writes encoded CSV bytes.
+  /// Writes encoded CSV bytes.
   virtual Status Write(std::string_view data) = 0;
-  // Flushes buffered output.
+  /// Flushes buffered output.
   virtual Status Flush() = 0;
 };
 
-// Writes all batches from an Arrow C stream as CSV.
+/// Writes all batches from an Arrow C stream as CSV.
 Result<WriteStats> write_stream(
     ArrowArrayStream *stream, Output &out_file, std::int64_t memory_limit_bytes,
     sanitize::ThreadingMode threading_mode = sanitize::ThreadingMode::kSingle);
 
-// Returns whether an Arrow C schema can be serialized by the native CSV writer.
+/// Returns whether an Arrow C schema can be serialized by the native CSV
+/// writer.
 bool schema_is_supported(const ArrowSchema &schema);
 
 } // namespace sanitize::internal::csv_stream_writer

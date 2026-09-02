@@ -12,25 +12,25 @@
 
 namespace sanitize::internal {
 
-// Finds the planned field addressable by a dirty source key.
+/// Finds the planned field addressable by a dirty source key.
 [[nodiscard]] const sanitize::FieldIndex *
 find_planned_field(const sanitize::StructLayout &layout, std::string_view key,
                    uint64_t key_hash,
                    const sanitize::PreparedOptions &opts) noexcept;
 
-// Finds the planned field addressable by a dirty source key and raw policy.
+/// Finds the planned field addressable by a dirty source key and raw policy.
 [[nodiscard]] const sanitize::FieldIndex *
 find_planned_field(const sanitize::StructLayout &layout, std::string_view key,
                    uint64_t key_hash,
                    std::string_view field_name_policy) noexcept;
 
-// Returns whether any planned field can be addressed by a dirty source key.
+/// Returns whether any planned field can be addressed by a dirty source key.
 [[nodiscard]] bool
 matches_planned_field(const sanitize::StructLayout &layout,
                       std::string_view key, uint64_t key_hash,
                       const sanitize::PreparedOptions &opts) noexcept;
 
-// Returns whether any planned field can be addressed by a dirty source key.
+/// Returns whether any planned field can be addressed by a dirty source key.
 [[nodiscard]] bool
 matches_planned_field(const sanitize::StructLayout &layout,
                       std::string_view key, uint64_t key_hash,

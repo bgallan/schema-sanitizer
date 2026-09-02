@@ -1,5 +1,6 @@
 // Encodes Arrow direct logical schemas into the canonical logical-schema wire
-// format.
+// format. These routines keep Arrow schema interpretation and buffer ownership
+// explicit at the ABI boundary.
 
 #include "api/python_abi3/arrow_direct/schema/payload.hh"
 

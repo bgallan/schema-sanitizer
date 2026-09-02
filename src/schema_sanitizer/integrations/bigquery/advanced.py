@@ -1,4 +1,8 @@
-"""Advanced BigQuery SQL, CLI, registry, and inspection helpers."""
+"""Advanced BigQuery SQL, CLI, registry, and inspection helpers.
+
+This namespace re-exports low-level SQL, external-table, registry, sidecar, and namespace
+workflows for callers building custom integrations.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,6 @@
-// Samples the NUMA node of the calling native worker.
+// Samples the NUMA node of the calling native worker. Unsupported platforms
+// return a neutral locality domain so scheduling remains portable.
+
 #pragma once
 
 #if defined(__linux__)
@@ -8,6 +10,8 @@
 
 namespace sanitize::internal {
 
+/// Returns the calling worker's NUMA node, or the neutral domain
+/// when unavailable.
 [[nodiscard]] inline int current_locality_domain() noexcept {
 #if defined(__linux__) && defined(SYS_getcpu)
   unsigned cpu = 0;

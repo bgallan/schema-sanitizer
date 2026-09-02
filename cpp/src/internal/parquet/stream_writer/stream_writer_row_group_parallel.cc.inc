@@ -14,6 +14,7 @@ struct PreparedParquetRowGroup {
   std::size_t estimated_retained_bytes = 0;
 };
 
+/// Encodes one row group synchronously into worker-compatible prepared output.
 sanitize::Result<PreparedParquetRowGroup> prepare_serial_row_group(
     const ParquetNode &root, const std::vector<LeafColumn> &columns,
     ParquetRowGroupTask task, CompressionCodec compression_codec,
@@ -41,6 +42,8 @@ sanitize::Result<PreparedParquetRowGroup> prepare_serial_row_group(
   return prepared;
 }
 
+/// Adds row group base offset with checked offsets, counts, and
+/// retained-capacity accounting.
 void add_row_group_base_offset(RowGroupInfo *row_group,
                                std::int64_t base) noexcept {
   if (!row_group) {
@@ -60,6 +63,8 @@ void add_row_group_base_offset(RowGroupInfo *row_group,
   }
 }
 
+/// Commits prepared row group only after preparation succeeds, preserving
+/// physical output order.
 sanitize::Status
 commit_prepared_row_group(CountingOutput &out,
                           const std::vector<LeafColumn> &columns,

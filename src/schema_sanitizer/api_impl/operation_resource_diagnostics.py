@@ -1,4 +1,8 @@
-"""Composition of cross-resource operation diagnostic snapshots."""
+"""Composition of cross-resource operation diagnostic snapshots.
+
+It merges memory, storage, descriptor, external-runtime, remote-permit, and provider
+snapshots into one operation diagnostic record.
+"""
 
 from __future__ import annotations
 
@@ -63,13 +67,15 @@ def build_operation_resource_diagnostic_snapshot(resources: Any) -> dict[str, ob
             continue
         try:
             payload[key] = asdict(diagnostics())
-        except Exception:
-            pass
+        # Diagnostics must not affect resource ownership.
+        except Exception as ignored_error:
+            del ignored_error
     if coordinator is not None:
         try:
             payload["remote_io"] = asdict(coordinator.permit_snapshot())
-        except Exception:
-            pass
+        # Diagnostics must not affect resource ownership.
+        except Exception as ignored_error:
+            del ignored_error
     return payload
 
 

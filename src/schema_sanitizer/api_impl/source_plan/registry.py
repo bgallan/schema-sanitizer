@@ -1,4 +1,8 @@
-"""Registry-backed source-plan streams, materialization, and file output."""
+"""Registry-backed source-plan streams, materialization, and file output.
+
+It opens owned registry streams, appends drift metadata, and drives either analytical
+materialization or file output with authoritative cleanup.
+"""
 
 from __future__ import annotations
 
@@ -15,7 +19,6 @@ from schema_sanitizer.input_impl.source_plan import (
     SEQUENCE,
     NativeSourcePlan,
     _flatten_path_source_sequence_or_none,
-    _mark_native_path_sources_route,
     _open_path_sources_auto_registry_stream,
 )
 
@@ -44,8 +47,9 @@ from ..results import (
     convert_arrow_stream_output,
 )
 from ..stream_output import write_raw_stream_to_file
-from ..streams import Stream
-from .remote import RemotePathSourceChunkProvider, prefetched_remote_chunks
+from ..streams import Stream, patch_input_route_diagnostics
+from .remote import RemotePathSourceChunkProvider
+from .remote_cleanup import take_prefetched_chunks
 
 
 def _cleanup_opened_registry_stream_capsule(capsule: PreparedFinalizerCleanup) -> None:
@@ -95,6 +99,7 @@ class OpenedSourcePlanRegistryStream:
     _terminal_close_items: list[Any] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        """Validate and normalize the initialized instance state."""
         self._finalizer_capsule = reserve_finalizer_cleanup(_cleanup_opened_registry_stream_capsule)
         self._finalizer_ticket = self._finalizer_capsule.ticket
 
@@ -238,7 +243,7 @@ def _open_remote_registry_stream(
         plan.payload.threading_mode,
         plan.payload.memory_limit_bytes,
     )
-    retained_chunks, remaining_start = prefetched_remote_chunks(plan.payload)
+    retained_chunks, remaining_start = take_prefetched_chunks(plan.payload)
     probe_provider = RemotePathSourceChunkProvider(
         retained_chunks=retained_chunks,
         remaining_manifest=plan.payload,
@@ -264,7 +269,6 @@ def _open_remote_registry_stream(
             native_registry_state=native_registry_state,
             skip_invalid_json_sources=True,
         )
-        _mark_native_path_sources_route()
     except BaseException as exc:
         for label, provider in (("probe", probe_provider), ("stream", stream_provider)):
             _cleanup_with_note(
@@ -304,6 +308,7 @@ def open_source_plan_registry_stream(
         "timestamp_columns": timestamp_columns,
         "native_registry_state": native_registry_state,
     }
+    opened: OpenedSourcePlanRegistryStream | None
     if plan.kind == PATH_SOURCES:
         raw = _open_path_sources_auto_registry_stream(
             raw_context,
@@ -311,18 +316,29 @@ def open_source_plan_registry_stream(
             call_options,
             **common,
         )
-        return _opened_raw_registry_stream(raw)
-    if plan.kind == REMOTE_CHUNKS:
-        return _open_remote_registry_stream(raw_context, plan, call_options, **common)
-    if plan.kind == PARQUET_ARROW_SOURCES:
+        opened = _opened_raw_registry_stream(raw)
+    elif plan.kind == REMOTE_CHUNKS:
+        opened = _open_remote_registry_stream(raw_context, plan, call_options, **common)
+    elif plan.kind == PARQUET_ARROW_SOURCES:
         raw = parquet_multisource_registry_sink_raw_or_none(
             raw_context,
             plan.payload,
             call_options,
             **common,
         )
-        return None if raw is None else _opened_raw_registry_stream(raw)
-    return None
+        opened = None if raw is None else _opened_raw_registry_stream(raw)
+    else:
+        opened = None
+    if opened is not None:
+        patch_input_route_diagnostics(
+            opened.diagnostics,
+            source_route=plan.kind,
+            plan_route=plan.route_name,
+            parquet_route=(
+                "native_registry_source_plan" if plan.kind == PARQUET_ARROW_SOURCES else None
+            ),
+        )
+    return opened
 
 
 def _result_from_opened(opened: OpenedSourcePlanRegistryStream, owner: Any) -> Result:

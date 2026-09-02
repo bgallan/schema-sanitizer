@@ -1,4 +1,6 @@
-// Declares Arrow C Data value extraction for the direct frontend.
+// Declares Arrow C Data value extraction for the direct frontend. These
+// routines keep Arrow schema interpretation and buffer ownership explicit at
+// the ABI boundary.
 
 #pragma once
 
@@ -40,16 +42,16 @@ struct ArrowBatchStorage {
   std::deque<std::string> strings;
 };
 
-// Stores a value reference owned by the batch storage.
+/// Stores a value reference owned by the batch storage.
 const ArrowValueRef *store_value_ref(ArrowBatchStorage *storage,
                                      const ArrowInputNode *node,
                                      const ArrowArray *array, int64_t row);
 
-// Converts one Arrow value reference into the internal ValueView model.
+/// Converts one Arrow value reference into the internal ValueView model.
 sanitize::ValueView value_from_ref(const ArrowValueRef *ref);
 
-// Returns a value for one row, retaining a heap reference only when the
-// resulting ValueView is a nested container that must outlive this call.
+/// Returns one row value and retains a heap reference for nested containers.
+/// The retained reference lets the resulting value view outlive this call.
 sanitize::ValueView value_at(ArrowBatchStorage *storage,
                              const ArrowInputNode *node,
                              const ArrowArray *array, int64_t row);

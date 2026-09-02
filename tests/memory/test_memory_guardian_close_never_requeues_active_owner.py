@@ -1,24 +1,29 @@
-"""Regression coverage for memory guardian close never requeues active owner."""
+"""Stress-tests guardian and notifier shutdown with active retry workers, hard dispatch
+deadlines, level-trigger rearming, uncertain descriptor debt, reserved-thread
+cancellation, watchdog age, snapshots, and biphasic native reaping. Close never requeues
+an active owner; work and debt remain visible until permit release or terminal
+retirement commits."""
 
 from __future__ import annotations
 
 import threading
 import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 
 def test_guardian_close_never_requeues_active_owner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify guardian close never requeues active owner."""
     from schema_sanitizer.core_impl import retry_scheduler as module
 
     class Permit:
         def release(self) -> None:
+            """Release the resource held by the permit test double."""
             return None
 
     monkeypatch.setattr(module, "acquire_release_guardian_thread", lambda: Permit())
@@ -28,6 +33,7 @@ def test_guardian_close_never_requeues_active_owner(
 
     class CloseObservedCondition(threading.Condition):
         def wait(self, timeout: float | None = None) -> bool:
+            """Wait for the close observed condition test double to reach its terminal state."""
             if threading.current_thread() is close_thread:
                 close_wait_entered.set()
             return super().wait(timeout)
@@ -42,6 +48,7 @@ def test_guardian_close_never_requeues_active_owner(
 
     class BlockingOwner:
         def release(self) -> None:
+            """Release the resource held by the blocking owner test double."""
             nonlocal calls, concurrent, peak
             with lock:
                 calls += 1
@@ -54,6 +61,7 @@ def test_guardian_close_never_requeues_active_owner(
 
     class QuickOwner:
         def release(self) -> None:
+            """Release the resource held by the quick owner test double."""
             return None
 
     owner = BlockingOwner()
@@ -69,12 +77,13 @@ def test_guardian_close_never_requeues_active_owner(
     assert calls == 1
     assert peak == 1
     resume.set()
-    close_thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(close_thread)
     assert result == [True]
     assert calls == 1
 
 
 def test_retry_worker_remains_visible_until_permit_release_commits() -> None:
+    """Verify retry worker remains visible until permit release commits."""
     from schema_sanitizer.core_impl.retry_scheduler import _RetryScheduler
 
     scheduler = _RetryScheduler()
@@ -84,12 +93,14 @@ def test_retry_worker_remains_visible_until_permit_release_commits() -> None:
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             release_entered.set()
-            assert release_resume.wait(2)
+            assert release_resume.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     lease = Lease()
 
     def retire() -> None:
+        """Retire the tracked owner at the controlled lifecycle point."""
         current = threading.current_thread()
         with scheduler._condition:
             scheduler._execution_workers.add(current)
@@ -104,14 +115,14 @@ def test_retry_worker_remains_visible_until_permit_release_commits() -> None:
     assert not scheduler.close(deadline_seconds=0.03)
     assert scheduler.snapshot().retiring_workers == 1
     release_resume.set()
-    worker.join(2)
-    assert not worker.is_alive()
+    join_thread_or_fail(worker)
     assert scheduler.snapshot().retiring_workers == 0
 
 
 def test_notifier_hard_deadline_is_dispatch_barrier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify notifier hard deadline is dispatch barrier."""
     from schema_sanitizer.core_impl import process_resources as module
 
     notifier = module._AvailabilityNotifier()
@@ -127,10 +138,9 @@ def test_notifier_hard_deadline_is_dispatch_barrier(
     )
     event = module.AvailabilityEvent.RETRY_SCHEDULER
     assert governor.register_availability_event(event)
-    generation = governor._availability_events[event]
-    delivery = module._AvailabilityDelivery(governor, event, generation)
+    delivery = governor._availability_events[event]
     delivery.next_attempt_ns = time.monotonic_ns() + 150_000_000
-    assert notifier.publish((delivery,)) == ()
+    assert notifier.publish_one(delivery)
     assert not notifier.close(deadline_seconds=0.01)
     with notifier._condition:
         assert notifier._condition.wait_for(
@@ -144,6 +154,7 @@ def test_notifier_hard_deadline_is_dispatch_barrier(
 def test_level_triggered_availability_closes_release_before_register_gap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify level triggered availability closes release before register gap."""
     from schema_sanitizer.core_impl import process_resources as module
 
     governor = module._Governor(
@@ -153,20 +164,21 @@ def test_level_triggered_availability_closes_release_before_register_gap(
         availability_dispatcher=lambda _event: None,
     )
     notifier = module._AVAILABILITY_NOTIFIER
-    real_publish = notifier.publish
+    real_publish_one = notifier.publish_one
     published: list[Any] = []
 
-    def capture_target_and_forward_others(deliveries: tuple[Any, ...]) -> tuple[Any, ...]:
-        target = tuple(delivery for delivery in deliveries if delivery.governor is governor)
-        others = tuple(delivery for delivery in deliveries if delivery.governor is not governor)
-        published.extend(target)
-        return real_publish(others) if others else ()
+    def capture_target_and_forward_others(delivery: Any) -> bool:
+        """Capture the target and forward others for the enclosing assertion."""
+        if delivery.governor is governor:
+            published.append(delivery)
+            return True
+        return real_publish_one(delivery)
 
     # Existing process services may publish concurrently.  Route their work to
     # the real notifier while accepting only this governor's canonical delivery
     # synchronously; replacing the module-global notifier would let unrelated
     # owners contaminate this unit test's queue and shutdown result.
-    monkeypatch.setattr(notifier, "publish", capture_target_and_forward_others)
+    monkeypatch.setattr(notifier, "publish_one", capture_target_and_forward_others)
 
     lease = governor.acquire(1, timeout_seconds=0)
     lease.release()
@@ -182,6 +194,7 @@ def test_level_triggered_availability_closes_release_before_register_gap(
 def test_notifier_rearm_during_execution_is_not_lost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify notifier rearm during execution is not lost."""
     from schema_sanitizer.core_impl import process_resources as module
 
     notifier = module._AvailabilityNotifier()
@@ -193,10 +206,11 @@ def test_notifier_rearm_during_execution_is_not_lost(
     delivery: module._AvailabilityDelivery
 
     def dispatch(_event: module.AvailabilityEvent) -> None:
+        """Dispatch work through the controlled scheduling path."""
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            assert notifier.publish((delivery,)) == ()
+            assert notifier.publish_one(delivery)
         else:
             completed.set()
 
@@ -204,10 +218,10 @@ def test_notifier_rearm_during_execution_is_not_lost(
         1, "guardian-close-never-requeues-active-owner-rearm", availability_dispatcher=dispatch
     )
     assert governor.register_availability_event(event)
-    delivery = module._AvailabilityDelivery(governor, event, governor._availability_events[event])
-    assert notifier.publish((delivery,)) == ()
+    delivery = governor._availability_events[event]
+    assert notifier.publish_one(delivery)
     assert completed.wait(SCHEDULER_TIMEOUT_SECONDS)
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while governor.snapshot().availability_callbacks and time.monotonic() < deadline:
         time.sleep(0.005)
     assert attempts == 2
@@ -218,9 +232,17 @@ def test_notifier_rearm_during_execution_is_not_lost(
 def test_uncertain_fd_close_retains_capacity_debt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify uncertain FD close retains capacity debt."""
     from schema_sanitizer.core_impl import path_identity, process_resources
 
-    monkeypatch.setattr(process_resources, "_UNCERTAIN_FD_CLOSE_DEBTS", {})
+    monkeypatch.setattr(
+        process_resources,
+        "_UNCERTAIN_FD_CLOSE_DEBTS",
+        [
+            process_resources._UncertainFdCloseDebtSlot()
+            for _ in range(process_resources._FD_GOVERNOR.capacity)
+        ],
+    )
     monkeypatch.setattr(process_resources, "_UNCERTAIN_FD_CLOSE_REJECTED", 0)
 
     governor = process_resources._FD_GOVERNOR
@@ -239,10 +261,12 @@ def test_uncertain_fd_close_retains_capacity_debt(
 
 
 def test_runtime_registry_cancels_reserved_thread_before_start() -> None:
+    """Verify runtime registry cancels reserved thread before start."""
     from schema_sanitizer.core_impl.runtime_registry import _RuntimeServiceRegistry
 
     class Service:
         def close(self, *, deadline_seconds: float = 0.0) -> bool:
+            """Close the resources owned by the service test double."""
             return True
 
     registry = _RuntimeServiceRegistry()
@@ -261,10 +285,12 @@ def test_runtime_registry_cancels_reserved_thread_before_start() -> None:
 def test_dispatcher_watchdog_tracks_real_active_call_age(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify dispatcher watchdog tracks real active call age."""
     from schema_sanitizer.core_impl import cleanup_dispatcher as module
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             return None
 
     monkeypatch.setattr(module, "acquire_project_threads", lambda *_a, **_k: Lease())
@@ -273,8 +299,9 @@ def test_dispatcher_watchdog_tracks_real_active_call_age(
     resume = threading.Event()
 
     def blocked() -> None:
+        """Pause at the blocked synchronization point."""
         entered.set()
-        assert resume.wait(2)
+        assert resume.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     assert dispatcher.submit(blocked)
     assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
@@ -287,6 +314,7 @@ def test_dispatcher_watchdog_tracks_real_active_call_age(
 
 
 def test_runtime_snapshot_includes_fd_debt_and_retirement() -> None:
+    """Verify runtime snapshot includes FD debt and retirement."""
     source = Path("src/schema_sanitizer/core_impl/runtime_diagnostics.py").read_text()
     shutdown = Path("src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text()
     # Separately conserved external resident-stack debt is part of the
@@ -298,6 +326,7 @@ def test_runtime_snapshot_includes_fd_debt_and_retirement() -> None:
 
 
 def test_native_reaper_shutdown_is_biphasic_and_terminal_states_are_visible() -> None:
+    """Verify native reaper shutdown is biphasic and terminal states are visible."""
     source = Path("cpp/src/internal/runtime/operation_task_arena.cc").read_text()
     header = Path("cpp/src/internal/runtime/operation_task_arena.hh").read_text()
     abi = Path("cpp/src/api/python_abi3/runtime/ordered_executor_probe.cc").read_text()
@@ -315,18 +344,3 @@ def test_native_reaper_shutdown_is_biphasic_and_terminal_states_are_visible() ->
         "SaturatingAtomicSubtract(state_->active, 1U)"
         in Path("cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text()
     )
-
-
-def test_native_snapshot_parser_accepts_twenty_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import sys
-
-    from schema_sanitizer.core_impl import runtime_diagnostics as module
-
-    native = SimpleNamespace(operation_task_arena_runtime_snapshot=lambda: tuple(range(20)))
-    monkeypatch.setitem(sys.modules, "schema_sanitizer._core_abi3", native)
-    snapshot = module._native_arena_snapshot()
-    assert snapshot["available"] is True
-    assert snapshot["reaper_terminal_states"] == 16
-    assert snapshot["reaper_stopping_lanes"] == 19

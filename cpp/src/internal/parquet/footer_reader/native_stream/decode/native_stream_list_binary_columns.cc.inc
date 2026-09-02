@@ -1,6 +1,10 @@
-// Native Parquet decode owner: binary columns.
+// Materializes repeated binary columns from delta-length or plain Parquet pages
+// into Arrow lists. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
 
 // ---- native_stream_decode_delta_length_binary ----
+/// Materializes repeated DELTA_LENGTH_BYTE_ARRAY values into Arrow list-element
+/// buffers.
 sanitize::Status materialize_simple_list_delta_length_byte_array_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,
@@ -165,6 +169,8 @@ sanitize::Status materialize_simple_list_delta_length_byte_array_column(
 }
 
 // ---- native_stream_decode_plain_binary ----
+/// Materializes repeated PLAIN byte-array values into Arrow list-element
+/// buffers.
 sanitize::Status materialize_simple_list_plain_byte_array_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeRepeatedLeafWindow &window, NativeParquetPageScratch *scratch,

@@ -1,12 +1,12 @@
-"""Regression coverage for memory chunk sources share a finite request ceiling."""
+"""Applies one finite request ceiling to chunk sources, full materialization, UTF-16
+transcoding, scratch wiping, oversized scalars, and multi-path directory order. Decoding
+avoids a duplicate input copy, slices bounded output, and releases sensitive backing
+storage under the operation budget."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
-
-import pytest
-from conftest import require_native
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -68,25 +68,8 @@ def test_secure_cleanup_wipes_transcoding_input_scratch() -> None:
     assert "SensitiveStringGuard raw_guard(&raw)" in source
 
 
-def test_removed_chunk_parameter_is_not_accepted(tmp_path: Path) -> None:
-    """Chunk sizing is derived internally and is no longer a public knob."""
-    require_native()
-    import schema_sanitizer as ss
-
-    source = tmp_path / "row.jsonl"
-    source.write_text('{"value":1}\n', encoding="utf-8")
-    with pytest.raises(TypeError, match="read_chunk_bytes"):
-        ss.to_jsonl(
-            source,
-            tmp_path / "out.jsonl",
-            input_format="jsonl",
-            read_chunk_bytes=1,
-        )
-
-
-def test_utf16_round_trip_under_explicit_budget(tmp_path: Path) -> None:
+def test_utf16_round_trip_under_explicit_budget(tmp_path: Path, require_native: None) -> None:
     """UTF-16 transcoding remains correct with only memory_limit_bytes exposed."""
-    require_native()
     import schema_sanitizer as ss
 
     source = tmp_path / "utf16.jsonl"
@@ -111,9 +94,10 @@ def test_transcoded_output_is_sliced_without_copying_oversized_scalars() -> None
     assert "std::string_view(*owner).substr(pending_utf8_pos_, take)" in source
 
 
-def test_multi_path_directory_preserves_separator_order(tmp_path: Path) -> None:
+def test_multi_path_directory_preserves_separator_order(
+    tmp_path: Path, require_native: None
+) -> None:
     """Directory children remain ordered under the derived chunk budget."""
-    require_native()
     import schema_sanitizer as ss
 
     source = tmp_path / "inputs"

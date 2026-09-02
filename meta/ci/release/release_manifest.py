@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
-"""Create or verify the deterministic CI manifest for one PyPI release set."""
+"""Create or verify the deterministic CI manifest for one PyPI release set.
+
+It inventories release artifacts, hashes their bytes, serializes canonical JSON, and
+verifies a saved manifest without ambiguity.
+"""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
+import os
 import re
+import stat
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -27,13 +34,57 @@ def _positive_integer(value: str) -> int:
     return parsed
 
 
-def _sha256(path: Path) -> str:
-    """Return the lowercase SHA-256 digest of one regular file."""
+def _artifact_metadata(path: Path) -> dict[str, object]:
+    """Hash one stable regular artifact and return its manifest metadata."""
+    path_identity = path.stat(follow_symlinks=False)
     digest = hashlib.sha256()
     with path.open("rb") as handle:
+        opened_identity = os.fstat(handle.fileno())
+        if not stat.S_ISREG(opened_identity.st_mode) or (
+            opened_identity.st_dev,
+            opened_identity.st_ino,
+        ) != (path_identity.st_dev, path_identity.st_ino):
+            raise AssertionError(f"release artifact changed before hashing: {path}")
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+        final_identity = os.fstat(handle.fileno())
+    current_identity = path.stat(follow_symlinks=False)
+    identity_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+    if any(
+        getattr(opened_identity, field) != getattr(final_identity, field)
+        or getattr(final_identity, field) != getattr(current_identity, field)
+        for field in identity_fields
+    ):
+        raise AssertionError(f"release artifact changed while hashing: {path}")
+    return {
+        "filename": path.name,
+        "sha256": digest.hexdigest(),
+        "size": final_identity.st_size,
+    }
+
+
+def _write_text_atomically(destination: Path, content: str) -> None:
+    """Replace one regular text output atomically and skip unchanged bytes."""
+    payload = content.encode("utf-8")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.is_symlink():
+        raise AssertionError(f"manifest output must not be a symlink: {destination}")
+    if destination.exists() and not destination.is_file():
+        raise AssertionError(f"manifest output must be a regular file: {destination}")
+    if destination.is_file() and destination.read_bytes() == payload:
+        return
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _release_artifacts(paths: Iterable[Path]) -> list[Path]:
@@ -61,9 +112,18 @@ def build_release_manifest(
     """Validate a release set and return its deterministic audit manifest."""
     if _GIT_SHA_PATTERN.fullmatch(github_sha) is None:
         raise ValueError("github_sha must be a lowercase 40- or 64-character Git object ID")
-    if github_run_id < 1 or github_run_attempt < 1:
+    if (
+        isinstance(github_run_id, bool)
+        or not isinstance(github_run_id, int)
+        or isinstance(github_run_attempt, bool)
+        or not isinstance(github_run_attempt, int)
+        or github_run_id < 1
+        or github_run_attempt < 1
+    ):
         raise ValueError("GitHub run ID and attempt must be positive integers")
 
+    if version_file.is_symlink() or not version_file.is_file():
+        raise AssertionError(f"version source must be a regular file: {version_file}")
     version = version_file.read_text(encoding="utf-8").strip()
     artifacts = _release_artifacts(paths)
     release_version = validate_release_set(artifacts, expected_version=version)
@@ -73,14 +133,7 @@ def build_release_manifest(
         )
 
     return {
-        "artifacts": [
-            {
-                "filename": artifact.name,
-                "sha256": _sha256(artifact),
-                "size": artifact.stat().st_size,
-            }
-            for artifact in artifacts
-        ],
+        "artifacts": [_artifact_metadata(artifact) for artifact in artifacts],
         "format": _MANIFEST_FORMAT,
         "project": RELEASE_PROJECT,
         "provenance": {
@@ -102,6 +155,8 @@ def _verify_serialized_manifest(
     expected: dict[str, object],
 ) -> None:
     """Verify both manifest values and their canonical JSON representation."""
+    if manifest_file.is_symlink() or not manifest_file.is_file():
+        raise AssertionError(f"manifest must be a regular file: {manifest_file}")
     serialized = manifest_file.read_text(encoding="utf-8")
     actual = json.loads(serialized)
     if actual != expected:
@@ -127,8 +182,7 @@ def write_release_manifest(
         github_run_id=github_run_id,
         github_run_attempt=github_run_attempt,
     )
-    manifest_file.parent.mkdir(parents=True, exist_ok=True)
-    manifest_file.write_text(canonical_json(expected), encoding="utf-8")
+    _write_text_atomically(manifest_file, canonical_json(expected))
     _verify_serialized_manifest(manifest_file, expected)
 
 

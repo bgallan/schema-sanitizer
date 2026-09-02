@@ -1,4 +1,6 @@
 // Declares worker-local packet preparation for ordered materialization.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 
@@ -66,17 +68,19 @@ public:
 
   ~ParallelRowPreparer();
 
-  // Prepares one ordinary packet or one disjoint column group.
+  /// Prepares one ordinary packet or one disjoint column group.
   sanitize::Result<PreparedRowsPacket>
   Prepare(MaterializationTask &&task, std::size_t worker_index,
           sanitize::internal::StopToken stop);
 
+  /// Returns the number of disjoint column groups prepared for each source
+  /// packet.
   [[nodiscard]] std::size_t column_group_count() const noexcept {
     return column_ranges_.size();
   }
 
-  // Returns group indices in deterministic critical-path-first submission
-  // order. Arrow merge and error reduction still use frozen column order.
+  /// Returns column groups in deterministic critical-path-first submission
+  /// order.
   [[nodiscard]] std::span<const std::size_t>
   column_group_submission_order() const noexcept {
     return column_submission_order_;
@@ -86,31 +90,41 @@ private:
   struct WorkerState;
   struct ColumnMaterializerState;
 
+  /// Selects row and columnar preparation paths for one frontend and compiled
+  /// plan.
   ParallelRowPreparer(std::string frontend_name,
                       std::shared_ptr<const CompiledPlan> plan,
                       PreparedOptionsPtr opts);
 
+  /// Prepares an owned row packet through the row-wise or columnar worker path.
   sanitize::Result<PreparedRowsPacket>
   prepare_rows(OwnedRowPacket &&owned, std::size_t worker_index,
                sanitize::internal::StopToken stop);
 
+  /// Prepares one row and retains conversion diagnostics or its terminal
+  /// failure.
   sanitize::Result<PreparedRowPacket>
   prepare_one(const RowRef &row, std::size_t worker_index,
               sanitize::internal::StopToken stop);
 
+  /// Materializes one raw frontend row with worker-local parser state.
   sanitize::Result<PreparedRow> prepare_raw(const RowRef &row,
                                             std::size_t worker_index,
                                             IngestDiagnostics *diagnostics);
 
+  /// Materializes a row packet directly into one worker-owned Arrow array.
   sanitize::Result<PreparedRowsPacket>
   prepare_columnar(OwnedRowPacket &&owned, std::size_t worker_index,
                    sanitize::internal::StopToken stop);
 
+  /// Materializes one column group for a shared partitioned input packet.
   sanitize::Result<PreparedRowsPacket> prepare_column_partition(
       const std::shared_ptr<const ColumnPartitionInput> &input,
       std::size_t group_index, std::size_t column_state_index,
       sanitize::internal::StopToken stop);
 
+  /// Allocates reusable per-column-group materializers for the bounded packet
+  /// window.
   sanitize::Status
   initialize_column_states(const std::shared_ptr<MemoryPool> &parent,
                            const ExecutionPolicy &policy);

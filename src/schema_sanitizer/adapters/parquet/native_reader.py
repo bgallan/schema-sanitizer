@@ -1,4 +1,8 @@
-"""Native Parquet reader preflight, contracts, and stream opening."""
+"""Native Parquet reader preflight, contracts, and stream opening.
+
+It inspects footer, writer, projection, schema, and memory evidence to plan and open a
+native Arrow stream or report a precise decline.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ...errors import SchemaSanitizerResourceError
-from .contract_gates.native import (
+from .contract_gates import (
     _NATIVE_PARQUET_WRITER_CREATED_BY,
     _native_nested_contract_diagnostics,
     _native_nested_contract_status_from_summary,
@@ -44,12 +48,14 @@ def parquet_resource_diagnostics(info: dict[str, Any]) -> dict[str, Any]:
                 continue
             try:
                 compressed += max(0, int(column.get("total_compressed_size") or 0))
-            except Exception:
-                pass
+            # Malformed advisory footer counters are intentionally ignored.
+            except Exception as ignored_error:
+                del ignored_error
             try:
                 decompressed += max(0, int(column.get("total_uncompressed_size") or 0))
-            except Exception:
-                pass
+            # Malformed advisory footer counters are intentionally ignored.
+            except Exception as ignored_error:
+                del ignored_error
     return {
         "compressed_bytes": compressed,
         "decompressed_bytes": decompressed,

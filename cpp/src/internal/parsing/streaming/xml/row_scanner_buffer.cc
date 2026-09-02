@@ -1,4 +1,6 @@
 // Implements XML row scanner buffering and refill helpers.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/streaming/xml/row_scanner.hh"
 

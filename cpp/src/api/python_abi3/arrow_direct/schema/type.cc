@@ -1,4 +1,6 @@
-// Parses scalar and dispatches nested Arrow C schema nodes.
+// Parses scalar and dispatches nested Arrow C schema nodes. These routines keep
+// Arrow schema interpretation and buffer ownership explicit at the ABI
+// boundary.
 
 #include "api/python_abi3/arrow_direct/schema/parser_internal.hh"
 
@@ -11,6 +13,8 @@
 namespace core_abi3_internal::arrow_schema_internal {
 namespace {
 
+/// Maps an Arrow integer format to the native signedness and width
+/// classification.
 std::optional<ArrowStorageKind> integer_storage_kind(std::string_view format) {
   if (format == "c") {
     return ArrowStorageKind::kInt8;
@@ -38,6 +42,8 @@ std::optional<ArrowStorageKind> integer_storage_kind(std::string_view format) {
 
 } // namespace
 
+/// Maps an Arrow C Data format into logical type and materialization-node
+/// metadata.
 sanitize::Result<sanitize::LogicalType>
 parse_arrow_type(const ArrowSchema *schema, ArrowInputNode *node,
                  const ArrowDirectOptions &options) {

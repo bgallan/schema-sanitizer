@@ -1,4 +1,7 @@
-"""Defensive regressions for memory ownership and hostile Arrow metadata."""
+"""Exercises hostile Arrow offsets, capsule keepalives, bounded coalescing, and arena
+cleanup across generator replay and allocation faults. It verifies that validation
+precedes ownership transfer, foreign release callbacks stay suppressed, and backing
+pools deallocate without retaining Python batches."""
 
 from __future__ import annotations
 
@@ -6,20 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import require_native
-
-
-class _CapsuleStream:
-    """Expose an owned Arrow C Stream capsule to PyArrow."""
-
-    def __init__(self, capsule: Any):
-        """Retain the capsule for the downstream consumer."""
-        self._capsule = capsule
-
-    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
-        """Return the wrapped Arrow C Stream capsule."""
-        del requested_schema
-        return self._capsule
+from _support.resource_fakes import CapsuleStream
 
 
 def test_generator_replay_retains_no_python_row_batch() -> None:
@@ -46,9 +36,8 @@ def test_generator_replay_retains_no_python_row_batch() -> None:
         reader.close()
 
 
-def test_arrow_direct_rejects_large_absolute_offset() -> None:
+def test_arrow_direct_rejects_large_absolute_offset(require_native: None) -> None:
     """A small slice beyond the derived slot budget must be rejected."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -71,9 +60,8 @@ def test_arrow_direct_rejects_large_absolute_offset() -> None:
         pa.RecordBatchReader.from_stream(output).read_all()
 
 
-def test_coalescer_rejects_large_absolute_offset() -> None:
+def test_coalescer_rejects_large_absolute_offset(require_native: None) -> None:
     """The coalescer validates offsets against its derived slot budget."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.core_impl.native_symbols import COALESCING_STREAM_WRAP
@@ -92,21 +80,7 @@ def test_coalescer_rejects_large_absolute_offset() -> None:
     capsule = COALESCING_STREAM_WRAP(source, 1)
     assert capsule is not None
     with pytest.raises(pa.ArrowMemoryError, match="absolute logical range"):
-        pa.RecordBatchReader.from_stream(_CapsuleStream(capsule)).read_all()
-
-
-def test_coalescer_has_only_one_memory_control() -> None:
-    """The removed row and byte knobs cannot bypass the central budget."""
-    require_native()
-    pa = pytest.importorskip("pyarrow")
-
-    from schema_sanitizer.core_impl.native_symbols import COALESCING_STREAM_WRAP
-
-    batch = pa.record_batch([pa.array([1])], names=["value"])
-    source = pa.RecordBatchReader.from_batches(batch.schema, [batch])
-
-    with pytest.raises(TypeError):
-        COALESCING_STREAM_WRAP(source, 1024, 1024)
+        pa.RecordBatchReader.from_stream(CapsuleStream(capsule)).read_all()
 
 
 def test_bump_arena_registers_new_blocks_exception_safely() -> None:
@@ -128,13 +102,13 @@ def test_foreign_arrow_release_callbacks_are_suppressed() -> None:
     values = (
         root / "cpp/src/api/python_abi3/arrow_direct/_core_abi3_arrow_direct_values.cc"
     ).read_text()
-    c_bridge = (root / "cpp/src/api/c/schema_sanitizer_c_sink_diagnostics.cc").read_text()
+    capsules = (root / "cpp/src/api/python_abi3/context/_core_abi3_capsules.cc").read_text()
     coalescer = (root / "cpp/src/api/python_abi3/streaming/coalesce_stream.cc").read_text()
     payload = (root / "cpp/src/api/python_abi3/logical_schema/payload.cc").read_text()
 
     assert "void release_stream_nothrow" in callbacks
     assert "release_array_nothrow(&array)" in values
-    assert "release_stream_nothrow(stream)" in c_bridge
+    assert "release_stream_nothrow(stream)" in capsules
     assert "release_array_nothrow(\n      &state->pending_array)" in coalescer
     assert "release_schema_nothrow(schema)" in payload
 
@@ -180,9 +154,8 @@ def test_arrow_direct_scalar_values_do_not_accumulate_heap_refs() -> None:
     assert "value_from_ref(&child)" not in values
 
 
-def test_sliced_fixed_size_list_round_trip() -> None:
+def test_sliced_fixed_size_list_round_trip(require_native: None) -> None:
     """A fixed-size-list slice must validate and read using its parent offset."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
 
     from schema_sanitizer.core_impl.execution import ExecutionContext

@@ -1,5 +1,9 @@
-// ---- native_stream_output_field ----
+// Materializes one validated row group into an owned recursive Arrow array and
+// callback state. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
 
+/// Materializes one recursive output field and advances the shared child-array
+/// cursor.
 sanitize::Result<ArrowArray *> materialize_native_recursive_output_field(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeParquetOutputField &field, const NativeFlatRowWindow &window,
@@ -43,6 +47,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_output_field(
 
 // ---- native_stream_repeated_column ----
 
+/// Materializes one repeated leaf column and reports its Arrow length and null
+/// count.
 sanitize::Status materialize_native_repeated_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeFlatRowWindow &window, NativeParquetPageScratch *page_scratch,
@@ -135,6 +141,7 @@ sanitize::Status materialize_native_repeated_column(
 
 // ---- native_stream_flat_column ----
 
+/// Decodes one flat column into the matching Arrow child buffers.
 sanitize::Status materialize_native_flat_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeFlatRowWindow &window, NativeParquetPageScratch *page_scratch,
@@ -190,6 +197,7 @@ sanitize::Status materialize_native_flat_column(
 
 // ---- native_stream_column ----
 
+/// Dispatches one row-group column to flat or repeated native materialization.
 sanitize::Status materialize_native_row_group_column(
     std::ifstream &file, const ColumnChunkInfo &column,
     const NativeFlatRowWindow &window, NativeParquetPageScratch *page_scratch,
@@ -224,6 +232,8 @@ sanitize::Status materialize_native_row_group_column(
 
 // ---- lazy row-group preparation ----
 
+/// Releases decoded pages, indexes, dictionaries, and native planning buffers
+/// for one column.
 void release_native_column_runtime_state(ColumnChunkInfo *column) {
   if (!column) {
     return;
@@ -239,6 +249,8 @@ void release_native_column_runtime_state(ColumnChunkInfo *column) {
   column->native_read_plan_decoded = false;
 }
 
+/// Drops row-group scratch and reservations after its Arrow output has been
+/// handed off.
 void release_native_row_group_runtime_state(RowGroupInfo *row_group) {
   if (!row_group) {
     return;
@@ -248,6 +260,8 @@ void release_native_row_group_runtime_state(RowGroupInfo *row_group) {
   }
 }
 
+/// Clears page scratch and releases buffers whose capacity exceeds the retained
+/// limit.
 void trim_native_page_scratch(NativeParquetPageScratch *scratch) {
   if (!scratch) {
     return;
@@ -285,6 +299,8 @@ void trim_native_page_scratch(NativeParquetPageScratch *scratch) {
   }
 }
 
+/// Validates and materializes one bounded Parquet row group into an owned Arrow
+/// array.
 sanitize::Status prepare_native_row_group(NativeParquetStreamState *stream,
                                           std::size_t row_group_index) {
   if (!stream || row_group_index >= stream->footer.row_groups.size()) {
@@ -334,6 +350,8 @@ sanitize::Status prepare_native_row_group(NativeParquetStreamState *stream,
 
 // ---- parallel native column materialization ----
 
+/// Bounds column parallelism by useful work, scratch memory, and available
+/// task-arena workers.
 std::size_t native_parquet_column_worker_count(
     const NativeParquetStreamState &stream, const RowGroupInfo &row_group,
     const NativeFlatRowWindow &window,
@@ -346,6 +364,7 @@ sanitize::Status materialize_native_row_group_columns_parallel(
 
 // ---- native_stream_array ----
 
+/// Builds the next row-group window as a root Arrow struct array.
 sanitize::Status build_native_row_group_array(ArrowArrayStream *owner_stream,
                                               NativeParquetStreamState *stream,
                                               ArrowArray *out) {
@@ -441,6 +460,8 @@ sanitize::Status build_native_row_group_array(ArrowArrayStream *owner_stream,
   }
   return {};
 }
+/// Returns the native reader's stable last-error string for the Arrow stream
+/// callback ABI.
 const char *native_parquet_stream_last_error(ArrowArrayStream *stream) {
   if (!stream) {
     return "invalid native Parquet reader stream";
@@ -451,6 +472,8 @@ const char *native_parquet_stream_last_error(ArrowArrayStream *stream) {
                : nullptr;
 }
 
+/// Deletes native reader state and clears the Arrow stream in its owning
+/// process.
 void native_parquet_stream_release(ArrowArrayStream *stream) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -463,6 +486,8 @@ void native_parquet_stream_release(ArrowArrayStream *stream) {
   sanitize::internal::cdata_stream::clear_stream(stream);
 }
 
+/// Builds a fresh Arrow schema through the callback wrapper and records any
+/// failure text.
 int native_parquet_stream_get_schema(ArrowArrayStream *stream,
                                      ArrowSchema *out) {
   if (!stream) {
@@ -477,6 +502,8 @@ int native_parquet_stream_get_schema(ArrowArrayStream *stream,
       [&](ArrowSchema *schema) { return build_native_schema(state, schema); });
 }
 
+/// Materializes the next bounded row window through the Arrow stream callback
+/// wrapper.
 int native_parquet_stream_get_next(ArrowArrayStream *stream, ArrowArray *out) {
   if (!stream) {
     return EINVAL;

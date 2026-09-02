@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency cross process telemetry tuning."""
+"""Verify that cross-process resource evidence can tune admission without weakening limits.
+
+Combined reservations must reject overcommit and stale owners must be reclaimed, while opt-in,
+bounded percentile telemetry adjusts concurrency reserves without changing static defaults.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,11 @@ import os
 from pathlib import Path
 
 import pytest
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_process_or_fail,
+    wait_event_or_fail,
+)
 
 from schema_sanitizer.core_impl import memory_budget as memory_budget_module
 from schema_sanitizer.core_impl.cross_process_storage import (
@@ -47,11 +56,14 @@ def _reserve_in_child(
         total = _reserve_cross_process_raw(device, requested, capacity)
         result.put(("reserved", total))
         ready.set()
-        release.wait(timeout=5)
-        _release_cross_process_raw(device, requested)
+        try:
+            wait_event_or_fail(release)
+        finally:
+            _release_cross_process_raw(device, requested)
     except BaseException as exc:  # pragma: no cover - returned to parent
         result.put(("error", type(exc).__name__, str(exc)))
         ready.set()
+        raise
 
 
 @_REQUIRES_POSIX_COORDINATION
@@ -70,13 +82,13 @@ def test_cross_process_reservations_reject_combined_overcommit(
         args=(str(tmp_path), 99123, 70, 100, ready, release, result),
     )
     child.start()
-    assert ready.wait(timeout=5)
-    assert result.get(timeout=2) == ("reserved", 70)
+    assert ready.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+    assert result.get(timeout=SCHEDULER_TIMEOUT_SECONDS) == ("reserved", 70)
     with pytest.raises(OSError, match="cross-process"):
         _reserve_cross_process_raw(99123, 40, 100)
     assert cross_process_reserved_bytes(99123) == 70
     release.set()
-    child.join(timeout=5)
+    join_process_or_fail(child)
     assert child.exitcode == 0
     assert cross_process_reserved_bytes(99123) == 0
 

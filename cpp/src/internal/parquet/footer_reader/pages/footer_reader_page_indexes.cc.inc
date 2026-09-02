@@ -1,3 +1,9 @@
+// Parses column and offset indexes and attaches validated page locations to
+// column metadata. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
+
+/// Parses column index from bounded Parquet metadata and rejects malformed or
+/// oversized fields.
 sanitize::Result<ColumnIndexInfo> parse_column_index(std::string_view bytes) {
   CompactReader reader(bytes);
   ColumnIndexInfo index;
@@ -70,6 +76,7 @@ sanitize::Result<ColumnIndexInfo> parse_column_index(std::string_view bytes) {
   }
 }
 
+/// Parses one compact-Thrift PageLocation with checked offset and row metadata.
 sanitize::Result<PageLocationInfo> read_page_location(CompactReader &reader) {
   PageLocationInfo location;
   std::int16_t last_field_id = 0;
@@ -117,6 +124,8 @@ sanitize::Result<PageLocationInfo> read_page_location(CompactReader &reader) {
   }
 }
 
+/// Parses offset index from bounded Parquet metadata and rejects malformed or
+/// oversized fields.
 sanitize::Result<OffsetIndexInfo> parse_offset_index(std::string_view bytes) {
   CompactReader reader(bytes);
   OffsetIndexInfo index;
@@ -160,12 +169,15 @@ sanitize::Result<OffsetIndexInfo> parse_offset_index(std::string_view bytes) {
   }
 }
 
+/// Filters decoded page metadata to data pages while retaining physical order.
 auto parquet_data_pages(const ColumnChunkInfo &column) {
   return column.pages | std::views::filter([](const PageHeaderInfo &page) {
            return !page.is_dictionary_page;
          });
 }
 
+/// Validates column-index cardinality and null-page metadata against scanned
+/// pages.
 sanitize::Status validate_column_index(const ColumnChunkInfo &column) {
   if (!column.column_index.decoded) {
     return {};
@@ -199,6 +211,7 @@ sanitize::Status validate_column_index(const ColumnChunkInfo &column) {
   return {};
 }
 
+/// Validates offset-index page order, file ranges, and first-row progression.
 sanitize::Status validate_offset_index(const ColumnChunkInfo &column) {
   if (!column.offset_index.decoded) {
     return {};
@@ -232,6 +245,8 @@ sanitize::Status validate_offset_index(const ColumnChunkInfo &column) {
   return {};
 }
 
+/// Reads and attaches available column and offset indexes for every column
+/// chunk.
 sanitize::Status read_page_indexes(std::ifstream &file, FooterInfo *info) {
   if (!info) {
     return sanitize::Status::Invalid("Parquet page index: internal error");

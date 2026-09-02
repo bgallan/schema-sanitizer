@@ -1,3 +1,8 @@
+// Parses row groups and their column chunks while enforcing footer size and
+// count limits. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
+
+/// Parses one compact-Thrift ColumnChunk structure and its index locations.
 sanitize::Result<ColumnChunkInfo> read_column_chunk(CompactReader &reader) {
   ColumnChunkInfo column;
   std::int16_t last_field_id = 0;
@@ -72,6 +77,7 @@ sanitize::Result<ColumnChunkInfo> read_column_chunk(CompactReader &reader) {
   }
 }
 
+/// Parses one compact-Thrift RowGroup and its bounded column-chunk list.
 sanitize::Result<RowGroupInfo> read_row_group(CompactReader &reader) {
   RowGroupInfo row_group;
   std::int16_t last_field_id = 0;
@@ -142,6 +148,7 @@ sanitize::Result<RowGroupInfo> read_row_group(CompactReader &reader) {
   }
 }
 
+/// Parses the footer's bounded row-group list into the public metadata model.
 sanitize::Status read_row_groups(CompactReader &reader, FooterInfo *info) {
   if (!info) {
     return sanitize::Status::Invalid(
@@ -172,6 +179,8 @@ sanitize::Status read_row_groups(CompactReader &reader, FooterInfo *info) {
   }
   return {};
 }
+/// Parses footer from bounded Parquet metadata and rejects malformed or
+/// oversized fields.
 sanitize::Result<FooterInfo> parse_footer(std::string_view footer,
                                           std::size_t materialized_limit = 0) {
   CompactReader reader(footer, materialized_limit);

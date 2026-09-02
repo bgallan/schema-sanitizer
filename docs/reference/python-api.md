@@ -181,6 +181,15 @@ resources.
 `process_operation_diagnostics()` returns bounded snapshots of live and recent
 operations. Pass an operation ID to filter the result.
 
+Every result and batch stream exposes normalized operation-local evidence through
+`.stats`. `input_source_route` and `input_plan_route` identify the selected source and
+multi-source plan. `parquet_input_route` identifies the successful Parquet mechanism;
+when recovery followed a declined or failed direct attempt,
+`parquet_input_fallback_reason` records that reason separately. File results also expose
+`file_output_route` and `file_metadata_route`. These values belong to that result and do
+not depend on mutable process-global “last operation” state; batch-stream statistics
+remain available after exhaustion or explicit close.
+
 ## [Public errors](#index)
 
 Conversion, I/O, resource, integrity, cancellation, and optional-dependency

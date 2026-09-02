@@ -1,4 +1,6 @@
 // Declares inference depth-limit helpers.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #pragma once
 
@@ -12,10 +14,10 @@ struct DepthState {
   int parquet = 0;
 };
 
-// Returns depth after entering a child value from a parent depth state.
+/// Returns depth after entering a child value from a parent depth state.
 DepthState enter_value_depth(DepthState parent, const ValueView &v);
 
-// Returns whether a named nested value should be represented as a string.
+/// Returns whether a named nested value should be represented as a string.
 bool should_flatten_nested(const ValueView &v, const PreparedOptions &opts,
                            DepthState parent_depth);
 

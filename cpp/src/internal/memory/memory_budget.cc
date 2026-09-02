@@ -1,4 +1,7 @@
-// Detects the memory safely available to one automatic-budget operation.
+// Detects memory safely available to one automatically budgeted operation.
+// It combines platform availability with effective
+// container-hierarchy headroom.
+
 #include "internal/memory/memory_budget.hh"
 #include "internal/runtime/cgroup_view.hh"
 
@@ -24,6 +27,7 @@ namespace sanitize::internal {
 namespace {
 
 #if defined(__linux__)
+/// Reads Linux MemAvailable and returns its byte count when available.
 [[nodiscard]] std::optional<std::uint64_t> linux_mem_available() noexcept {
   try {
     std::ifstream input("/proc/meminfo");
@@ -46,6 +50,8 @@ namespace {
 }
 #endif
 
+/// Samples physical memory currently available to this process on the
+/// host platform.
 [[nodiscard]] std::optional<std::uint64_t>
 platform_available_memory() noexcept {
 #if defined(_WIN32)
@@ -99,6 +105,8 @@ platform_available_memory() noexcept {
 #endif
 }
 
+/// Computes remaining memory headroom imposed by the active
+/// container hierarchy.
 [[nodiscard]] std::optional<std::uint64_t>
 container_available_memory() noexcept {
 #if defined(__linux__)

@@ -1,4 +1,6 @@
-// Implements direct-Arrow formatter wrappers over shared Arrow helpers.
+// Implements direct-Arrow formatter wrappers over shared Arrow helpers. These
+// routines keep Arrow schema interpretation and buffer ownership explicit at
+// the ABI boundary.
 
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct_formatters.hh"
 
@@ -47,10 +49,12 @@ std::string month_interval_to_string(int32_t months) {
   return arrow_format::month_interval_to_string(months);
 }
 
+/// Formats an Arrow day-time interval as canonical ingestion text.
 std::string day_time_interval_to_string(int32_t days, int32_t milliseconds) {
   return arrow_format::day_time_interval_to_string(days, milliseconds);
 }
 
+/// Formats an Arrow month-day-nanosecond interval as canonical ingestion text.
 std::string month_day_nano_interval_to_string(int32_t months, int32_t days,
                                               int64_t nanoseconds) {
   return arrow_format::month_day_nano_interval_to_string(months, days,

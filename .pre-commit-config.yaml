@@ -1,133 +1,152 @@
 ---
 minimum_pre_commit_version: 3.7.0
 default_stages: [pre-commit, pre-push]
-exclude: ^(build/|dist/|wheelhouse/|\.venv.*/|__pycache__/)
+exclude: ^(\.work/|dist/|wheelhouse/|\.venv.*/|__pycache__/)
 repos:
-  # Generic repo hygiene + config file formatting
-  - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # v6.0.0
+  # The repository dispatcher reuses an exact current environment or creates one
+  # content-addressed, hash-locked tool environment below the ignored .work tree.
+  - repo: local
     hooks:
       - id: end-of-file-fixer
-        # Parser inputs are byte-exact, including missing/final whitespace.
+        name: end-of-file-fixer
+        entry: python meta/ci/quality/run_pre_commit_tool.py end-of-file-fixer
+        language: system
+        types: [text]
         exclude: ^fuzz/(corpus|regressions)/
       - id: trailing-whitespace
+        name: trailing-whitespace
+        entry: python meta/ci/quality/run_pre_commit_tool.py trailing-whitespace
+        language: system
+        types: [text]
         exclude: ^fuzz/(corpus|regressions)/
       - id: check-yaml
+        name: check-yaml
+        entry: python meta/ci/quality/run_pre_commit_tool.py check-yaml
+        language: system
+        types: [yaml]
       - id: check-toml
+        name: check-toml
+        entry: python meta/ci/quality/run_pre_commit_tool.py check-toml
+        language: system
+        types: [toml]
       - id: check-json
-        # Fuzz inputs intentionally include malformed encodings and syntax.
+        name: check-json
+        entry: python meta/ci/quality/run_pre_commit_tool.py check-json
+        language: system
+        types: [json]
         exclude: ^fuzz/(corpus|regressions)/json/
       - id: pretty-format-json
+        name: pretty-format-json
+        entry: python meta/ci/quality/run_pre_commit_tool.py pretty-format-json
+        language: system
+        types: [json]
         exclude: ^fuzz/(corpus|regressions)/json/
         args: [--autofix, --indent=2, --no-sort-keys]
-
-  # C/C++ formatting + style-lint
-  - repo: https://github.com/pre-commit/mirrors-clang-format
-    rev: f4d7745e17a28aad7eed2f4874ca8d1568c11c4c  # v22.1.8
-    hooks:
       - id: clang-format
+        name: clang-format
+        entry: python meta/ci/quality/run_pre_commit_tool.py clang-format
+        language: system
         files: ^cpp/src/.*\.(c|cc|cpp|h|hh|hpp|inc)$
         types_or: [text]
         args: [--style=file, -i]
-      - id: clang-format
+      - id: clang-format-check
         name: clang-format-check
+        entry: python meta/ci/quality/run_pre_commit_tool.py clang-format-check
+        language: system
         files: ^cpp/src/.*\.(c|cc|cpp|h|hh|hpp|inc)$
         types_or: [text]
         args: [--style=file, --dry-run, --Werror]
-
-  # Python linting/formatting
-  - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: 7c55798a78262d14b2074abf623d8a992ebb70d4  # v0.16.2
-    hooks:
-      - id: ruff
+      - id: ruff-check
+        name: ruff-check
+        entry: python meta/ci/quality/run_pre_commit_tool.py ruff-check
+        language: system
         files: ^(src|tests|benchmarks|examples|meta/ci)/.*\.py$
         args: [--fix]
       - id: ruff-format
+        name: ruff-format
+        entry: python meta/ci/quality/run_pre_commit_tool.py ruff-format
+        language: system
         files: ^(src|tests|benchmarks|examples|meta/ci)/.*\.py$
-
-  # Markdown formatting + syntax check
-  - repo: https://github.com/executablebooks/mdformat
-    rev: 2d496dbc18e31b83a1596685347ffe0b6041daf0  # 1.0.0
-    hooks:
       - id: mdformat
+        name: mdformat
+        entry: python meta/ci/quality/run_pre_commit_tool.py mdformat
+        language: system
         files: \.md$
-      - id: mdformat
+        types: [markdown]
+      - id: mdformat-check
         name: mdformat-check
+        entry: python meta/ci/quality/run_pre_commit_tool.py mdformat-check
+        language: system
         files: \.md$
+        types: [markdown]
         args: [--check]
-
-  # Project-local tools with isolated, pinned Python environments.
-  - repo: local
-    hooks:
       - id: shellcheck
         name: shellcheck
-        entry: shellcheck
-        language: python
-        additional_dependencies: [shellcheck-py==0.11.0.1]
+        entry: python meta/ci/quality/run_pre_commit_tool.py shellcheck
+        language: system
         files: \.sh$
       - id: shfmt
         name: shfmt
-        entry: shfmt
-        language: python
-        additional_dependencies: [shfmt-py==4.0.0]
+        entry: python meta/ci/quality/run_pre_commit_tool.py shfmt
+        language: system
         files: \.sh$
         args: [-w, -i, '2', -ci]
       - id: actionlint
         name: GitHub Actions semantics
-        entry: actionlint
-        language: python
-        additional_dependencies: [actionlint-py==1.7.12.24]
+        entry: python meta/ci/quality/run_pre_commit_tool.py actionlint
+        language: system
         files: ^\.github/workflows/.*\.ya?ml$
       - id: zizmor
         name: GitHub Actions security
-        entry: zizmor --offline --persona auditor --min-severity medium
-        language: python
-        additional_dependencies: [zizmor==1.29.0]
+        entry: python meta/ci/quality/run_pre_commit_tool.py zizmor --offline --persona
+          auditor --min-severity medium
+        language: system
         files: ^\.github/(workflows/.*\.ya?ml|actions/.*/action\.ya?ml)$
       - id: mypy
         name: mypy
-        entry: mypy
-        language: python
-        additional_dependencies: [mypy==1.19.1]
+        entry: python meta/ci/quality/run_pre_commit_tool.py mypy
+        language: system
         pass_filenames: false
         always_run: true
       - id: primary-cleanup-safety
         name: primary cleanup safety
-        entry: python meta/ci/quality/check_primary_cleanup.py
+        entry: python meta/ci/quality/run_pre_commit_tool.py primary-cleanup-safety
         language: system
         pass_filenames: false
         always_run: true
+      - id: action-sha-pins
+        name: immutable GitHub Action references
+        entry: python meta/ci/quality/run_pre_commit_tool.py action-sha-pins
+        language: system
+        files: ^\.github/(workflows/.*\.ya?ml|actions/.*/action\.ya?ml)$
+        pass_filenames: false
       - id: fuzz-corpus-integrity
         name: fuzz corpus integrity
-        entry: python meta/ci/fuzz/check_fuzz_corpus.py
+        entry: python meta/ci/quality/run_pre_commit_tool.py fuzz-corpus-integrity
         language: system
         pass_filenames: false
         always_run: true
       - id: cmake-format
         name: cmake-format
-        entry: cmake-format
-        language: python
-        additional_dependencies: [cmakelang==0.6.13]
+        entry: python meta/ci/quality/run_pre_commit_tool.py cmake-format
+        language: system
         files: (^|/)(CMakeLists\.txt|.*\.cmake(\.in)?)$
         args: [--in-place]
       - id: cmake-format-check
         name: cmake-format-check
-        entry: cmake-format
-        language: python
-        additional_dependencies: [cmakelang==0.6.13]
+        entry: python meta/ci/quality/run_pre_commit_tool.py cmake-format-check
+        language: system
         files: (^|/)(CMakeLists\.txt|.*\.cmake(\.in)?)$
         args: [--check]
       - id: yamlfix
         name: yamlfix
-        entry: yamlfix
-        language: python
-        additional_dependencies: [yamlfix==1.18.0]
+        entry: python meta/ci/quality/run_pre_commit_tool.py yamlfix
+        language: system
         files: \.(yaml|yml)$
         exclude: ^\.github/dependabot\.yml$
       - id: toml-sort
         name: toml-sort
-        entry: toml-sort
-        language: python
-        additional_dependencies: [toml-sort==0.24.3]
+        entry: python meta/ci/quality/run_pre_commit_tool.py toml-sort
+        language: system
         files: \.toml$
         args: [--in-place]

@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
-"""Measure whole-pipeline scaling while preserving one operation worker budget."""
+"""Measure whole-pipeline scaling while preserving one operation worker budget.
+
+It parses worker-count sweeps, executes isolated operation cases, and summarizes
+throughput and scaling efficiency.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import statistics
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-PIPELINE_CASES = (
-    "pipeline_scalar_jsonl_to_csv",
-    "pipeline_scalar_jsonl_to_jsonl",
-    "pipeline_scalar_jsonl_to_parquet",
-    "pipeline_nested_jsonl_to_csv",
-    "pipeline_nested_jsonl_to_jsonl",
-    "pipeline_nested_jsonl_to_parquet",
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from benchmarks.concurrency.threading.dimensions import (  # noqa: E402
+    benchmark_dimensions,
+    expected_benchmark_case_names,
+    validate_benchmark_case_results,
+    validate_benchmark_dimensions,
 )
+from benchmarks.support.command import DISCARD, run_command  # noqa: E402
 
 
 def _parse_worker_counts(raw: str) -> tuple[int, ...]:
@@ -40,7 +46,8 @@ def _run_worker_case(
     repeats: int,
     pipeline_shape: str,
     pipeline_format: str,
-    selected_cases: tuple[str, ...],
+    nested_depth: int,
+    parquet_compression: str,
     directory: Path,
 ) -> dict[str, Any]:
     """Run the existing verified benchmark under one process CPU affinity."""
@@ -55,6 +62,10 @@ def _run_worker_case(
         str(sources),
         "--memory-mib",
         str(memory_mib),
+        "--wide-columns",
+        "16",
+        "--nested-depth",
+        str(nested_depth),
         "--cpu-quota",
         str(workers),
         "--warmups",
@@ -67,14 +78,46 @@ def _run_worker_case(
         pipeline_shape,
         "--pipeline-format",
         pipeline_format,
+        "--parquet-compression",
+        parquet_compression,
         "--output",
         str(output),
     ]
-    subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
+    run_command(command, check=True, stdout=DISCARD, timeout=3_600)
     report = json.loads(output.read_text(encoding="utf-8"))
-    selected = {name: report["cases"][name] for name in selected_cases}
-    if not all(bool(result["equivalent"]) for result in selected.values()):
-        raise RuntimeError(f"workers={workers}: logical output mismatch")
+    cases = report.get("cases") if isinstance(report, dict) else None
+    try:
+        validate_benchmark_dimensions(
+            report,
+            benchmark_dimensions(
+                rows=rows,
+                memory_mib=memory_mib,
+                wide_columns=16,
+                nested_depth=nested_depth,
+                source_count=sources,
+                parquet_compression=parquet_compression,
+                cpu_quota=workers,
+                warmups=warmups,
+                repeats=repeats,
+                selection="pipeline",
+                pipeline_shape=pipeline_shape,
+                pipeline_format=pipeline_format,
+            ),
+        )
+        validated = validate_benchmark_case_results(
+            cases,
+            selection="pipeline",
+            pipeline_shape=pipeline_shape,
+            pipeline_format=pipeline_format,
+        )
+    except RuntimeError as error:
+        raise RuntimeError(f"workers={workers}: {error}") from error
+    selected_cases = expected_benchmark_case_names(
+        "pipeline",
+        pipeline_shape=pipeline_shape,
+        pipeline_format=pipeline_format,
+    )
+    selected = {name: validated[name] for name in selected_cases}
     return {
         "requested_workers": workers,
         "applied_cpu_quota": report["environment"]["applied_cpu_quota"],
@@ -139,11 +182,10 @@ def _summarize(
 def run(args: argparse.Namespace) -> dict[str, Any]:
     """Execute every affinity in a fresh process and return one verified report."""
     worker_counts = _parse_worker_counts(args.workers)
-    selected_cases = tuple(
-        name
-        for name in PIPELINE_CASES
-        if (args.pipeline_shape == "all" or f"pipeline_{args.pipeline_shape}_" in name)
-        and (args.pipeline_format == "all" or name.endswith(f"_to_{args.pipeline_format}"))
+    selected_cases = expected_benchmark_case_names(
+        "pipeline",
+        pipeline_shape=args.pipeline_shape,
+        pipeline_format=args.pipeline_format,
     )
     with tempfile.TemporaryDirectory(prefix="schema-sanitizer-arena-scaling-") as raw:
         directory = Path(raw)
@@ -157,7 +199,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 repeats=args.repeats,
                 pipeline_shape=args.pipeline_shape,
                 pipeline_format=args.pipeline_format,
-                selected_cases=selected_cases,
+                nested_depth=args.nested_depth,
+                parquet_compression=args.parquet_compression,
                 directory=directory,
             )
             for workers in worker_counts
@@ -172,6 +215,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "repeats": args.repeats,
         "pipeline_shape": args.pipeline_shape,
         "pipeline_format": args.pipeline_format,
+        "nested_depth": args.nested_depth,
+        "parquet_compression": args.parquet_compression,
         "logical_outputs_equivalent": True,
         "runs": {str(key): value for key, value in sorted(results.items())},
         "pipelines": _summarize(results, selected_cases),
@@ -185,9 +230,15 @@ def main() -> None:
     parser.add_argument("--rows", type=int, default=100_000)
     parser.add_argument("--sources", type=int, default=8)
     parser.add_argument("--memory-mib", type=int, default=256)
+    parser.add_argument("--nested-depth", type=int, default=2)
     parser.add_argument("--pipeline-shape", choices=("all", "scalar", "nested"), default="all")
     parser.add_argument(
         "--pipeline-format", choices=("all", "csv", "jsonl", "parquet"), default="all"
+    )
+    parser.add_argument(
+        "--parquet-compression",
+        choices=("uncompressed", "snappy", "gzip"),
+        default="snappy",
     )
     parser.add_argument("--warmups", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=3)
@@ -198,6 +249,7 @@ def main() -> None:
         or args.sources <= 0
         or args.sources > args.rows
         or args.memory_mib <= 0
+        or args.nested_depth <= 0
         or args.warmups < 0
         or args.repeats <= 0
     ):

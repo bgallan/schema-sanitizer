@@ -1,4 +1,8 @@
-"""Recursive Parquet field accumulation, contracts, and fingerprints."""
+"""Recursive Parquet field accumulation, contracts, and fingerprints.
+
+It accumulates flattened field facts, definition and repetition levels, logical types,
+and stable fingerprints while walking nested layouts.
+"""
 
 from __future__ import annotations
 
@@ -227,34 +231,13 @@ def _component_ancestors(
     return ancestors
 
 
-def _string_ancestors(
-    path_label: str, repeated_paths: list[str], rep_levels: list[int]
-) -> list[dict[str, Any]]:
-    """Return repeated ancestors for legacy string-only diagnostics."""
-    ancestors: list[dict[str, Any]] = []
-    for repeated_path in repeated_paths:
-        if not (path_label == repeated_path or path_label.startswith(f"{repeated_path}.")):
-            continue
-        level_index = (
-            min(max(repeated_path.count("."), 0), len(rep_levels) - 1) if rep_levels else -1
-        )
-        ancestors.append(
-            {
-                "path": repeated_path,
-                "repetition_level": rep_levels[level_index] if level_index >= 0 else None,
-            }
-        )
-    return ancestors
-
-
 def leaf_contracts_from_field(field: dict[str, Any]) -> list[dict[str, Any]]:
     """Return explicit per-leaf recursive contracts for production audits."""
     leaf_paths = [str(path) for path in list(field.get("leaf_paths") or [])]
     leaf_components = normalize_path_components(field.get("leaf_path_components"))
-    if leaf_components is None:
-        leaf_components = [[path] for path in leaf_paths]
     repeated_components = normalize_path_components(field.get("repeated_node_path_components"))
-    repeated_paths = [str(path) for path in list(field.get("repeated_node_paths") or [])]
+    if leaf_components is None or repeated_components is None:
+        raise ValueError("recursive Parquet diagnostics require component-aware paths")
     leaf_max_def = int_list(field.get("leaf_max_definition_levels"))
     leaf_max_rep = int_list(field.get("leaf_max_repetition_levels"))
     leaf_path_def = int_matrix(field.get("leaf_path_definition_levels"))
@@ -277,11 +260,7 @@ def leaf_contracts_from_field(field: dict[str, Any]) -> list[dict[str, Any]]:
             else path_components_key(components)
         )
         rep_levels = list(leaf_path_rep[leaf_index]) if leaf_index < len(leaf_path_rep) else []
-        repeated_ancestors = (
-            _component_ancestors(components, repeated_components, rep_levels)
-            if repeated_components is not None
-            else _string_ancestors(path_label, repeated_paths, rep_levels)
-        )
+        repeated_ancestors = _component_ancestors(components, repeated_components, rep_levels)
         contracts.append(
             {
                 "leaf_index": leaf_index,
@@ -320,12 +299,12 @@ def leaf_repetition_path_fingerprint_from_field(field: dict[str, Any]) -> str:
     )
 
 
-def _component_ancestor_fingerprint(field: dict[str, Any]) -> str | None:
+def _component_ancestor_fingerprint(field: dict[str, Any]) -> str:
     """Build a repeated-ancestor fingerprint from component-aware paths."""
     leaf_components = normalize_path_components(field.get("leaf_path_components"))
     repeated_components = normalize_path_components(field.get("repeated_node_path_components"))
     if leaf_components is None or repeated_components is None:
-        return None
+        raise ValueError("recursive Parquet diagnostics require component-aware paths")
     leaf_rep_levels = int_matrix(field.get("leaf_path_repetition_levels"))
     leaf_parts: list[str] = []
     for leaf_index, components in enumerate(leaf_components):
@@ -346,23 +325,4 @@ def _component_ancestor_fingerprint(field: dict[str, Any]) -> str | None:
 
 def leaf_repeated_ancestor_fingerprint_from_field(field: dict[str, Any]) -> str:
     """Map each leaf to repeated ancestors and their path repetition level."""
-    component_fingerprint = _component_ancestor_fingerprint(field)
-    if component_fingerprint is not None:
-        return component_fingerprint
-
-    leaf_rep_levels = int_matrix(field.get("leaf_path_repetition_levels"))
-    leaf_paths = [str(path) for path in list(field.get("leaf_paths") or [])]
-    repeated_paths = [str(path) for path in list(field.get("repeated_node_paths") or [])]
-    leaf_parts: list[str] = []
-    for leaf_index, leaf_path in enumerate(leaf_paths):
-        levels = leaf_rep_levels[leaf_index] if leaf_index < len(leaf_rep_levels) else []
-        ancestors: list[str] = []
-        for repeated in repeated_paths:
-            if not (leaf_path == repeated or leaf_path.startswith(f"{repeated}.")):
-                continue
-            level_index = min(max(repeated.count("."), 0), len(levels) - 1) if levels else -1
-            level = levels[level_index] if level_index >= 0 else "?"
-            ancestors.append(f"{repeated}@{level}")
-        level_vector = ",".join(str(level) for level in levels)
-        leaf_parts.append(f"{leaf_path}[{level_vector}]<" + ",".join(ancestors) + ">")
-    return "|".join(leaf_parts)
+    return _component_ancestor_fingerprint(field)

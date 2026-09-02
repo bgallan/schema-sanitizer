@@ -1,4 +1,6 @@
 // Implements floating-point Arrow value JSON serialization.
+// The code validates Arrow layouts and emits deterministic JSON with correct
+// null and logical-type semantics.
 
 #include "internal/json_output/jsonl_value_writer_parts.hh"
 
@@ -17,6 +19,8 @@
 namespace sanitize::internal::jsonl_stream_writer {
 namespace {
 
+/// Returns the typed Arrow values buffer after verifying that the buffer
+/// pointer is available.
 template <typename T> const T *data_buffer(const ArrowArray &array) {
   if (!array.buffers || !array.buffers[1]) {
     return nullptr;
@@ -24,6 +28,8 @@ template <typename T> const T *data_buffer(const ArrowArray &array) {
   return static_cast<const T *>(array.buffers[1]);
 }
 
+/// Formats a double as a stable JSON numeric token, including non-finite
+/// extensions.
 void append_floating(TextBuffer &out, double value) {
   if (std::isnan(value)) {
     out += "NaN";
@@ -61,6 +67,7 @@ void append_floating(TextBuffer &out, double value) {
   }
 }
 
+/// Expands an IEEE 754 binary16 bit pattern into its binary32 representation.
 float half_to_float(uint16_t bits) noexcept {
   const uint32_t sign = static_cast<uint32_t>(bits & 0x8000u) << 16;
   uint32_t exponent = (bits >> 10) & 0x1fu;
@@ -90,6 +97,7 @@ float half_to_float(uint16_t bits) noexcept {
 
 } // namespace
 
+/// Reads and serializes one Arrow single-precision value.
 sanitize::Status append_float32_value(TextBuffer &out, const ArrowArray &array,
                                       int64_t row) {
   const float *values = data_buffer<float>(array);
@@ -100,6 +108,7 @@ sanitize::Status append_float32_value(TextBuffer &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
+/// Expands and serializes one Arrow half-precision value.
 sanitize::Status append_float16_value(TextBuffer &out, const ArrowArray &array,
                                       int64_t row) {
   const uint16_t *values = data_buffer<uint16_t>(array);
@@ -111,6 +120,7 @@ sanitize::Status append_float16_value(TextBuffer &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
+/// Reads and serializes one Arrow double-precision value.
 sanitize::Status append_float64_value(TextBuffer &out, const ArrowArray &array,
                                       int64_t row) {
   const double *values = data_buffer<double>(array);

@@ -1,4 +1,8 @@
-"""UTC modified-time planning for flat remote prefixes."""
+"""UTC modified-time planning for flat remote prefixes.
+
+It normalizes UTC bounds, creates half-open daily windows, filters versioned remote
+objects by modification time, and builds deterministic manifests.
+"""
 
 from __future__ import annotations
 
@@ -21,7 +25,7 @@ from ..input_impl.directory_inputs import (
     directory_metadata_budget_scope,
 )
 from ..remote_impl import routing, sync_backend
-from ..remote_impl.transport import run_sync
+from ..remote_impl.async_bridge import run_sync
 from ..sources.models import RemoteFile, SourceManifest, remote_file_sort_key
 
 if TYPE_CHECKING:

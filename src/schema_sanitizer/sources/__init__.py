@@ -1,4 +1,8 @@
-"""Stable remote-source discovery and publication facade."""
+"""Expose a provider-neutral facade for remote discovery and publication.
+
+Public helpers validate UTC filters and resource options before delegating listing, discovery,
+and atomic object publication to the selected storage provider.
+"""
 
 from __future__ import annotations
 
@@ -39,7 +43,7 @@ def list_objects(
         directory_metadata_budget_scope,
     )
     from ..remote_impl import routing, sync_backend
-    from ..remote_impl.transport import run_sync
+    from ..remote_impl.async_bridge import run_sync
 
     if resources is not None:
         if multi_threading is not None or memory_limit_bytes is not None:

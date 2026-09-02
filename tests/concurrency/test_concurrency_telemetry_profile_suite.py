@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency telemetry profile suite."""
+"""Test how the telemetry suite classifies sustained high-core performance evidence.
+
+Paired gains must be repeatable, plateaus must remain distinct from stable regressions, resumptions
+must match fingerprint and command, and both profiles must run under one locked CPU affinity.
+"""
 
 from __future__ import annotations
 

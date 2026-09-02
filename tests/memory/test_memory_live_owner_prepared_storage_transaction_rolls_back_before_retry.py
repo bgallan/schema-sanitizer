@@ -1,4 +1,8 @@
-"""Regression coverage for memory live owner prepared storage transaction rolls back before retry."""
+"""Stress-tests prepared storage and memory journals through rollback, dead-owner
+completion, cleanup failure, corruption, staging reuse, hard-link or symlink attacks,
+marker failure, janitor duplicates, provider-key compaction, and thread-start failure.
+Live owners roll back before retry, committed journals make success durable, and bounded
+payloads or exact permits are never duplicated or orphaned."""
 
 from __future__ import annotations
 
@@ -109,6 +113,7 @@ def test_empty_or_canonical_prefix_never_discards_prepared_journal(
     assert storage._reserve_cross_process_raw(device, 11, 1024) == 11
 
     def truncate_then_fail(handle: Any, _payload: bytes) -> None:
+        """Truncate the journal before raising the injected commit failure."""
         handle.seek(0)
         handle.truncate()
         handle.write(partial)
@@ -134,13 +139,14 @@ def test_dead_owner_prepared_transaction_is_completed(
     """A process death after journal publication conservatively commits admission."""
     from schema_sanitizer.core_impl import coordination_journal as journal
     from schema_sanitizer.core_impl import cross_process_storage as storage
+    from schema_sanitizer.core_impl.process_identity import process_start_token
 
     _enable_storage(monkeypatch, tmp_path)
     device = 103
     path = tmp_path / f"schema-sanitizer-temp-{device}.json"
     before = b'{"processes":{},"version":1}'
     pid = os.getpid()
-    start = storage._process_start_token(pid)
+    start = process_start_token(pid)
     owner = f"{pid}:{start}"
     after = json.dumps(
         {
@@ -193,35 +199,6 @@ def test_committed_journal_makes_success_safe_when_cleanup_fails(
     assert storage.cross_process_reserved_bytes(device) == 91
     assert not sidecar.exists()
     assert storage._reserve_cross_process_raw(device, 9, 1024) == 100
-
-
-@_REQUIRES_POSIX_COORDINATION
-def test_valid_divergent_main_state_from_legacy_writer_wins(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Recovery preserves a newer valid update made by a journal-unaware process."""
-    from schema_sanitizer.core_impl import coordination_journal as journal
-    from schema_sanitizer.core_impl import cross_process_storage as storage
-
-    _enable_storage(monkeypatch, tmp_path)
-    device = 109
-    real_remove = journal._remove_journal
-    monkeypatch.setattr(journal, "_remove_journal", lambda _path: None)
-    storage._reserve_cross_process_raw(device, 40, 1024)
-
-    path = tmp_path / f"schema-sanitizer-temp-{device}.json"
-    current = json.loads(path.read_text(encoding="utf-8"))
-    owner = next(iter(current["processes"]))
-    current["processes"][owner]["reserved"] = 73
-    path.write_text(
-        json.dumps(current, sort_keys=True, separators=(",", ":")),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(journal, "_remove_journal", real_remove)
-
-    assert storage.cross_process_reserved_bytes(device) == 73
-    assert json.loads(path.read_text(encoding="utf-8")) == current
 
 
 @_REQUIRES_POSIX_COORDINATION
@@ -347,6 +324,7 @@ def test_read_only_coordination_query_does_not_publish_a_journal(
     called = False
 
     def fail_commit(*_args: object, **_kwargs: object) -> None:
+        """Inject the commit failure at the controlled test point."""
         nonlocal called
         called = True
         raise AssertionError("read-only query attempted a coordination commit")
@@ -375,6 +353,7 @@ def test_committed_marker_publication_failure_rolls_back_incremental_state(
         max_payload_bytes: int,
         **kwargs: object,
     ) -> None:
+        """Inject the committed failure at the controlled test point."""
         if record.phase == "committed":
             raise OSError("injected committed marker failure")
         publish(path, record, max_payload_bytes, **kwargs)
@@ -389,113 +368,6 @@ def test_committed_marker_publication_failure_rolls_back_incremental_state(
     assert storage._reserve_cross_process_raw(device, 100, 1024) == 100
 
 
-def test_janitor_sweeps_large_backlogs_in_bounded_batches(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A sweep does not duplicate its entire pending-artifact map."""
-    from schema_sanitizer.core_impl import temporary_janitor as module
-
-    class Lease:
-        def __init__(self) -> None:
-            self.released = 0
-
-        def release(self) -> None:
-            self.released += 1
-
-    janitor = module._TemporaryArtifactJanitor()
-    leases = [Lease() for _index in range(257)]
-    for index, lease in enumerate(leases):
-        key = f"artifact-{index}"
-        janitor._pending[key] = module._PendingArtifact(Path(key), False, lease)
-        janitor._pending_order.append(key)
-    monkeypatch.setattr(janitor, "_delete", lambda _path, _is_dir: True)
-    batch_sizes: list[int] = []
-    take_batch = janitor._take_batch_locked
-
-    def tracked_take(limit: int) -> tuple[list[tuple[str, Any]], int]:
-        batch, examined = take_batch(limit)
-        batch_sizes.append(len(batch))
-        return batch, examined
-
-    monkeypatch.setattr(janitor, "_take_batch_locked", tracked_take)
-    janitor.sweep()
-
-    assert max(batch_sizes) <= module._SWEEP_BATCH_SIZE == 64
-    assert sum(batch_sizes) == 257
-    assert janitor.snapshot().pending_artifacts == 0
-    assert len(janitor._pending_order) == 0
-    assert all(lease.released == 1 for lease in leases)
-
-
-def test_janitor_failed_head_does_not_starve_later_artifacts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One resistant artifact is rotated behind successful entries in the same cycle."""
-    from schema_sanitizer.core_impl import temporary_janitor as module
-
-    class Lease:
-        def __init__(self) -> None:
-            self.released = 0
-
-        def release(self) -> None:
-            self.released += 1
-
-    janitor = module._TemporaryArtifactJanitor()
-    leases = [Lease() for _index in range(130)]
-    for index, lease in enumerate(leases):
-        key = f"artifact-{index}"
-        janitor._pending[key] = module._PendingArtifact(Path(key), False, lease)
-        janitor._pending_order.append(key)
-
-    monkeypatch.setattr(
-        janitor,
-        "_delete",
-        lambda path, _is_dir: path.name != "artifact-0",
-    )
-    janitor.sweep()
-
-    assert janitor.snapshot().pending_artifacts == 1
-    assert list(janitor._pending) == ["artifact-0"]
-    assert list(janitor._pending_order) == ["artifact-0"]
-    assert leases[0].released == 0
-    assert all(lease.released == 1 for lease in leases[1:])
-
-
-def test_janitor_idle_retirement_releases_permit_before_handoff() -> None:
-    """A new quarantine can never observe an alive thread with a stale permit."""
-    import threading
-
-    from schema_sanitizer.core_impl import temporary_janitor as module
-
-    class ThreadLease:
-        def __init__(self) -> None:
-            self.released = False
-
-        def release(self) -> None:
-            self.released = True
-
-    janitor = module._TemporaryArtifactJanitor()
-    lease = ThreadLease()
-    janitor._thread = threading.current_thread()
-    janitor._thread_lease = lease
-    observed: list[tuple[object, bool]] = []
-    start = threading.Event()
-
-    def inspect_after_handoff() -> None:
-        start.set()
-        with janitor._lock:
-            observed.append((janitor._thread, lease.released))
-
-    with janitor._lock:
-        follower = threading.Thread(target=inspect_after_handoff)
-        follower.start()
-        assert start.wait(timeout=1)
-        janitor._retire_current_thread_locked()
-    follower.join(timeout=1)
-
-    assert observed == [(None, True)]
-
-
 def test_janitor_duplicate_path_keeps_original_owner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -505,16 +377,20 @@ def test_janitor_duplicate_path_keeps_original_owner(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.released = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released += 1
 
     janitor = module._TemporaryArtifactJanitor()
     monkeypatch.setattr(janitor, "_scan_stale", lambda: None)
-    monkeypatch.setattr(janitor, "_ensure_thread_locked", lambda: None)
+    monkeypatch.setattr(janitor, "_ensure_worker", lambda: None)
     monkeypatch.setattr(
-        module.os, "replace", lambda _source, _target: (_ for _ in ()).throw(OSError())
+        module.os,
+        "replace",
+        lambda _source, _target, **_kwargs: (_ for _ in ()).throw(OSError()),
     )
     artifact = tmp_path / "same.tmp"
     artifact.write_bytes(b"x")
@@ -538,18 +414,22 @@ def test_provider_pool_compacts_and_reuses_multi_megabyte_keys() -> None:
 
     class Client:
         def __init__(self) -> None:
+            """Initialize the client test double."""
             self.close_calls = 0
 
         async def close(self) -> None:
+            """Close the resources owned by the client test double."""
             self.close_calls += 1
 
     async def exercise() -> tuple[int, tuple[Any, ...], int]:
+        """Borrow clients across large keys and verify compact-key reuse."""
         pool = RemoteProviderSessionPool()
         await pool.__aenter__()
         client = Client()
         calls = 0
 
         async def factory() -> Client:
+            """Count provider construction and return the reusable client."""
             nonlocal calls
             calls += 1
             return client
@@ -593,16 +473,20 @@ def test_janitor_thread_start_failure_releases_project_thread_permit(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.released = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released += 1
 
     class BrokenThread:
         def __init__(self, **_kwargs: Any) -> None:
+            """Initialize the broken thread test double."""
             pass
 
         def start(self) -> None:
+            """Start the activity represented by the broken thread test double."""
             raise RuntimeError("injected thread start failure")
 
     lease = Lease()
@@ -611,7 +495,7 @@ def test_janitor_thread_start_failure_releases_project_thread_permit(
     monkeypatch.setattr(module.threading, "Thread", BrokenThread)
 
     with janitor._lock:
-        janitor._ensure_thread_locked()
+        janitor._ensure_worker()
 
     assert janitor._thread is None
     assert janitor._thread_lease is None

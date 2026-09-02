@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency string runs preserve exact single multi json escaping."""
+"""Keep JSON string escaping exact across parallel string-run emission.
+
+The token writer must append maximal safe runs instead of visiting every byte individually, while
+single- and multi-worker outputs remain identical for all escaping boundaries.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,6 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 
@@ -17,9 +20,9 @@ _MEMORY_LIMIT = 128 * 1024 * 1024
 
 def test_string_runs_preserve_exact_single_multi_json_escaping(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Run appends preserve UTF-8 and every JSON control escape exactly."""
-    require_native()
     values = (
         "ordinary-mañana-café-漢字-🙂-abcdefghijklmnopqrstuvwxyz",
         'quoted"value\\path',

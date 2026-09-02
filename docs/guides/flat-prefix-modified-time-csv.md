@@ -83,7 +83,7 @@ inference and materialization therefore preserves the same source snapshot.
 The listing is a point-in-time snapshot. Objects created or rewritten after the
 single listing are not visible to that run, even when their `updated` timestamp
 would fall inside a requested day. Modification time also cannot express an
-event-time correction for data whose business date differs from its upload
+event-time correction for data whose logical date differs from its upload
 date.
 
 Production scheduling should use an explicit late-arrival policy, for example:

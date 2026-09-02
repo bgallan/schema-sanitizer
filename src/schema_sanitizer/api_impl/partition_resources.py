@@ -1,4 +1,8 @@
-"""Internal handoff of prepared partition resources into public converters."""
+"""Internal handoff of prepared partition resources into public converters.
+
+It uses a scoped context handoff to let converters borrow already discovered or staged
+partition resources without taking ownership twice.
+"""
 
 from __future__ import annotations
 
@@ -113,6 +117,7 @@ _FORK_PREPARED_CURRENT_PARTITION_RESOURCES: ContextVar[BorrowedPartitionResource
 
 
 def _prepare_partition_resources_for_fork() -> None:
+    """Prepare partition resources for fork."""
     global _FORK_PREPARED_CURRENT_PARTITION_RESOURCES
     _FORK_PREPARED_CURRENT_PARTITION_RESOURCES = _FORK_CURRENT_PARTITION_RESOURCES_BANKS[
         _FORK_CURRENT_PARTITION_RESOURCES_BANK_INDEX
@@ -120,6 +125,7 @@ def _prepare_partition_resources_for_fork() -> None:
 
 
 def _clear_partition_resources_fork_preparation() -> None:
+    """Clear partition resources fork preparation."""
     global _FORK_PREPARED_CURRENT_PARTITION_RESOURCES
     _FORK_PREPARED_CURRENT_PARTITION_RESOURCES = None
 

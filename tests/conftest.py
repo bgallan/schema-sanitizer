@@ -1,14 +1,38 @@
-"""Shared pytest helpers."""
+"""Configure shared pytest behavior and public ingestion adapters for the suite.
+
+The fixtures keep clocks, optional runtimes, and native availability deterministic,
+while the compact readers exercise supported inputs through the current analytical API.
+"""
 
 from __future__ import annotations
 
-from functools import lru_cache
+import os
+from collections.abc import Iterator
+from functools import lru_cache, partial
 
 import pytest
 
 pytest_plugins = ("_support.native_stub",)
 
 _FIXED_OPERATION_TIME_NS = 1_700_000_000_123_456_000
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register declared collection or installed-wheel CI integrity checks."""
+    from _support.ci_integrity import (
+        StrictCollectionIntegrity,
+        StrictPlatformIntegrity,
+        collection_integrity_component,
+        strict_platform_tests_enabled,
+    )
+
+    component = collection_integrity_component()
+    if component is not None:
+        config.pluginmanager.register(
+            StrictCollectionIntegrity(component), "strict-collection-integrity"
+        )
+    if strict_platform_tests_enabled():
+        config.pluginmanager.register(StrictPlatformIntegrity(), "strict-platform-integrity")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -45,18 +69,62 @@ def fixed_operation_clock(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @lru_cache(maxsize=1)
 def native_available() -> bool:
-    """Return native available for the test."""
+    """Return whether the compiled core can create a context and report memory stats."""
     try:
         from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
         ExecutionContext().memory_stats()
         return True
-    except Exception:
+    except Exception as exc:
+        if os.environ.get("SCHEMA_SANITIZER_STRICT_TEST_RUNTIME") == "1":
+            raise RuntimeError("strict CI requires a working native schema-sanitizer core") from exc
         return False
 
 
+@pytest.fixture
+def isolated_external_runtime_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Give fault-injection tests a private external-runtime ownership registry."""
+    from schema_sanitizer.core_impl import process_resources as resources
+
+    resources.drain_finalizer_cleanup()
+    with resources._EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
+        original_entries = tuple(resources._EXTERNAL_RUNTIME_POOL_COORDINATOR.values())
+        if any(
+            entry.physical_claims
+            or entry.logical_claims
+            or entry.physical_amount
+            or entry.logical_width
+            or entry.config_inflight
+            for entry in original_entries
+        ):
+            raise RuntimeError("cannot isolate an external-runtime coordinator with live claims")
+    isolated = resources._ExternalRuntimeCoordinator()
+    monkeypatch.setattr(resources, "_EXTERNAL_RUNTIME_POOL_COORDINATOR", isolated)
+    monkeypatch.setattr(resources, "_EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS", 0)
+    monkeypatch.setattr(resources, "_EXTERNAL_RUNTIME_TOTAL_LOGICAL_CLAIMS", 0)
+    try:
+        yield
+    finally:
+        resources.drain_finalizer_cleanup()
+        with resources._EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
+            live = tuple(isolated.values())
+            if any(
+                entry.physical_claims
+                or entry.logical_claims
+                or entry.physical_amount
+                or entry.logical_width
+                or entry.config_inflight
+                for entry in live
+            ):
+                raise RuntimeError("isolated external-runtime coordinator leaked live claims")
+            isolated.clear()
+
+
+@pytest.fixture
 def require_native() -> None:
-    """Return require native for the test."""
+    """Skip a test when the compiled schema-sanitizer core is unavailable."""
     if not native_available():
         pytest.skip("native schema_sanitizer core is not available")
 
@@ -130,50 +198,10 @@ def read_test_python(rows, *, output_format: str = "pyarrow", **options):
     return result
 
 
-def read_test_csv(path, *, output_format: str = "pyarrow", **options):
-    """Read CSV through the new analytical API."""
-    return read_test_path(path, input_format="csv", output_format=output_format, **options)
-
-
-def read_test_json(path, *, output_format: str = "pyarrow", **options):
-    """Read one JSON document through the new analytical API."""
-    return read_test_path(path, input_format="json", output_format=output_format, **options)
-
-
-def read_test_jsonl(path, *, output_format: str = "pyarrow", **options):
-    """Read JSONL or NDJSON through the new analytical API."""
-    suffix = str(path).lower().split("?", 1)[0]
-    input_format = "ndjson" if suffix.endswith(".ndjson") else "jsonl"
-    return read_test_path(path, input_format=input_format, output_format=output_format, **options)
-
-
-def read_test_json_folder(path, *, output_format: str = "pyarrow", **options):
-    """Read a flat JSON directory through the new analytical API."""
-    return read_test_path(
-        path,
-        input_format="json",
-        input_mode="directory",
-        output_format=output_format,
-        **options,
-    )
-
-
-def read_test_xml(path, *, output_format: str = "pyarrow", **options):
-    """Read XML through the new analytical API."""
-    return read_test_path(path, input_format="xml", output_format=output_format, **options)
-
-
-def read_test_xml_folder(path, *, output_format: str = "pyarrow", **options):
-    """Read a flat XML directory through the new analytical API."""
-    return read_test_path(
-        path,
-        input_format="xml",
-        input_mode="directory",
-        output_format=output_format,
-        **options,
-    )
-
-
-def read_test_parquet(path, *, output_format: str = "pyarrow", **options):
-    """Read Parquet through the new analytical API."""
-    return read_test_path(path, input_format="parquet", output_format=output_format, **options)
+read_test_csv = partial(read_test_path, input_format="csv")
+read_test_json = partial(read_test_path, input_format="json")
+read_test_jsonl = partial(read_test_path, input_format="jsonl")
+read_test_json_folder = partial(read_test_path, input_format="json", input_mode="directory")
+read_test_xml = partial(read_test_path, input_format="xml")
+read_test_xml_folder = partial(read_test_path, input_format="xml", input_mode="directory")
+read_test_parquet = partial(read_test_path, input_format="parquet")

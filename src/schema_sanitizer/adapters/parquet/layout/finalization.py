@@ -1,4 +1,8 @@
-"""Final assembly of recursive Parquet layout summaries."""
+"""Final assembly of recursive Parquet layout summaries.
+
+It turns field accumulators into deterministic path maps, collision reports, contract
+totals, and the final diagnostic summary.
+"""
 
 from __future__ import annotations
 

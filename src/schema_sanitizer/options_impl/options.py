@@ -1,4 +1,8 @@
-"""Grouped wrapper around the native C++ options catalog."""
+"""Wrap the flat native options catalog in typed Python groups.
+
+CSV modes and escapes, enums, lists, and scalar values are normalized consistently while aliases,
+unknown names, and invalid cross-field combinations are rejected.
+"""
 
 from __future__ import annotations
 
@@ -22,11 +26,6 @@ def normalize_csv_header_mode(value: object) -> CsvHeaderMode:
     if normalized not in _CSV_HEADER_MODES:
         raise ValueError("Option 'csv_header_mode' must be one of 'exact', 'union'")
     return cast(CsvHeaderMode, normalized)
-
-
-def require_implemented_csv_header_mode(value: object) -> CsvHeaderMode:
-    """Return a validated CSV header mode supported by the native reader."""
-    return normalize_csv_header_mode(value)
 
 
 def normalize_csv_escape_char(value: object, delimiter: str) -> str:

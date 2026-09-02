@@ -1,4 +1,6 @@
 // Implements Arrow C Stream export glue for the internal pipeline.
+// The implementation preserves Arrow ownership and error contracts without
+// depending on the Arrow C++ library.
 
 #include "internal/arrow_c/cdata_export_internal.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
@@ -23,7 +25,7 @@ struct ExportBatchStreamState {
   bool closed = false;
 };
 
-// Returns the last error recorded by an exported stream.
+/// Returns the last error recorded by an exported stream.
 static const char *stream_get_last_error(ArrowArrayStream *stream) {
   if (!stream) {
     return "invalid export stream";
@@ -34,7 +36,7 @@ static const char *stream_get_last_error(ArrowArrayStream *stream) {
                : nullptr;
 }
 
-// Closes source.
+/// Closes the batch source once and preserves the first callback error.
 static void close_source(ExportBatchStreamState *state) noexcept {
   if (!state || !state->source || state->closed) {
     return;
@@ -56,7 +58,7 @@ static void close_source(ExportBatchStreamState *state) noexcept {
   state->closed = true;
 }
 
-// Delegates Arrow C Stream schema export to the batch source.
+/// Delegates Arrow C Stream schema export to the batch source.
 static int stream_get_schema(ArrowArrayStream *stream, ArrowSchema *out) {
   if (!stream) {
     return EINVAL;
@@ -70,7 +72,7 @@ static int stream_get_schema(ArrowArrayStream *stream, ArrowSchema *out) {
       [&](ArrowSchema *schema) { return state->source->GetSchema(schema); });
 }
 
-// Delegates Arrow C Stream batch export to the batch source.
+/// Delegates Arrow C Stream batch export to the batch source.
 static int stream_get_next(ArrowArrayStream *stream, ArrowArray *out) {
   if (!stream) {
     return EINVAL;
@@ -84,7 +86,7 @@ static int stream_get_next(ArrowArrayStream *stream, ArrowArray *out) {
       [&](ArrowArray *array) { return state->source->GetNext(array); });
 }
 
-// Closes the source and releases exported stream state.
+/// Closes the source and releases exported stream state.
 static void stream_release(ArrowArrayStream *stream) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;

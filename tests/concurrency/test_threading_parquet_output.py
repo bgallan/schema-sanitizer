@@ -1,12 +1,16 @@
-"""Cross-mode contracts for the native concurrent Parquet writer."""
+"""Compare native Parquet writing across single- and multi-worker modes.
+
+Wide scalar and nested columns must remain logically equivalent after round-trip, while strict
+single mode must not create any host worker thread.
+"""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
-from conftest import require_native
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 
 def _reader(table: object, *, max_chunksize: int = 4096) -> object:
@@ -28,7 +32,6 @@ def _write_native(table: object, path: Path, *, mode: str, compression: str) -> 
         memory_limit_bytes=256 << 20,
         threading_mode=mode,
     )
-    assert writers.last_parquet_stream_route() == "native"
 
 
 def _assert_logically_equal(left: Path, right: Path) -> None:
@@ -37,8 +40,8 @@ def _assert_logically_equal(left: Path, right: Path) -> None:
     # Keep third-party Arrow worker pools out of the native-writer TSan gate.
     # This test validates Schema-Sanitizer concurrency; PyArrow's reader is only
     # the logical oracle and must stay single-threaded here.
-    left_table = pq.read_table(left, use_threads=False)
-    right_table = pq.read_table(right, use_threads=False)
+    left_table = pq.ParquetFile(left).read(use_threads=False)
+    right_table = pq.ParquetFile(right).read(use_threads=False)
     assert left_table.schema == right_table.schema
     assert left_table.equals(right_table)
     assert left_table.to_pylist() == right_table.to_pylist()
@@ -50,7 +53,6 @@ def test_native_parquet_multi_matches_single_for_wide_scalars(
     compression: str,
 ) -> None:
     """Wide scalar output must remain logically identical under column workers."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     rows = 12_000
     columns: dict[str, object] = {
@@ -79,7 +81,6 @@ def test_native_parquet_multi_matches_single_for_wide_scalars(
 
 def test_native_parquet_multi_matches_single_for_nested_columns(tmp_path: Path) -> None:
     """Nested lists and structs retain null semantics and row order."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     rows = 8_000
     payload_type = pa.struct(
@@ -122,10 +123,10 @@ def test_native_parquet_multi_matches_single_for_nested_columns(tmp_path: Path) 
     _assert_logically_equal(single, multi)
 
 
-@pytest.mark.skipif(not Path("/proc/self/task").is_dir(), reason="Linux /proc required")
-def test_native_parquet_single_does_not_create_host_threads(tmp_path: Path) -> None:
-    """The Parquet single path must not construct a native worker pool."""
-    require_native()
+def test_native_parquet_single_leaves_native_thread_ledger_empty(tmp_path: Path) -> None:
+    """The Parquet single path leaves no native arena or worker ownership."""
+    from schema_sanitizer.core_impl.runtime_diagnostics import _native_arena_snapshot
+
     pa = pytest.importorskip("pyarrow")
     rows = 16_000
     table = pa.table(
@@ -137,8 +138,6 @@ def test_native_parquet_single_does_not_create_host_threads(tmp_path: Path) -> N
             for column in range(12)
         }
     )
-    baseline = len(os.listdir("/proc/self/task"))
-
     _write_native(
         table,
         tmp_path / "single-thread-reference.parquet",
@@ -146,4 +145,7 @@ def test_native_parquet_single_does_not_create_host_threads(tmp_path: Path) -> N
         compression="snappy",
     )
 
-    assert len(os.listdir("/proc/self/task")) == baseline
+    snapshot = _native_arena_snapshot()
+    assert snapshot["live_arenas"] == 0
+    assert snapshot["detached_workers"] == 0
+    assert snapshot["native_physical_threads"] == 0

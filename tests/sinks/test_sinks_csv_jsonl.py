@@ -1,4 +1,8 @@
-"""Tests read adapters and file-to-file converters."""
+"""CSV and JSONL sink encoding, metadata, routing, and failure-path tests.
+
+It checks CSV and JSONL values, nested rendering, metadata, native routing, float
+support, fallback boundaries, and collision rejection.
+"""
 
 from __future__ import annotations
 
@@ -18,17 +22,14 @@ from _support.sinks import (
 from _support.sinks import (
     write_csv as _write_csv,
 )
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.adapters.pyarrow.jsonl_sink import _schema_supports_native_jsonl
 
 
-def test_to_csv_writes_file(tmp_path: Path) -> None:
-    """Verify to csv writes file."""
-    require_native()
+def test_to_csv_writes_file(tmp_path: Path, require_native: None) -> None:
+    """Verify to CSV writes file."""
     pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.csv_sink import last_csv_stream_route
 
     out = tmp_path / "out.csv"
     result = ss.to_csv(
@@ -42,14 +43,13 @@ def test_to_csv_writes_file(tmp_path: Path) -> None:
     with out.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
     assert _without_generated_metadata_rows(rows) == [{"a": "1", "b": "2"}]
-    assert last_csv_stream_route() == "native"
+    assert result.stats["file_output_route"] == "native_direct"
+    assert result.stats["file_metadata_route"] == "none"
 
 
-def test_to_csv_json_stringifies_nested_fields(tmp_path: Path) -> None:
-    """Verify to csv json stringifies nested fields."""
-    require_native()
+def test_to_csv_json_stringifies_nested_fields(tmp_path: Path, require_native: None) -> None:
+    """Verify to CSV JSON stringifies nested fields."""
     pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.csv_sink import last_csv_stream_route
 
     data = [
         {"id": 1, "payload": {"a": 1, "b": "x"}, "items": [1, 2, 3]},
@@ -61,7 +61,7 @@ def test_to_csv_json_stringifies_nested_fields(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     out = tmp_path / "nested.csv"
-    ss.to_csv(source, out, input_format="jsonl")
+    result = ss.to_csv(source, out, input_format="jsonl")
 
     with out.open("r", encoding="utf-8", newline="") as f:
         rows = list(csv.DictReader(f))
@@ -71,17 +71,16 @@ def test_to_csv_json_stringifies_nested_fields(tmp_path: Path) -> None:
     assert rows[0]["id"] == "1"
     assert json.loads(rows[0]["payload"]) == {"a": 1, "b": "x"}
     assert json.loads(rows[0]["items"]) == [1, 2, 3]
-    assert last_csv_stream_route() == "native"
+    assert result.stats["file_output_route"] == "native_direct"
 
 
 def test_jsonl_native_file_output_writes_metadata_without_pyarrow_sink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
 ) -> None:
-    """Verify native JSONL output composes metadata injection without PyArrow sink fallback."""
-    require_native()
+    """Verify JSONL native file output writes metadata without PyArrow sink."""
     pa = pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.file_metadata import last_metadata_route
-    from schema_sanitizer.adapters.pyarrow.jsonl_sink import last_jsonl_stream_route
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
     def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
@@ -106,18 +105,15 @@ def test_jsonl_native_file_output_writes_metadata_without_pyarrow_sink(
         {"a": "1", "schema_registry": "{}", "source_file": "/tmp/source.jsonl"},
         {"a": "2", "schema_registry": None, "source_file": "/tmp/source.jsonl"},
     ]
-    assert last_jsonl_stream_route() == "native"
-    assert last_metadata_route() == "native"
 
 
 def test_csv_native_file_output_writes_metadata_without_pyarrow_sink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
 ) -> None:
-    """Verify native CSV output composes metadata injection without PyArrow sink fallback."""
-    require_native()
+    """Verify CSV native file output writes metadata without PyArrow sink."""
     pa = pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.csv_sink import last_csv_stream_route
-    from schema_sanitizer.adapters.pyarrow.file_metadata import last_metadata_route
     from schema_sanitizer.api_impl.file_conversion import writers as native_file_output
 
     def fail_pyarrow_sink(*_args: object, **_kwargs: object) -> None:
@@ -143,13 +139,10 @@ def test_csv_native_file_output_writes_metadata_without_pyarrow_sink(
         {"a": "1", "schema_registry": "{}", "source_file": "/tmp/source.csv"},
         {"a": "2", "schema_registry": "", "source_file": "/tmp/source.csv"},
     ]
-    assert last_csv_stream_route() == "native"
-    assert last_metadata_route() == "native"
 
 
-def test_native_jsonl_schema_support_check_uses_native_parser() -> None:
-    """Verify JSONL native schema support follows the C++ schema parser."""
-    require_native()
+def test_native_jsonl_schema_support_check_uses_native_parser(require_native: None) -> None:
+    """Verify native JSONL schema support check uses native parser."""
     pa = pytest.importorskip("pyarrow")
 
     supported = pa.schema(
@@ -170,9 +163,8 @@ def test_native_jsonl_schema_support_check_uses_native_parser() -> None:
     assert _schema_supports_native_jsonl(unsupported, pa=pa) is False
 
 
-def test_to_jsonl_native_writes_float16(tmp_path: Path) -> None:
-    """Verify native JSONL writer supports Arrow float16 batches."""
-    require_native()
+def test_to_jsonl_native_writes_float16(tmp_path: Path, require_native: None) -> None:
+    """Verify to JSONL native writes float16."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.jsonl_sink import write_jsonl_stream
 
@@ -194,7 +186,7 @@ def test_to_jsonl_native_writes_float16(tmp_path: Path) -> None:
 def test_jsonl_stream_does_not_fall_back_after_native_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify native JSONL failures are propagated without a Python fallback."""
+    """Verify JSONL stream does not fall back after native failure."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow import jsonl_sink as pyarrow_jsonl_sink
 
@@ -216,7 +208,7 @@ def test_jsonl_stream_does_not_fall_back_after_native_failure(
 def test_csv_stream_requires_native_nested_renderer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verify nested CSV output does not fall back to Python value rendering."""
+    """Verify CSV stream requires native nested renderer."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow import csv_sink as pyarrow_csv_sink
 
@@ -235,9 +227,8 @@ def test_csv_stream_requires_native_nested_renderer(
     assert not out.exists()
 
 
-def test_to_jsonl_writes_file(tmp_path: Path) -> None:
-    """Verify to jsonl writes file."""
-    require_native()
+def test_to_jsonl_writes_file(tmp_path: Path, require_native: None) -> None:
+    """Verify to JSONL writes file."""
     pytest.importorskip("pyarrow")
 
     out = tmp_path / "out.jsonl"
@@ -250,11 +241,12 @@ def test_to_jsonl_writes_file(tmp_path: Path) -> None:
     assert result.clean_data is None
     row = json.loads(out.read_text(encoding="utf-8").strip())
     assert _without_generated_metadata(row) == {"a": "1", "b": "2"}
+    assert result.stats["file_output_route"] == "native_direct"
+    assert result.stats["file_metadata_route"] == "none"
 
 
-def test_to_jsonl_preserves_nested_fields(tmp_path: Path) -> None:
-    """Verify to jsonl preserves nested fields."""
-    require_native()
+def test_to_jsonl_preserves_nested_fields(tmp_path: Path, require_native: None) -> None:
+    """Verify to JSONL preserves nested fields."""
     pytest.importorskip("pyarrow")
 
     data = [
@@ -275,9 +267,8 @@ def test_to_jsonl_preserves_nested_fields(tmp_path: Path) -> None:
     assert rows[0]["items"] == [1, 2, 3]
 
 
-def test_to_jsonl_native_temporal_rendering(tmp_path: Path) -> None:
-    """Verify native JSONL renders temporal values as ISO strings."""
-    require_native()
+def test_to_jsonl_native_temporal_rendering(tmp_path: Path, require_native: None) -> None:
+    """Verify to JSONL native temporal rendering."""
     pytest.importorskip("pyarrow")
 
     source = tmp_path / "rows.jsonl"
@@ -295,9 +286,8 @@ def test_to_jsonl_native_temporal_rendering(tmp_path: Path) -> None:
     assert _without_generated_metadata(row) == {"ts": "2026-01-01T03:01:26"}
 
 
-def test_to_jsonl_native_float_rendering(tmp_path: Path) -> None:
-    """Verify native JSONL preserves useful float text precision."""
-    require_native()
+def test_to_jsonl_native_float_rendering(tmp_path: Path, require_native: None) -> None:
+    """Verify to JSONL native float rendering."""
     pytest.importorskip("pyarrow")
 
     source = tmp_path / "rows.jsonl"
@@ -316,9 +306,8 @@ def test_to_jsonl_native_float_rendering(tmp_path: Path) -> None:
     ]
 
 
-def test_jsonl_writer_supports_binary_and_map_types(tmp_path: Path) -> None:
-    """Verify native JSONL supports binary and map Arrow values."""
-    require_native()
+def test_jsonl_writer_supports_binary_and_map_types(tmp_path: Path, require_native: None) -> None:
+    """Verify JSONL writer supports binary and map types."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.jsonl_sink import write_jsonl_stream
 
@@ -346,9 +335,9 @@ def test_jsonl_writer_supports_binary_and_map_types(tmp_path: Path) -> None:
 
 def test_jsonl_writer_supports_decimal_dictionary_duration_and_fixed_list(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify native JSONL supports Arrow types that avoid Python fallback."""
-    require_native()
+    """Verify JSONL writer supports decimal dictionary duration and fixed list."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.jsonl_sink import write_jsonl_stream
 
@@ -377,9 +366,8 @@ def test_jsonl_writer_supports_decimal_dictionary_duration_and_fixed_list(
     }
 
 
-def test_to_csv_writes_file_uri(tmp_path: Path) -> None:
-    """Verify to csv writes through file URI outputs."""
-    require_native()
+def test_to_csv_writes_file_uri(tmp_path: Path, require_native: None) -> None:
+    """Verify to CSV writes file URI."""
     pytest.importorskip("pyarrow")
 
     out = tmp_path / "out-uri.csv"
@@ -394,9 +382,8 @@ def test_to_csv_writes_file_uri(tmp_path: Path) -> None:
     assert _without_generated_metadata_rows(rows) == [{"a": "1", "b": "2"}]
 
 
-def test_to_jsonl_writes_file_uri(tmp_path: Path) -> None:
-    """Verify to jsonl writes through file URI outputs."""
-    require_native()
+def test_to_jsonl_writes_file_uri(tmp_path: Path, require_native: None) -> None:
+    """Verify to JSONL writes file URI."""
     pytest.importorskip("pyarrow")
 
     out = tmp_path / "out-uri.jsonl"
@@ -411,7 +398,7 @@ def test_to_jsonl_writes_file_uri(tmp_path: Path) -> None:
 
 
 def test_jsonl_writer_rejects_existing_schema_metadata_collision(tmp_path: Path) -> None:
-    """Verify JSONL writer preflights metadata collisions before writing."""
+    """Verify JSONL writer rejects existing schema metadata collision."""
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.jsonl_sink import write_jsonl_stream
 

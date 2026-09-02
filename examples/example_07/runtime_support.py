@@ -1,4 +1,8 @@
-"""Runtime helpers for example 07 partitioned GCS-to-Parquet pipeline."""
+"""Runtime helpers for example 07 partitioned GCS-to-Parquet pipeline.
+
+It builds conversion options, performs schema warm-up and discovery, executes partition
+runs, and prepares reporting results.
+"""
 
 from __future__ import annotations
 
@@ -143,6 +147,7 @@ def _warm_up_schema_drift_collector(
         plan: DateRunPlan,
         schema_drifts_json: str,
     ) -> None:
+        """Collect the schema registry emitted during warm-up inference."""
         if not schema_drifts_json or schema_drifts_json.strip() == "[]":
             return
         target.append(

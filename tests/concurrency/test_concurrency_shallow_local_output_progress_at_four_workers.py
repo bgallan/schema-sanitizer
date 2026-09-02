@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency shallow local output progress at four workers."""
+"""Verify shallow output workloads make progress with four governed workers.
+
+Successive local waves must restore FIFO fairness, remote output stealing must respect the thread
+budget, and JSONL bytes must remain identical between single- and multi-worker execution.
+"""
 
 from __future__ import annotations
 
@@ -6,19 +10,18 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.native_runtime import native_core
 
 pytestmark = pytest.mark.usefixtures("fixed_operation_clock")
+pytestmark = [pytestmark, pytest.mark.usefixtures("require_native")]
 
 _MEMORY_LIMIT = 128 * 1024 * 1024
 
 
 def test_shallow_local_output_progress_at_four_workers() -> None:
     """One shallow output wave drains without exceeding its task count."""
-    require_native()
     promoted, outputs, broad, started, queued, _elapsed_us = (
         native_core.operation_task_arena_output_preference_probe(4)
     )
@@ -33,7 +36,6 @@ def test_shallow_local_output_progress_at_four_workers() -> None:
 
 def test_second_output_wave_restores_fifo_fairness() -> None:
     """Two output waves and the broad wave drain within the worker budget."""
-    require_native()
     for workers in (4, 5, 8, 16):
         promoted, outputs, broad, started, queued, _elapsed_us = (
             native_core.operation_task_arena_output_preference_probe(workers, 2)
@@ -52,15 +54,18 @@ def test_shallow_remote_output_steal_preserves_thread_budget(
     workers: int,
 ) -> None:
     """Idle low-core helpers can recover front output without deep scanning."""
-    require_native()
-    promoted, outputs, broad, stolen, started, queued, submitted = (
+    promoted, outputs, broad, stolen, started, queued, submitted, cpu_capacity = (
         native_core.operation_task_arena_output_steal_probe(workers)
     )
     expected_outputs = workers // 2 - 1
     assert 0 <= promoted <= expected_outputs
     assert outputs == expected_outputs
     assert broad == workers - 1
-    assert stolen > 0
+    # With one CPU credit per worker, every owner remains blocked and the
+    # released helper must steal. Under a narrower CPU quota an unblocked owner
+    # may drain its own queue first, so requiring a steal would depend on OS
+    # scheduling rather than arena correctness.
+    assert stolen > 0 or cpu_capacity < workers
     assert queued == 0
     # Only currently runnable CPU credits need blockers. The output and broad
     # packet counts remain exact regardless of the host CPU quota.
@@ -73,7 +78,6 @@ def test_single_and_multi_jsonl_outputs_remain_byte_identical(
     tmp_path: Path,
 ) -> None:
     """Bounded output scheduling does not alter exact output."""
-    require_native()
     source = tmp_path / "source.jsonl"
     rows = [{f"field_{column}": row + column for column in range(8)} for row in range(12_000)]
     source.write_text(

@@ -1,4 +1,8 @@
-"""End-to-end contracts for ordered native materialization workers."""
+"""Exercise ordered native materialization from Python and raw JSONL sources.
+
+Workers must preserve rows, statistics, batches, source and failure order, error-policy details,
+and direct scalar values while isolating oversized nested packets and adapting wide flat output.
+"""
 
 from __future__ import annotations
 

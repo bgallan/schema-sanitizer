@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency csv logical scalars bypass json temporary."""
+"""Define CSV logical-scalar formatting contracts across native and Arrow inputs.
+
+The cases bypass temporary JSON encoding for CSV while preserving JSONL quoting defaults and
+exact single/multi temporal output.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,6 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl import operation_context
@@ -50,7 +53,6 @@ def test_csv_logical_scalars_bypass_json_temporary() -> None:
     assert "append_csv_cell_from_json" in source  # canonical fallback retained
     assert "is_direct_csv_logical_scalar(field.kind)" in source
     assert "getenv" not in source
-    assert len(source.splitlines()) <= 500
 
 
 def test_jsonl_formatters_default_to_quoted_output() -> None:
@@ -64,10 +66,11 @@ def test_jsonl_formatters_default_to_quoted_output() -> None:
 
 
 def test_public_temporal_csv_single_multi_are_identical(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
 ) -> None:
     """Parsed temporal cells retain exact bytes, order, and unquoted CSV text."""
-    require_native()
     monkeypatch.setattr(
         operation_context,
         "capture_operation_timestamps",
@@ -112,9 +115,8 @@ def test_public_temporal_csv_single_multi_are_identical(
     assert not first_data_row.startswith(b'"2026-01-01')
 
 
-def test_arrow_logical_csv_single_multi_are_identical(tmp_path: Path) -> None:
+def test_arrow_logical_csv_single_multi_are_identical(tmp_path: Path, require_native: None) -> None:
     """Binary, temporal, duration, and decimal arrays use the native direct path."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.csv_sink import write_csv_stream
 

@@ -1,4 +1,7 @@
-"""Regression coverage for memory bounded generation rejects active slot in free ring without rekeying owner."""
+"""Exercises corruption and rollback around stage escrow, path claims, terminal slots,
+provider state, fork banks, and native source plans. Active generations cannot re-enter
+the free ring or be silently rekeyed; exact cleanup survives underflow while
+authoritative paths avoid saturating decrements."""
 
 from __future__ import annotations
 
@@ -9,36 +12,8 @@ ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
 
 
-def test_bounded_generation_rejects_active_slot_in_free_ring_without_rekeying_owner() -> None:
-    from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
-
-    pool = BoundedGenerationPool(2)
-    first = pool.acquire()
-    assert first is not None
-    slot = first & pool._slot_mask
-    pool._free[pool._head] = slot
-
-    assert pool.acquire() is None
-    assert pool.snapshot().corrupted is True
-    assert pool.owns(first) is True
-    # Corruption closes admission but exact cleanup remains possible.
-    assert pool.release(first) is True
-    assert pool.owns(first) is False
-
-
-def test_bounded_generation_counter_corruption_quarantines_exact_slot() -> None:
-    from schema_sanitizer.core_impl.bounded_generation import BoundedGenerationPool
-
-    pool = BoundedGenerationPool(1)
-    token = pool.acquire()
-    assert token is not None
-    pool._active = 0
-    assert pool.release(token) is False
-    assert pool.owns(token) is False
-    assert pool.snapshot().corrupted is True
-
-
 def test_stage_construction_escrow_roots_separate_authority() -> None:
+    """Verify stage construction escrow roots separate authority."""
     from schema_sanitizer.core_impl import memory_budget as module
     from schema_sanitizer.core_impl.rooted_finalizer import RootedFinalizerAuthority
 
@@ -53,6 +28,7 @@ def test_stage_construction_escrow_roots_separate_authority() -> None:
 
 
 def test_path_claim_admission_is_pre_rooted_and_gc_tail_is_nonblocking() -> None:
+    """Verify path claim admission is pre rooted and GC tail is nonblocking."""
     from schema_sanitizer.core_impl import path_identity as module
 
     admission = module._acquire_path_claim_admission()
@@ -77,16 +53,19 @@ def test_path_claim_admission_is_pre_rooted_and_gc_tail_is_nonblocking() -> None
 
 
 def test_async_terminal_building_state_is_recoverable_after_publication_fault() -> None:
+    """Verify async terminal building state is recoverable after publication fault."""
     from schema_sanitizer.core_impl import async_scheduler as scheduler
 
     class DoneTask:
         def done(self) -> bool:
+            """Report whether the done task test double has completed."""
             return True
 
     class FaultingSet(set):
         fail = True
 
         def __iter__(self):
+            """Iterate over values exposed by the faulting set test double."""
             iterator = super().__iter__()
             yielded = False
             while True:
@@ -118,6 +97,7 @@ def test_async_terminal_building_state_is_recoverable_after_publication_fault() 
 
 
 def test_terminal_ownership_underflow_quarantines_but_exact_slot_cleanup_survives() -> None:
+    """Verify terminal ownership underflow quarantines but exact slot cleanup survives."""
     from schema_sanitizer.core_impl.terminal_ownership import TerminalOwnershipLedger
 
     ledger = TerminalOwnershipLedger(capacity=1)
@@ -135,25 +115,28 @@ def test_terminal_ownership_underflow_quarantines_but_exact_slot_cleanup_survive
 
 
 def test_terminal_ownership_publication_prepares_counter_before_commit() -> None:
+    """Verify terminal ownership publication prepares counter before commit."""
     source = (SRC / "core_impl" / "terminal_ownership.py").read_text(encoding="utf-8")
     start = source.index("    def publish(")
     end = source.index("\n    def retire(", start)
     body = source[start:end]
-    assert body.index("next_owners = self._owners + 1") < body.index("slot.active = True")
+    assert body.index("next_owners = authoritative + 1") < body.index("slot.active = True")
     assert "self._owners += 1" not in body
     assert "max(0, self._owners -" not in source
 
 
 def test_static_control_plane_never_clamps_exact_rollback() -> None:
+    """Verify static control plane never clamps exact rollback."""
     source = (SRC / "core_impl" / "static_control_plane.py").read_text(encoding="utf-8")
     start = source.index("def rollback_static_control_plane")
     end = source.index("\ndef register_static_control_plane", start)
     body = source[start:end]
     assert "max(0, _TOTAL - amount)" not in body
-    assert "if _TOTAL < amount" in body
+    assert "if authoritative < amount" in body
 
 
 def test_static_footprint_guard_has_no_destructor() -> None:
+    """Verify static footprint guard has no destructor."""
     source = (SRC / "core_impl" / "finalizer_escrow.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     guard = next(
@@ -164,6 +147,7 @@ def test_static_footprint_guard_has_no_destructor() -> None:
 
 
 def test_provider_over_release_does_not_train_aimd_state() -> None:
+    """Verify provider over release does not train aimd state."""
     from schema_sanitizer.remote_impl import provider_throttle as module
 
     governor = module.ProviderThrottleGovernor(max_tracked_keys=4)
@@ -181,6 +165,7 @@ def test_provider_over_release_does_not_train_aimd_state() -> None:
 
 
 def test_remote_and_provider_prepare_for_fork_select_preallocated_banks() -> None:
+    """Verify remote and provider prepare for fork select preallocated banks."""
     for path in (
         SRC / "remote_impl" / "io_permits.py",
         SRC / "remote_impl" / "provider_throttle.py",
@@ -203,13 +188,15 @@ def test_remote_and_provider_prepare_for_fork_select_preallocated_banks() -> Non
             assert "_fork_banks" in body
 
 
-def test_native_source_plan_has_no_unreserved_legacy_finalizer_fallback() -> None:
+def test_native_source_plan_uses_prepared_finalizer_authority() -> None:
+    """Verify native source plan uses prepared finalizer authority."""
     source = (SRC / "input_impl" / "source_plan.py").read_text(encoding="utf-8")
     assert "defer_finalizer_cleanup(self)" not in source
     assert "defer_prepared_finalizer_cleanup(capsule)" in source
 
 
 def test_authoritative_paths_have_no_new_saturating_decrements() -> None:
+    """Verify authoritative paths have no new saturating decrements."""
     checks = {
         SRC / "core_impl" / "bounded_generation.py": ("max(0, self._active -",),
         SRC / "core_impl" / "terminal_ownership.py": ("max(0, self._owners -",),

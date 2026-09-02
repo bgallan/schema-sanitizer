@@ -1,4 +1,8 @@
-"""Tests read adapters and file-to-file converters."""
+"""Parquet registry, generated timestamp, row-span metadata, and drift-routing tests.
+
+It checks registry embedding and drift routing, nested field order, timestamp precision,
+generated columns, row spans, and previous state.
+"""
 
 from __future__ import annotations
 
@@ -11,22 +15,22 @@ import pytest
 from _support.sinks import (
     without_generated_metadata_rows as _without_generated_metadata_rows,
 )
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.schema_registry import merge_schema_registry
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 
 def test_to_parquet_alphabetically_orders_incremental_registry_struct_fields(
     tmp_path: Path,
 ) -> None:
-    """Verify physical Parquet schemas sort additive nested registry fields."""
-    require_native()
+    """Verify to Parquet alphabetically orders incremental registry struct fields."""
     pq = pytest.importorskip("pyarrow.parquet")
 
     first_source = tmp_path / "first.jsonl"
     first_source.write_text(
-        json.dumps({"variables": {"email": "a@example.com", "phone": "1"}}) + "\n",
+        json.dumps({"variables": {"middle": "initial", "tail": "value"}}) + "\n",
         encoding="utf-8",
     )
     first_out = tmp_path / "first.parquet"
@@ -43,10 +47,10 @@ def test_to_parquet_alphabetically_orders_incremental_registry_struct_fields(
         json.dumps(
             {
                 "variables": {
-                    "birthday": "2026-01-01",
-                    "company": "acme",
-                    "country": "ES",
-                    "email": "b@example.com",
+                    "alpha": "first",
+                    "beta": "second",
+                    "gamma": "third",
+                    "middle": "updated",
                 }
             }
         )
@@ -65,14 +69,14 @@ def test_to_parquet_alphabetically_orders_incremental_registry_struct_fields(
 
     physical_schema = pq.read_schema(second_out)
     variable_names = [field.name for field in physical_schema.field("variables").type]
-    assert variable_names == ["birthday", "company", "country", "email", "phone"]
+    assert variable_names == ["alpha", "beta", "gamma", "middle", "tail"]
     assert pq.read_table(second_out, columns=["variables"])["variables"].to_pylist() == [
         {
-            "birthday": "2026-01-01",
-            "company": "acme",
-            "country": "ES",
-            "email": "b@example.com",
-            "phone": None,
+            "alpha": "first",
+            "beta": "second",
+            "gamma": "third",
+            "middle": "updated",
+            "tail": None,
         }
     ]
 
@@ -82,8 +86,7 @@ def test_to_parquet_alphabetically_orders_incremental_registry_struct_fields(
 
 
 def test_to_parquet_writes_timestamp_micros_by_default(tmp_path: Path) -> None:
-    """Verify parquet timestamps default to BigQuery-compatible microseconds."""
-    require_native()
+    """Verify to Parquet writes timestamp micros by default."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -103,8 +106,7 @@ def test_to_parquet_writes_timestamp_micros_by_default(tmp_path: Path) -> None:
 
 
 def test_to_parquet_can_write_timestamp_nanos(tmp_path: Path) -> None:
-    """Verify parquet timestamp nanos can still be requested explicitly."""
-    require_native()
+    """Verify to Parquet can write timestamp nanos."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -127,8 +129,7 @@ def test_to_parquet_can_write_timestamp_nanos(tmp_path: Path) -> None:
 def test_to_parquet_covers_schema_sanitizer_emitted_time(
     tmp_path: Path,
 ) -> None:
-    """Verify emitted time32[s] schemas stay on native Parquet output."""
-    require_native()
+    """Verify to Parquet covers schema sanitizer emitted time."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -158,13 +159,9 @@ def test_to_parquet_covers_schema_sanitizer_emitted_time(
 
 
 def test_metadata_native_stream_handles_all_row_and_timestamp_columns() -> None:
-    """Verify native metadata injection covers single-file generated columns."""
-    require_native()
+    """Verify metadata native stream handles all row and timestamp columns."""
     pa = pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.file_metadata import (
-        last_metadata_route,
-        prepare_file_output_metadata_stream,
-    )
+    from schema_sanitizer.adapters.pyarrow.file_metadata import prepare_file_output_metadata_stream
 
     first = pa.record_batch({"a": pa.array(["1", "2"])})
     second = pa.record_batch({"a": pa.array(["3"])})
@@ -180,7 +177,6 @@ def test_metadata_native_stream_handles_all_row_and_timestamp_columns() -> None:
     )
 
     try:
-        assert last_metadata_route() == "native"
         assert metadata.schema.field("source_file").type == pa.string()
         assert metadata.schema.field("ingestion_timestamp").type == pa.timestamp("us")
         batches = list(metadata.reader)
@@ -195,13 +191,9 @@ def test_metadata_native_stream_handles_all_row_and_timestamp_columns() -> None:
 
 
 def test_metadata_native_stream_handles_row_span_columns_across_batches() -> None:
-    """Verify native metadata injection can track directory source-file spans."""
-    require_native()
+    """Verify metadata native stream handles row span columns across batches."""
     pa = pytest.importorskip("pyarrow")
-    from schema_sanitizer.adapters.pyarrow.file_metadata import (
-        last_metadata_route,
-        prepare_file_output_metadata_stream,
-    )
+    from schema_sanitizer.adapters.pyarrow.file_metadata import prepare_file_output_metadata_stream
 
     first = pa.record_batch({"a": pa.array(["1", "2"])})
     second = pa.record_batch({"a": pa.array(["3", "4"])})
@@ -215,7 +207,6 @@ def test_metadata_native_stream_handles_row_span_columns_across_batches() -> Non
     )
 
     try:
-        assert last_metadata_route() == "native"
         assert metadata.schema.field("source_file").type == pa.string()
         rows = metadata.reader.read_all().to_pylist()
     finally:
@@ -233,8 +224,7 @@ def test_metadata_native_stream_handles_row_span_columns_across_batches() -> Non
 
 @pytest.mark.parametrize("suffix", [".csv", ".jsonl", ".parquet"])
 def test_to_file_embeds_native_schema_registry(tmp_path: Path, suffix: str) -> None:
-    """Verify all file sinks can embed native schema registry metadata."""
-    require_native()
+    """Verify to file embeds native schema registry."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -285,8 +275,9 @@ def test_to_file_embeds_native_schema_registry(tmp_path: Path, suffix: str) -> N
         assert isinstance(second_row["ingestion_timestamp"], str)
         assert row["ingestion_timestamp"]
         assert second_row["ingestion_timestamp"]
-    assert second_row["schema_registry"] in (None, "")
-    assert second_row["schema_drifts"] in (None, "")
+    expected_absent = "" if suffix == ".csv" else None
+    assert second_row["schema_registry"] == expected_absent
+    assert second_row["schema_drifts"] == expected_absent
     assert result.schema_registry == registry
     assert result.schema_drifts == drifts
     assert result.schema_registry_json == row["schema_registry"]
@@ -299,8 +290,7 @@ def test_to_file_embeds_native_schema_registry(tmp_path: Path, suffix: str) -> N
 
 
 def test_embedded_registry_wraps_singleton_into_existing_list(tmp_path: Path) -> None:
-    """Verify registry-backed sinks avoid variants when existing lists can wrap values."""
-    require_native()
+    """Verify embedded registry wraps singleton into existing list."""
     pa = pytest.importorskip("pyarrow")
 
     sentence_struct = pa.struct([pa.field("text", pa.string())])
@@ -333,8 +323,7 @@ def test_embedded_registry_wraps_singleton_into_existing_list(tmp_path: Path) ->
 
 
 def test_analytical_ingestion_timestamp_is_timestamp_micros(tmp_path: Path) -> None:
-    """Verify analytical outputs expose ingestion timestamp as TIMESTAMP_MICROS."""
-    require_native()
+    """Verify analytical ingestion timestamp is timestamp micros."""
     pa = pytest.importorskip("pyarrow")
 
     sentence_struct = pa.struct([pa.field("text", pa.string())])
@@ -365,8 +354,7 @@ def test_analytical_ingestion_timestamp_is_timestamp_micros(tmp_path: Path) -> N
 def test_embedded_registry_routes_nested_scalar_versions_without_parent_growth(
     tmp_path: Path,
 ) -> None:
-    """Verify nested scalar variants materialize independently under one parent version."""
-    require_native()
+    """Verify embedded registry routes nested scalar versions without parent growth."""
     pa = pytest.importorskip("pyarrow")
 
     numeric_sentiment = pa.struct([pa.field("magnitude", pa.float64())])

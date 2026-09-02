@@ -1,4 +1,6 @@
 // Resolves fields and strict-schema checks for object STRUCT conversion.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/conversion/object_struct/fields.hh"
 
@@ -14,6 +16,7 @@ using sanitize::ColumnPlan;
 using sanitize::Status;
 using sanitize::ValueView;
 
+/// Visits an object once to locate a field by hash and exact key bytes.
 Status object_find(ValueView object, std::string_view key,
                    const sanitize::PreparedOptions &opts, ValueView *out,
                    bool *found) {
@@ -40,6 +43,8 @@ Status object_find(ValueView object, std::string_view key,
 
 } // namespace
 
+/// Reports whether a wide object should be indexed once before STRUCT
+/// conversion.
 bool should_snapshot_object_fields(const ColumnPlan &plan) noexcept {
   constexpr std::size_t kWideStructThreshold = 8;
   if (plan.children.size() >= kWideStructThreshold) {
@@ -53,6 +58,8 @@ bool should_snapshot_object_fields(const ColumnPlan &plan) noexcept {
   return false;
 }
 
+/// Reports whether strict STRUCT conversion must search for unexpected object
+/// fields.
 bool should_check_strict_struct(const ColumnPlan &plan,
                                 const ConvertCtx &ctx) noexcept {
   return ctx.opts.spec.arrow_schema_contract &&
@@ -61,6 +68,8 @@ bool should_check_strict_struct(const ColumnPlan &plan,
          plan.layout;
 }
 
+/// Locates strict extra field without allocating and preserves the caller's
+/// source indexing.
 Status find_strict_extra_field(const ColumnPlan &plan, ValueView value,
                                const sanitize::PreparedOptions &opts,
                                std::string *extra) {
@@ -79,6 +88,8 @@ Status find_strict_extra_field(const ColumnPlan &plan, ValueView value,
   });
 }
 
+/// Locates strict extra field without allocating and preserves the caller's
+/// source indexing.
 Status find_strict_extra_field(const ColumnPlan &plan,
                                const ObjectFieldSnapshot &snapshot,
                                const sanitize::PreparedOptions &opts,
@@ -97,6 +108,8 @@ Status find_strict_extra_field(const ColumnPlan &plan,
   return Status::OK();
 }
 
+/// Locates object child value without allocating and preserves the caller's
+/// source indexing.
 Status find_object_child_value(const ColumnPlan &child, ValueView object,
                                ConvertCtx &ctx, ValueView *child_value,
                                bool *found) {
@@ -112,6 +125,8 @@ Status find_object_child_value(const ColumnPlan &child, ValueView object,
   return Status::OK();
 }
 
+/// Locates object child value without allocating and preserves the caller's
+/// source indexing.
 bool find_object_child_value(const ColumnPlan &child,
                              const ObjectFieldSnapshot &snapshot,
                              std::size_t child_index, ConvertCtx &ctx,

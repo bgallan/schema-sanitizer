@@ -1,4 +1,8 @@
-"""Validated Polars-to-Parquet Hive output for example 08."""
+"""Validated Polars-to-Parquet Hive output for example 08.
+
+It validates output prefixes and schemas, derives Hive partitions, writes datasets, and
+verifies the published files.
+"""
 
 from __future__ import annotations
 

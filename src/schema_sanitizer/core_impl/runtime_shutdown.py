@@ -1,4 +1,8 @@
-"""Single-flight phased shutdown for process-wide concurrency services."""
+"""Coordinate single-flight phased shutdown for process-wide concurrency services.
+
+One authoritative caller drains finalizers and registered services under a deadline while
+secondary callers share its eventual result or error.
+"""
 
 from __future__ import annotations
 
@@ -70,6 +74,7 @@ class ConcurrencyShutdownResult:
 
     @property
     def stopped(self) -> bool:
+        """Return whether shutdown has completed."""
         return self.terminal_success
 
 
@@ -83,17 +88,20 @@ class _BoundedShutdownFailures:
     __slots__ = ("_items", "_count", "_overflowed")
 
     def __init__(self) -> None:
+        """Initialize the bounded shutdown failures and its owned runtime state."""
         self._items: list[str | None] = [None] * _MAX_SHUTDOWN_FAILURES
         self._count = 0
         self._overflowed = False
 
     def reset(self) -> None:
+        """Clear recorded shutdown failures for reuse in the current process."""
         for index in range(self._count):
             self._items[index] = None
         self._count = 0
         self._overflowed = False
 
     def append(self, message: str) -> None:
+        """Append one value to the bounded collection."""
         if self._count >= _MAX_SHUTDOWN_FAILURES:
             self._overflowed = True
             return
@@ -101,9 +109,11 @@ class _BoundedShutdownFailures:
         self._count += 1
 
     def __bool__(self) -> bool:
+        """Return whether the instance currently carries a value."""
         return self._count > 0 or self._overflowed
 
     def __iter__(self):
+        """Iterate over the retained values."""
         for index in range(self._count):
             value = self._items[index]
             if value is not None:
@@ -112,6 +122,7 @@ class _BoundedShutdownFailures:
             yield "shutdown:failure_buffer_overflow"
 
     def freeze(self) -> tuple[str, ...]:
+        """Freeze accumulated shutdown failures into an immutable view."""
         try:
             return tuple(self)
         except BaseException:
@@ -160,6 +171,7 @@ def _wait_for_shared_shutdown(deadline_ns: int) -> ConcurrencyShutdownResult:
 def _timed_out_result(deadline_ns: int, generation: int) -> ConcurrencyShutdownResult:
     # A secondary caller that exhausts its own wait budget must not invent the
     # primary shutdown state.  Read only process-wide gates that are safe here.
+    """Build a bounded shutdown result for a caller whose deadline expired."""
     try:
         admission_closed = bool(
             _async_scheduler_module.async_scheduler_snapshot().admission_closed
@@ -200,6 +212,7 @@ def _perform_shutdown(deadline_ns: int, generation: int) -> ConcurrencyShutdownR
     # Resolve already-imported module attributes now (no imports/initialization).
     # This preserves runtime instrumentation/monkeypatching without capturing
     # stale singleton objects at module-import time.
+    """Run the authoritative phased shutdown for one generation."""
     _DISPATCHER = _cleanup_module._DISPATCHER
     _SCHEDULER = _retry_module._SCHEDULER
     _RELEASE_GUARDIAN = _retry_module._RELEASE_GUARDIAN
@@ -226,14 +239,9 @@ def _perform_shutdown(deadline_ns: int, generation: int) -> ConcurrencyShutdownR
     freeze_finalizer_registry()
     # Allocate both quiescence buffers before teardown starts. From Phase 1 on,
     # the correctness barrier only mutates these fixed-size buffers.
-    # pass48 compatibility note: finalizer_activity_token() was the allocating
-    # predecessor of the fixed-buffer barrier below.
     activity_size = finalizer_activity_buffer_size()
     finalizer_activity_a = bytearray(activity_size)
     finalizer_activity_b = bytearray(activity_size)
-    # Legacy source-contract names remain documented here; their callbacks are
-    # now supplied by the frozen observer registry rather than imported during
-    # teardown: process_remote_io_permit_snapshot, process_provider_throttle_snapshot.
     terminal_observers = freeze_shutdown_observers()
     # Phase 1: stop external producers, but keep the dedicated teardown
     # reserve open.  Cleanup workers and descriptor-relative janitor work may
@@ -270,6 +278,7 @@ def _perform_shutdown(deadline_ns: int, generation: int) -> ConcurrencyShutdownR
     finalizer_redrain_rounds = 0
 
     def drain_finalizer_epoch() -> None:
+        """Drain one bounded epoch of published finalizer work."""
         nonlocal finalizer_redrain_rounds
         finalizer_redrain_rounds += 1
         # Domains are frozen before Phase 1. Do not construct diagnostic
@@ -286,6 +295,7 @@ def _perform_shutdown(deadline_ns: int, generation: int) -> ConcurrencyShutdownR
             finalizer_drain_failures.append("control_plane:deferred_release_failed")
 
     def quiesce_finalizers(*, max_rounds: int = 8) -> bool:
+        """Drain finalizers until two bounded activity samples prove quiescence."""
         previous = finalizer_activity_a
         current = finalizer_activity_b
         have_previous = False
@@ -350,6 +360,7 @@ def _perform_shutdown(deadline_ns: int, generation: int) -> ConcurrencyShutdownR
         observability_failures.append("finalizers:quiescence_not_reached")
 
     def snapshot_or_none(service: object, name: str) -> object | None:
+        """Return a bounded snapshot when runtime state is available."""
         snapshot = getattr(service, "snapshot", None)
         if not callable(snapshot):
             observability_failures.append("runtime_service:missing_snapshot")
@@ -411,8 +422,8 @@ def _perform_shutdown(deadline_ns: int, generation: int) -> ConcurrencyShutdownR
     orphaned_startup_snapshot = observer_snapshots.get("orphaned_remote_startups")
     terminal_snapshot = observer_snapshots.get("terminal_ownership")
 
-    # Authoritative ownership domains introduced by pass45. Unloaded optional
-    # modules cannot own state; loaded modules are represented by observers.
+    # Unloaded optional modules cannot own state; loaded modules are represented
+    # by observers.
     authoritative: dict[str, object] = {}
 
     # Finalizer domains are already registered; observing them must not import
@@ -499,6 +510,7 @@ def _perform_shutdown(deadline_ns: int, generation: int) -> ConcurrencyShutdownR
         # Missing snapshots are tracked above and therefore can never be
         # interpreted as terminal success even though arithmetic needs a
         # bounded placeholder value. Unknown is not equivalent to zero.
+        """Return one normalized field from the diagnostic snapshot."""
         return getattr(snapshot, name, default) if snapshot is not None else default
 
     remaining_services = service_snapshot.registered_services
@@ -541,10 +553,10 @@ def _perform_shutdown(deadline_ns: int, generation: int) -> ConcurrencyShutdownR
         # Once terminal metadata publication has overflowed, the process can no
         # longer prove that every terminal owner is represented even if later
         # entries retire. Treat the lost observation as fail-closed.
-        # Compatibility breadcrumb: terminal_ownership:publication_rejected=
         observability_failures.append("terminal_ownership:publication_rejected")
 
     def tuple_value(name: str, index: int) -> int:
+        """Return the diagnostic value normalized as a tuple."""
         value = authoritative.get(name)
         if isinstance(value, tuple) and len(value) > index:
             try:
@@ -944,7 +956,8 @@ def shutdown_concurrency_runtime(*, deadline_seconds: float = 5.0) -> Concurrenc
             _SHUTDOWN_CONDITION.notify_all()
     if error is not None:
         _raise_shared_shutdown_error(error)
-    assert result is not None
+    if result is None:
+        raise AssertionError("successful runtime shutdown must return a result")
     return result
 
 
@@ -979,16 +992,19 @@ def _reset_runtime_shutdown_for_tests() -> None:
 
 
 def _prepare_runtime_shutdown_for_fork() -> None:
+    """Prepare runtime shutdown for fork."""
     global _SHUTDOWN_FORK_FRESH_CONDITION
     _SHUTDOWN_FORK_FRESH_CONDITION = _SHUTDOWN_CHILD_CONDITIONS[_SHUTDOWN_CHILD_CONDITION_INDEX]
 
 
 def _clear_runtime_shutdown_fork_preparation() -> None:
+    """Clear runtime shutdown fork preparation."""
     global _SHUTDOWN_FORK_FRESH_CONDITION
     _SHUTDOWN_FORK_FRESH_CONDITION = None
 
 
 def _reset_runtime_shutdown_after_fork() -> None:
+    """Reset runtime shutdown after fork."""
     global _SHUTDOWN_CONDITION, _SHUTDOWN_FORK_FRESH_CONDITION, _SHUTDOWN_CHILD_CONDITION_INDEX
     global _SHUTDOWN_IN_PROGRESS, _SHUTDOWN_OWNER, _SHUTDOWN_RESULT, _SHUTDOWN_ERROR
     prepared = _SHUTDOWN_FORK_FRESH_CONDITION

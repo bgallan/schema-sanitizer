@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency numeric boundaries match single."""
+"""Hold the flat parallel parser to the single-worker scalar oracle.
+
+Numeric edges, escaped strings, literals, empty containers, nested fallback, and invalid floats
+must preserve results and errors; wide output stays byte-exact without hash-based or duplicate
+primitive scans.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +12,6 @@ from pathlib import Path
 
 import pytest
 from _support.diagnostics import assert_diagnostics_semantically_equal
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -95,9 +99,8 @@ def test_nested_fallback_and_invalid_float_preserve_contract() -> None:
         _probe('{"value":1e9999}\n', "multi")
 
 
-def test_wide_output_is_byte_identical(tmp_path: Path) -> None:
+def test_wide_output_is_byte_identical(tmp_path: Path, require_native: None) -> None:
     """The specialized inference visitor cannot change materialized bytes."""
-    require_native()
     source = tmp_path / "wide.jsonl"
     rows = [{f"field_{column:03d}": row + column for column in range(128)} for row in range(4_096)]
     source.write_text(

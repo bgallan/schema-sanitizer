@@ -1,4 +1,6 @@
 // Implements iterative XML element and content parsing.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/xml/document.hh"
 

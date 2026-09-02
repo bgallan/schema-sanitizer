@@ -1,4 +1,8 @@
-"""Tests for native schema-registry merge helpers."""
+"""Tests for native schema-registry merge helpers.
+
+It checks nested drift versioning, historical variant reuse, canonical prior state, lazy
+parsing, normalization reuse, and malformed registry rejection.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,6 @@ import json
 
 import pytest
 from _support.schema_registry import without_detected_at as _without_detected_at
-from conftest import require_native
 
 import schema_sanitizer.core_impl.schema_registry as registry_document
 import schema_sanitizer.core_impl.schema_registry as registry_result
@@ -18,9 +21,8 @@ from schema_sanitizer.core_impl.schema_registry import (
 )
 
 
-def test_native_schema_registry_versions_struct_to_list_drift() -> None:
-    """Verify existing struct fields still version when incoming values are lists."""
-    require_native()
+def test_native_schema_registry_versions_struct_to_list_drift(require_native: None) -> None:
+    """Verify native schema registry versions struct to list drift."""
     pa = pytest.importorskip("pyarrow")
 
     sentence_struct = pa.struct([pa.field("text", pa.string())])
@@ -35,9 +37,10 @@ def test_native_schema_registry_versions_struct_to_list_drift() -> None:
     assert result.schema.names == ["sentences", "sentences_v2_struct_array"]
 
 
-def test_native_schema_registry_versions_lowest_incompatible_nested_field() -> None:
-    """Verify nested scalar drift versions the leaf under an existing container variant."""
-    require_native()
+def test_native_schema_registry_versions_lowest_incompatible_nested_field(
+    require_native: None,
+) -> None:
+    """Verify native schema registry versions lowest incompatible nested field."""
     pa = pytest.importorskip("pyarrow")
 
     numeric_sentiment = pa.struct([pa.field("magnitude", pa.float64())])
@@ -83,9 +86,8 @@ def test_native_schema_registry_versions_lowest_incompatible_nested_field() -> N
     ]
 
 
-def test_native_schema_registry_nested_versions_are_replay_stable() -> None:
-    """Verify repeated and older shapes reuse nested versions without schema growth."""
-    require_native()
+def test_native_schema_registry_nested_versions_are_replay_stable(require_native: None) -> None:
+    """Verify native schema registry nested versions are replay stable."""
     pa = pytest.importorskip("pyarrow")
 
     numeric_sentiment = pa.struct([pa.field("magnitude", pa.float64())])
@@ -118,9 +120,10 @@ def test_native_schema_registry_nested_versions_are_replay_stable() -> None:
     )
 
 
-def test_native_schema_registry_reprocessing_prefers_exact_historical_parent_variant() -> None:
-    """Verify historical registries reuse an exact ancestor before evolving a newer one."""
-    require_native()
+def test_native_schema_registry_reprocessing_prefers_exact_historical_parent_variant(
+    require_native: None,
+) -> None:
+    """Verify native schema registry reprocessing prefers exact historical parent variant."""
     pa = pytest.importorskip("pyarrow")
 
     numeric_sentiment = pa.struct([pa.field("magnitude", pa.float64())])
@@ -147,9 +150,10 @@ def test_native_schema_registry_reprocessing_prefers_exact_historical_parent_var
     )
 
 
-def test_native_schema_registry_uses_canonical_schema_as_previous_state() -> None:
-    """Verify merge reconstructs previous state from the registry document."""
-    require_native()
+def test_native_schema_registry_uses_canonical_schema_as_previous_state(
+    require_native: None,
+) -> None:
+    """Verify native schema registry uses canonical schema as previous state."""
     pa = pytest.importorskip("pyarrow")
 
     previous_schema = pa.schema([pa.field("a", pa.struct([pa.field("x", pa.string())]))])
@@ -176,9 +180,10 @@ def test_native_schema_registry_uses_canonical_schema_as_previous_state() -> Non
     ]
 
 
-def test_native_schema_contract_payload_handles_missing_canonical_schema() -> None:
-    """Verify the native contract query is the sole canonical-schema probe."""
-    require_native()
+def test_native_schema_contract_payload_handles_missing_canonical_schema(
+    require_native: None,
+) -> None:
+    """Verify native schema contract payload handles missing canonical schema."""
     pa = pytest.importorskip("pyarrow")
 
     registry = merge_schema_registry(
@@ -192,7 +197,7 @@ def test_native_schema_contract_payload_handles_missing_canonical_schema() -> No
 
 
 def test_schema_registry_merge_result_parses_json_lazily(monkeypatch) -> None:
-    """Verify parsed registry objects are decoded only when accessed."""
+    """Verify schema registry merge result parses JSON lazily."""
     real_loads = json.loads
     calls: list[str] = []
 
@@ -218,7 +223,7 @@ def test_schema_registry_merge_result_parses_json_lazily(monkeypatch) -> None:
 
 
 def test_normalize_registry_json_reuses_generated_registry_strings(monkeypatch) -> None:
-    """Verify generated registry JSON avoids Python parse/dump churn."""
+    """Verify normalize registry JSON reuses generated registry strings."""
     calls: list[str] = []
 
     def tracking_loads(raw: str):
@@ -235,7 +240,7 @@ def test_normalize_registry_json_reuses_generated_registry_strings(monkeypatch) 
 
 
 def test_normalize_registry_json_validates_unrecognized_strings(monkeypatch) -> None:
-    """Verify non-generated JSON strings use native validating normalization."""
+    """Verify normalize registry JSON validates unrecognized strings."""
     calls: list[str] = []
 
     def tracking_loads(raw: str):

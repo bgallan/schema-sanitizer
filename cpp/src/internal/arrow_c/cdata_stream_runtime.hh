@@ -1,4 +1,7 @@
 // Associates Arrow C streams with operation-scoped native runtime resources.
+// The implementation preserves Arrow ownership and error contracts without
+// depending on the Arrow C++ library.
+
 #pragma once
 
 #include <memory>

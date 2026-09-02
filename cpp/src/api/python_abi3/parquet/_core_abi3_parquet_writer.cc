@@ -1,9 +1,10 @@
 /*
- * Python ABI3 Parquet stream writer wrapper.
+ * Implements the Python ABI3 Parquet stream-writer wrapper.
  *
- * The native writer intentionally supports a conservative flat primitive
- * subset and lets Python fall back to the existing PyArrow writer otherwise.
+ * The native writer intentionally supports a conservative flat primitive subset
+ * and lets Python fall back to the existing PyArrow writer otherwise.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -27,7 +28,7 @@ namespace parquet = sanitize::internal::parquet_stream_writer;
 
 class FileParquetOutput final : public parquet::Output {
 public:
-  // Opens a local output path.
+  /// Opens a local output path.
   explicit FileParquetOutput(std::string path) : fd_lease_(1U) {
     if (fd_lease_) {
       out_.open(std::move(path),
@@ -38,14 +39,16 @@ public:
     }
   }
 
+  /// Releases resources retained by `FileParquetOutput` without propagating
+  /// cleanup failures.
   ~FileParquetOutput() override {
     sanitize::internal::close_stream_and_commit(out_, fd_lease_);
   }
 
-  // Returns whether the file opened correctly.
+  /// Returns whether the file opened correctly.
   [[nodiscard]] bool ok() const noexcept { return static_cast<bool>(out_); }
 
-  // Writes bytes to the file.
+  /// Writes bytes to the file.
   sanitize::Status Write(std::string_view data) override {
     out_.write(data.data(), static_cast<std::streamsize>(data.size()));
     if (!out_) {
@@ -55,7 +58,7 @@ public:
     return sanitize::Status::OK();
   }
 
-  // Flushes the file.
+  /// Flushes the file.
   sanitize::Status Flush() override {
     out_.flush();
     if (!out_) {
@@ -70,7 +73,7 @@ private:
   std::ofstream out_;
 };
 
-// Writes a raw Arrow C stream pointer to a local Parquet path.
+/// Writes a raw Arrow C stream pointer to a local Parquet path.
 sanitize::Status
 parquet_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
                                    const parquet::WriterOptions &options) {
@@ -83,7 +86,7 @@ parquet_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
       [&] { return parquet::write_stream(stream, output, options); });
 }
 
-// Writes a Python Arrow C stream exporter to a local Parquet path.
+/// Writes a Python Arrow C stream exporter to a local Parquet path.
 sanitize::Status
 parquet_write_stream_to_path(PyObject *stream_obj, std::string path,
                              const parquet::WriterOptions &options) {
@@ -106,7 +109,8 @@ parquet_write_stream_to_path(PyObject *stream_obj, std::string path,
 
 } // namespace
 
-// Python wrapper for writing one Arrow stream as Parquet.
+/// Writes a Python Arrow stream to a local Parquet path using requested writer
+/// options.
 PyObject *py_parquet_stream_write(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *path_obj = nullptr;
@@ -150,7 +154,8 @@ PyObject *py_parquet_stream_write(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
-// Python wrapper for writing a metadata-augmented Arrow stream as Parquet.
+/// Adds generated metadata columns before writing a Python Arrow stream as
+/// Parquet.
 PyObject *py_parquet_stream_write_with_metadata(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *path_obj = nullptr;
@@ -177,9 +182,9 @@ PyObject *py_parquet_stream_write_with_metadata(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  ArrowArrayStream *wrapped = make_metadata_stream_wrapper(
+  auto wrapped = own_arrow_stream(make_metadata_stream_wrapper(
       stream_obj, first_row_columns, all_row_columns, row_span_columns,
-      timestamp_columns, memory_limit_bytes);
+      timestamp_columns, memory_limit_bytes));
   if (!wrapped) {
     return nullptr;
   }
@@ -187,7 +192,6 @@ PyObject *py_parquet_stream_write_with_metadata(PyObject *, PyObject *args) {
       sanitize::internal::ordered_text_output::threading_mode_from_int(
           threading_mode_value);
   if (!mode_result.ok()) {
-    schema_sanitizer_stream_free(wrapped);
     PyErr_SetString(PyExc_ValueError, mode_result.status().message().c_str());
     return nullptr;
   }
@@ -198,8 +202,8 @@ PyObject *py_parquet_stream_write_with_metadata(PyObject *, PyObject *args) {
       .threading_mode = mode_result.ValueOrDie(),
   };
   auto st = parquet_write_arrow_stream_to_path(
-      wrapped, std::string(path, static_cast<std::size_t>(path_len)), options);
-  schema_sanitizer_stream_free(wrapped);
+      wrapped.get(), std::string(path, static_cast<std::size_t>(path_len)),
+      options);
   if (!st.ok()) {
     PyErr_SetString(PyExc_RuntimeError, st.message().c_str());
     return nullptr;

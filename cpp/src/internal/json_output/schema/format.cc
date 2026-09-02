@@ -1,4 +1,6 @@
 // Maps Arrow C Data format strings to native writer field kinds.
+// The code validates Arrow layouts and emits deterministic JSON with correct
+// null and logical-type semantics.
 
 #include "internal/json_output/schema/model.hh"
 

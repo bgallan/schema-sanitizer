@@ -1,10 +1,12 @@
 /*
- * Python ABI3 CSV stream writer wrapper.
+ * Implements the Python ABI3 CSV stream-writer wrapper.
  *
- * This file exposes native CSV writing for Arrow C streams. Metadata wrapping
- * and local-path normalization stay in Python; the native side only consumes
- * an Arrow C stream and writes a local CSV file.
+ * This file exposes native CSV writing for Arrow C streams.
+ *
+ * Metadata wrapping and local-path normalization stay in Python; the native
+ * side only consumes an Arrow C stream and writes a local CSV file.
  */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -26,34 +28,9 @@ namespace {
 
 namespace csv = sanitize::internal::csv_stream_writer;
 
-PyObject *csv_stats_to_dict(const csv::WriteStats &stats) {
-  PyObject *dict = PyDict_New();
-  if (!dict) {
-    return nullptr;
-  }
-  PyObject *rows = PyLong_FromLongLong(stats.materialized_rows);
-  PyObject *batches = PyLong_FromLongLong(stats.batches);
-  if (!rows || !batches) {
-    Py_XDECREF(rows);
-    Py_XDECREF(batches);
-    Py_DECREF(dict);
-    return nullptr;
-  }
-  if (PyDict_SetItemString(dict, "materialized_rows", rows) < 0 ||
-      PyDict_SetItemString(dict, "batches", batches) < 0) {
-    Py_DECREF(rows);
-    Py_DECREF(batches);
-    Py_DECREF(dict);
-    return nullptr;
-  }
-  Py_DECREF(rows);
-  Py_DECREF(batches);
-  return dict;
-}
-
 class FileCsvOutput final : public csv::Output {
 public:
-  // Opens a local output path.
+  /// Opens a local output path.
   explicit FileCsvOutput(std::string path) : fd_lease_(1U) {
     if (fd_lease_) {
       out_.open(std::move(path),
@@ -64,14 +41,16 @@ public:
     }
   }
 
+  /// Releases resources retained by `FileCsvOutput` without propagating cleanup
+  /// failures.
   ~FileCsvOutput() override {
     sanitize::internal::close_stream_and_commit(out_, fd_lease_);
   }
 
-  // Returns whether the file opened correctly.
+  /// Returns whether the file opened correctly.
   [[nodiscard]] bool ok() const noexcept { return static_cast<bool>(out_); }
 
-  // Writes bytes to the file.
+  /// Writes bytes to the file.
   sanitize::Status Write(std::string_view data) override {
     out_.write(data.data(), static_cast<std::streamsize>(data.size()));
     if (!out_) {
@@ -80,7 +59,7 @@ public:
     return sanitize::Status::OK();
   }
 
-  // Flushes the file.
+  /// Flushes the file.
   sanitize::Status Flush() override {
     out_.flush();
     if (!out_) {
@@ -94,6 +73,7 @@ private:
   std::ofstream out_;
 };
 
+/// Writes a validated Arrow C stream as CSV to a local path.
 sanitize::Result<csv::WriteStats>
 csv_write_stream_to_path(PyObject *stream_obj, std::string path,
                          std::int64_t memory_limit_bytes,
@@ -116,6 +96,7 @@ csv_write_stream_to_path(PyObject *stream_obj, std::string path,
   });
 }
 
+/// Acquires a Python Arrow stream and writes it as CSV to a local path.
 sanitize::Result<csv::WriteStats>
 csv_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
                                std::int64_t memory_limit_bytes,
@@ -132,6 +113,7 @@ csv_write_arrow_stream_to_path(ArrowArrayStream *stream, std::string path,
 
 } // namespace
 
+/// Writes a Python Arrow stream to a CSV path and returns row and batch counts.
 PyObject *py_csv_stream_write(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *path_obj = nullptr;
@@ -162,9 +144,12 @@ PyObject *py_csv_stream_write(PyObject *, PyObject *args) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;
   }
-  return csv_stats_to_dict(result.ValueOrDie());
+  const auto &stats = result.ValueOrDie();
+  return materialization_stats_dict(stats.materialized_rows, stats.batches);
 }
 
+/// Adds generated metadata columns, writes the Arrow stream as CSV, and returns
+/// counts.
 PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
   PyObject *stream_obj = nullptr;
   PyObject *path_obj = nullptr;
@@ -188,9 +173,9 @@ PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  ArrowArrayStream *wrapped = make_metadata_stream_wrapper(
+  auto wrapped = own_arrow_stream(make_metadata_stream_wrapper(
       stream_obj, first_row_columns, all_row_columns, row_span_columns,
-      timestamp_columns, memory_limit_bytes);
+      timestamp_columns, memory_limit_bytes));
   if (!wrapped) {
     return nullptr;
   }
@@ -198,21 +183,21 @@ PyObject *py_csv_stream_write_with_metadata(PyObject *, PyObject *args) {
       sanitize::internal::ordered_text_output::threading_mode_from_int(
           threading_mode_value);
   if (!mode_result.ok()) {
-    schema_sanitizer_stream_free(wrapped);
     PyErr_SetString(PyExc_ValueError, mode_result.status().message().c_str());
     return nullptr;
   }
   auto result = csv_write_arrow_stream_to_path(
-      wrapped, std::string(path, static_cast<std::size_t>(path_len)),
+      wrapped.get(), std::string(path, static_cast<std::size_t>(path_len)),
       memory_limit_bytes, mode_result.ValueOrDie());
-  schema_sanitizer_stream_free(wrapped);
   if (!result.ok()) {
     PyErr_SetString(PyExc_RuntimeError, result.status().message().c_str());
     return nullptr;
   }
-  return csv_stats_to_dict(result.ValueOrDie());
+  const auto &stats = result.ValueOrDie();
+  return materialization_stats_dict(stats.materialized_rows, stats.batches);
 }
 
+/// Reports whether the native CSV writer supports a supplied PyArrow schema.
 PyObject *py_csv_schema_supported(PyObject *, PyObject *args) {
   PyObject *schema_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:csv_schema_supported", &schema_obj)) {

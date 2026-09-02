@@ -1,4 +1,8 @@
-"""Diagnostics patching for table and file materialization."""
+"""Diagnostics patching for table and file materialization.
+
+It patches table and file results with final stream, sink, native-route, row, byte, and
+schema diagnostics after materialization.
+"""
 
 from __future__ import annotations
 
@@ -188,7 +192,9 @@ def _metadata_uncompressed_bytes(metadata: Any) -> int:
     for index in range(getattr(metadata, "num_row_groups", 0) or 0):
         try:
             total += int(metadata.row_group(index).total_byte_size or 0)
-        except Exception:
+        # Malformed advisory metadata is intentionally skipped.
+        except Exception as ignored_error:
+            del ignored_error
             continue
     return total
 
@@ -234,8 +240,20 @@ def patch_file_output_diagnostics(
     feature: str,
     *,
     native_stats: Any = None,
+    file_output_route: str | None = None,
+    file_metadata_route: str | None = None,
 ) -> None:
     """Patch output diagnostics using the cheapest format-specific source."""
+    routes = {
+        key: value
+        for key, value in (
+            ("file_output_route", file_output_route),
+            ("file_metadata_route", file_metadata_route),
+        )
+        if value is not None
+    }
+    if routes:
+        patch_diagnostics_values(_diagnostics_target(result), routes)
     if feature == "to_parquet":
         _patch_parquet_file_diagnostics(result, path)
     elif feature == "to_jsonl":

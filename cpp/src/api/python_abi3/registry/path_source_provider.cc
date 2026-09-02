@@ -1,4 +1,11 @@
-/* Path-source provider parsing, metadata packing, and schema probing. */
+/*
+ * Implements path-source provider parsing, metadata packing, and schema
+ * probing.
+ *
+ * The routines preserve source order and Arrow ownership while applying
+ * compiled registry plans.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -12,7 +19,6 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/metadata/columns/api.hh"
 #include "api/python_abi3/metadata/stream/stream.hh"
 #include "api/python_abi3/path_sources/path_sources.hh"
@@ -20,7 +26,7 @@
 #include "api/python_abi3/registry/path_source_sinks_internal.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/ingest/chunk_source.hh"
@@ -30,13 +36,15 @@
 
 namespace core_abi3_internal::path_registry_detail {
 
+/// Releases registry outputs and clears transferred ownership to prevent reuse.
 void release_registry_outputs(PyRegistrySinkOutputs *outputs) {
   release_sink_outputs(outputs->main_stream, outputs->diagnostics);
-  schema_sanitizer_free_string(outputs->registry_json);
-  schema_sanitizer_free_string(outputs->drifts_json);
-  schema_sanitizer_free_string(outputs->conversion_timestamp);
+  outputs->main_stream = nullptr;
+  outputs->diagnostics = nullptr;
 }
 
+/// Reports whether Python arguments request generated registry metadata
+/// columns.
 bool registry_metadata_requested(PyObject *first_row_columns,
                                  PyObject *all_row_columns,
                                  PyObject *row_span_columns,
@@ -45,19 +53,21 @@ bool registry_metadata_requested(PyObject *first_row_columns,
          timestamp_columns;
 }
 
+/// Builds metadata columns emitted only for the first row of each registry
+/// source.
 PyObject *registry_first_row_columns(PyObject *first_row_columns,
-                                     const char *registry_json,
-                                     const char *drifts_json) {
+                                     std::string_view registry_json,
+                                     std::string_view drifts_json) {
   PyObject *merged = (first_row_columns && first_row_columns != Py_None)
                          ? PyDict_Copy(first_row_columns)
                          : PyDict_New();
   if (!merged) {
     return nullptr;
   }
-  PyObject *registry_value =
-      PyUnicode_FromString(registry_json ? registry_json : "{}");
-  PyObject *drifts_value =
-      PyUnicode_FromString(drifts_json ? drifts_json : "[]");
+  PyObject *registry_value = PyUnicode_FromStringAndSize(
+      registry_json.data(), static_cast<Py_ssize_t>(registry_json.size()));
+  PyObject *drifts_value = PyUnicode_FromStringAndSize(
+      drifts_json.data(), static_cast<Py_ssize_t>(drifts_json.size()));
   if (!registry_value || !drifts_value ||
       PyDict_SetItemString(merged, "schema_registry", registry_value) != 0 ||
       PyDict_SetItemString(merged, "schema_drifts", drifts_value) != 0) {
@@ -71,6 +81,7 @@ PyObject *registry_first_row_columns(PyObject *first_row_columns,
   return merged;
 }
 
+/// Wraps a registry result stream with requested metadata and registry columns.
 bool wrap_registry_stream_with_metadata(PyRegistrySinkOutputs *outputs,
                                         PyObject *first_row_columns,
                                         PyObject *all_row_columns,
@@ -100,32 +111,44 @@ bool wrap_registry_stream_with_metadata(PyRegistrySinkOutputs *outputs,
   return true;
 }
 
+/// Validates a native registry result, adds metadata, and packs its Python
+/// result.
 PyObject *pack_registry_or_raise_with_metadata(
-    int status, PyObject *keepalive, PyRegistrySinkOutputs *outputs,
+    sanitize::Result<NativeRegistrySinkOutput> result, PyObject *keepalive,
     PyObject *first_row_columns, PyObject *all_row_columns,
     PyObject *row_span_columns, PyObject *timestamp_columns,
     std::int64_t memory_limit_bytes) {
-  if (status != SCHEMA_SANITIZER_STATUS_OK) {
-    release_registry_outputs(outputs);
-    raise_status_error(status, outputs->err);
+  if (!result.ok()) {
+    raise_status_error(result.status());
     return nullptr;
   }
+  auto native = std::move(result).ValueOrDie();
+  PyRegistrySinkOutputs outputs{
+      .main_stream = native.sink.stream.release(),
+      .diagnostics = native.sink.diagnostics.release(),
+      .registry_json = std::move(native.registry_json),
+      .drifts_json = std::move(native.drifts_json),
+      .conversion_timestamp = std::move(native.conversion_timestamp),
+  };
   if (!wrap_registry_stream_with_metadata(
-          outputs, first_row_columns, all_row_columns, row_span_columns,
+          &outputs, first_row_columns, all_row_columns, row_span_columns,
           timestamp_columns, memory_limit_bytes)) {
-    release_registry_outputs(outputs);
+    release_registry_outputs(&outputs);
     return nullptr;
   }
-  return pack_registry_stream_result(
-      keepalive, outputs->main_stream, outputs->diagnostics,
-      outputs->registry_json, outputs->drifts_json,
-      outputs->conversion_timestamp, nullptr);
+  return pack_registry_stream_result(keepalive, outputs.main_stream,
+                                     outputs.diagnostics, outputs.registry_json,
+                                     outputs.drifts_json,
+                                     outputs.conversion_timestamp, nullptr);
 }
 
+/// Reports whether a parsed provider chunk contains no path sources.
 bool path_source_input_empty(const PathSourceInput &input) noexcept {
   return !input.chunk_source && input.paths.empty();
 }
 
+/// Derives generated metadata columns for one child of the schema-registry
+/// stream.
 std::vector<MetadataColumn>
 metadata_columns_for_child(const NativePathSourcesStreamState *state,
                            const PathSourceSpec &source,
@@ -136,6 +159,8 @@ metadata_columns_for_child(const NativePathSourcesStreamState *state,
       state->source_file_column && !source_file_in_inner);
 }
 
+/// Formats the current path-source failure with its source and registry
+/// context.
 std::string path_source_error_message(const PathSourceSpec &source,
                                       const std::string &message) {
   if (source.source_file.empty() || message.contains(source.source_file)) {
@@ -144,6 +169,7 @@ std::string path_source_error_message(const PathSourceSpec &source,
   return "Invalid source file " + source.source_file + ": " + message;
 }
 
+/// Converts the active Python provider exception into a native registry status.
 sanitize::Status python_provider_error_status(const char *where) {
   PyObject *type = nullptr;
   PyObject *value = nullptr;
@@ -178,6 +204,8 @@ sanitize::Status python_provider_error_status(const char *where) {
   return sanitize::Status::Invalid(msg);
 }
 
+/// Closes chunk provider idempotently and preserves any prior schema-registry
+/// stream failure.
 void close_chunk_provider(NativePathSourcesStreamState *state) noexcept {
   if (!state || !state->chunk_provider) {
     return;
@@ -195,6 +223,7 @@ void close_chunk_provider(NativePathSourcesStreamState *state) noexcept {
   PyGILState_Release(gil);
 }
 
+/// Loads the next provider chunk and retains it for registry streaming.
 sanitize::Status load_next_provider_chunk(NativePathSourcesStreamState *state) {
   if (!state || !state->chunk_provider || state->chunk_provider_exhausted) {
     return sanitize::Status::OK();
@@ -233,6 +262,8 @@ sanitize::Status load_next_provider_chunk(NativePathSourcesStreamState *state) {
   return sanitize::Status::OK();
 }
 
+/// Reports whether the Python provider exposes a callable `next_sources`
+/// method.
 bool provider_has_next_sources(PyObject *provider_obj) {
   if (!PyObject_HasAttrString(provider_obj, "next_sources")) {
     PyErr_SetString(PyExc_TypeError,
@@ -242,6 +273,8 @@ bool provider_has_next_sources(PyObject *provider_obj) {
   return true;
 }
 
+/// Closes Python provider idempotently and preserves any prior schema-registry
+/// stream failure.
 void close_python_provider(PyObject *provider_obj) noexcept {
   if (!provider_obj) {
     return;
@@ -254,6 +287,8 @@ void close_python_provider(PyObject *provider_obj) noexcept {
   Py_DECREF(result);
 }
 
+/// Calls `next_sources` and parses the next path group, treating `None` as
+/// exhaustion.
 bool parse_next_provider_sources(PyObject *provider_obj,
                                  std::vector<PathSourceSpec> *sources,
                                  bool *exhausted) {
@@ -277,9 +312,11 @@ bool parse_next_provider_sources(PyObject *provider_obj,
   return ok;
 }
 
+/// Merges path source provider schemas while preserving deterministic field
+/// order and diagnostics.
 sanitize::Result<sanitize::SchemaRegistryMergeResult>
 merge_path_source_provider_schemas(
-    schema_sanitizer_context *ctx, PyObject *provider_obj,
+    NativeContext *ctx, PyObject *provider_obj,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
     const char *field_name_policy, bool skip_invalid_json_sources,
     const sanitize::LogicalSchema *previous_schema,

@@ -1,4 +1,8 @@
-"""Collect diagnostics for native extension loading failures."""
+"""Collect diagnostics for native extension loading failures.
+
+It reports Python, platform, package paths, and native-extension candidates without attempting
+another extension import.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-def loader_debug(*, run_linker_tools: bool = True) -> dict[str, Any]:
+def loader_debug() -> dict[str, Any]:
     """Return a JSON-serializable snapshot useful for debugging import failures."""
 
     pkg_dir = Path(__file__).resolve().parents[1]
@@ -34,15 +38,4 @@ def loader_debug(*, run_linker_tools: bool = True) -> dict[str, Any]:
         },
     }
 
-    del run_linker_tools
-
     return out
-
-
-def collect_loader_debug() -> dict[str, Any]:
-    """Stable helper used by SchemaSanitizerImportError.
-
-    Schema-Sanitizer never reads process environment variables for diagnostics.
-    """
-
-    return loader_debug()

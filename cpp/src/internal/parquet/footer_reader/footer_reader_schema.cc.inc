@@ -1,5 +1,9 @@
-// Arrow schema formats, leaf contracts, and level indexing.
+// Maps Parquet schema elements to Arrow formats, leaf levels, and column
+// projections. This fragment is included by the bounded footer reader inside
+// its private implementation namespace.
 
+/// Returns the Arrow C format string for a signed or unsigned Parquet integer
+/// width.
 std::string arrow_integer_format(std::int32_t bit_width, bool is_signed) {
   switch (bit_width) {
   case 8:
@@ -15,6 +19,8 @@ std::string arrow_integer_format(std::int32_t bit_width, bool is_signed) {
   }
 }
 
+/// Maps a legacy Parquet converted integer type to its signed or unsigned Arrow
+/// format.
 std::string arrow_integer_format_from_converted_type(std::int32_t converted) {
   switch (converted) {
   case kConvertedUInt8:
@@ -38,6 +44,8 @@ std::string arrow_integer_format_from_converted_type(std::int32_t converted) {
   }
 }
 
+/// Maps Parquet date, time, and timestamp annotations to an Arrow C format
+/// string.
 std::string arrow_temporal_format(std::string_view logical_type,
                                   std::string_view unit,
                                   std::int32_t physical_type,
@@ -76,6 +84,8 @@ std::string arrow_temporal_format(std::string_view logical_type,
   return {};
 }
 
+/// Selects the Arrow C format string for one physical and logical Parquet leaf
+/// type.
 std::string arrow_format_for_leaf(const SchemaElementInfo &element) {
   if (!element.has_physical_type) {
     return {};
@@ -156,6 +166,8 @@ struct LeafLevelInfo {
   std::string native_arrow_format;
 };
 
+/// Computes maximum definition and repetition levels for every Parquet schema
+/// leaf.
 sanitize::Result<std::vector<LeafLevelInfo>>
 schema_leaf_levels(const std::vector<SchemaElementInfo> &schema) {
   std::vector<LeafLevelInfo> out;
@@ -290,6 +302,7 @@ schema_leaf_levels(const std::vector<SchemaElementInfo> &schema) {
   return out;
 }
 
+/// Expands a top-level column projection into source-ordered leaf indexes.
 sanitize::Status
 projected_top_level_leaf_indices(const std::vector<LeafLevelInfo> &leaves,
                                  const std::vector<std::string> &columns,
@@ -327,6 +340,7 @@ projected_top_level_leaf_indices(const std::vector<LeafLevelInfo> &leaves,
   return {};
 }
 
+/// Copies the schema-level records selected by a top-level column projection.
 sanitize::Status
 project_leaf_levels_for_columns(const std::vector<LeafLevelInfo> &leaves,
                                 const std::vector<std::string> &columns,
@@ -350,6 +364,8 @@ project_leaf_levels_for_columns(const std::vector<LeafLevelInfo> &leaves,
   return {};
 }
 
+/// Assigns column levels from validated schema and page metadata for later
+/// materialization.
 sanitize::Result<std::vector<LeafLevelInfo>>
 assign_column_levels(FooterInfo *info) {
   if (!info) {

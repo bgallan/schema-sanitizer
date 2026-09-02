@@ -1,4 +1,6 @@
 // Prepares ingestion by resolving schemas and compiling materialization plans.
+// The phases combine inferred or supplied schemas with options before compiling
+// the execution plan.
 
 #include "sanitize/ingest/ingest.hh"
 
@@ -26,6 +28,8 @@
 
 namespace sanitize {
 
+/// Infers or resolves the input schema and compiles its materialization plan.
+/// Creates and owns an execution context when the caller does not supply one.
 sanitize::Result<PreparedIngest> prepare_ingest(std::string_view frontend_name,
                                                 FrontendHandle frontend,
                                                 PreparedOptionsPtr opts,

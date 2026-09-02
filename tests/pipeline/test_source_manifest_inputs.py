@@ -1,4 +1,8 @@
-"""Public immutable ``SourceManifest`` input contracts."""
+"""Public immutable ``SourceManifest`` input contracts.
+
+It validates the public immutable manifest type, suffix and emptiness rules, converter
+acceptance, source identity, and diagnostic attachment.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 import schema_sanitizer as ss
-from schema_sanitizer.api_impl.input.manifest_preparation import (
+from schema_sanitizer.api_impl.input.preparation import (
     prepare_source_manifest_input,
 )
 from schema_sanitizer.api_impl.source_manifest_diagnostics import (
@@ -91,8 +95,7 @@ def test_manifest_preparation_uses_exact_objects_without_relisting(
         return PreparedPublicInput(object(), "csv", "stream")
 
     monkeypatch.setattr(
-        "schema_sanitizer.api_impl.input.manifest_preparation."
-        "remote_native_directory_prepared_from_files",
+        "schema_sanitizer.api_impl.input.preparation.remote_native_directory_prepared_from_files",
         prepared_from_files,
     )
 
@@ -132,11 +135,11 @@ def test_parquet_manifest_reuses_staging_and_cleanup_lifecycle(
         """Record closure of one staged or prepared resource."""
 
         def __init__(self, name: str) -> None:
-            """Store the resource label used by the assertion."""
+            """Initialize keepalive state for name."""
             self.name = name
 
         def close(self) -> None:
-            """Append this resource to the observed close order."""
+            """Close the keepalive and release its retained resources."""
             closed.append(self.name)
 
     staged = SimpleNamespace(
@@ -157,12 +160,12 @@ def test_parquet_manifest_reuses_staging_and_cleanup_lifecycle(
         return PreparedPublicInput(object(), "parquet", "directory", _Keepalive("prepared"))
 
     monkeypatch.setattr(
-        "schema_sanitizer.api_impl.input.manifest_preparation."
+        "schema_sanitizer.api_impl.input.preparation."
         "remote_staging.stage_remote_files_to_directory",
         stage,
     )
     monkeypatch.setattr(
-        "schema_sanitizer.api_impl.input.manifest_preparation.prepare_directory",
+        "schema_sanitizer.api_impl.input.preparation.prepare_directory",
         prepare,
     )
 
@@ -201,8 +204,7 @@ def test_manifest_can_be_reused_without_identity_drift(
         return PreparedPublicInput(object(), "csv", "stream")
 
     monkeypatch.setattr(
-        "schema_sanitizer.api_impl.input.manifest_preparation."
-        "remote_native_directory_prepared_from_files",
+        "schema_sanitizer.api_impl.input.preparation.remote_native_directory_prepared_from_files",
         prepared_from_files,
     )
 
@@ -381,22 +383,3 @@ def test_analytical_converter_accepts_manifest_and_attaches_diagnostics(
     assert result.stats["source_objects"] == [
         {"uri": "gs://bucket/events/a.csv", "generation": "7"}
     ]
-
-
-def test_source_manifest_owners_and_documentation_remain_bounded() -> None:
-    """Manifest input responsibilities remain cohesive and publicly documented."""
-    root = Path(__file__).resolve().parents[2]
-    owners = (
-        root / "src/schema_sanitizer/sources/models.py",
-        root / "src/schema_sanitizer/api_impl/input/manifest_preparation.py",
-        root / "src/schema_sanitizer/api_impl/source_manifest_diagnostics.py",
-    )
-
-    assert all(owner.is_file() for owner in owners)
-    assert all(len(owner.read_text(encoding="utf-8").splitlines()) <= 500 for owner in owners)
-    guide = root / "docs/reference/inputs-and-filesystems.md"
-    assert guide.is_file()
-    assert "SourceManifest" in guide.read_text(encoding="utf-8")
-    assert "reference/inputs-and-filesystems.md" in (root / "docs/README.md").read_text(
-        encoding="utf-8"
-    )

@@ -1,4 +1,8 @@
-"""Partition conversion loop, registry state, and result models."""
+"""Partition conversion loop, registry state, and result models.
+
+It runs partitions in order, carries schema registry state, invokes callbacks, and
+aggregates per-partition diagnostics into the final result.
+"""
 
 from __future__ import annotations
 
@@ -248,7 +252,8 @@ def run_partitioned_to_parquet_registry_json(
             if kwargs_factory is not None:
                 kwargs = _resolved_converter_kwargs(kwargs_factory(plan))
             else:
-                assert static_kwargs is not None
+                if static_kwargs is None:
+                    raise AssertionError("static converter arguments cannot be absent")
                 kwargs = _resolved_converter_kwargs(
                     static_kwargs,
                     fixed_memory_limit_bytes=static_memory_limit_bytes,

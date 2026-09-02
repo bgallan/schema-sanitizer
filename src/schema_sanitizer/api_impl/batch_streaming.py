@@ -1,4 +1,8 @@
-"""Lazy analytical record-batch API and resource ownership."""
+"""Lazy analytical record-batch API and resource ownership.
+
+It exposes lazy record batches while keeping the underlying stream and operation
+resources alive until exhaustion, failure, or explicit close.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Registry probing for canonical source plans and prepared inputs."""
+"""Registry probing for canonical source plans and prepared inputs.
+
+It samples a source plan through the native registry path and returns schema, drift, and
+route evidence without leaking probe resources.
+"""
 
 from __future__ import annotations
 

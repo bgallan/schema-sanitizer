@@ -1,4 +1,8 @@
-"""Strictly synchronous Amazon S3 operations for threading_mode='single'."""
+"""Strictly synchronous Amazon S3 operations for threading_mode='single'.
+
+It opens an owned blocking client and performs S3 metadata, listing, download, and
+multipart publication without background transports.
+"""
 
 from __future__ import annotations
 
@@ -12,12 +16,11 @@ from ...core_impl.memory_budget import memory_budget
 from ...core_impl.safe_errors import add_bounded_note
 from ...core_impl.sync_retry import retry_sync
 from ...core_impl.temporary_storage import StreamingStorageReservation
-from ...core_impl.uris import content_type_for_uri, name_matches, normalize_extensions
+from ...core_impl.uris import content_type_for_uri, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
     current_directory_metadata_budget,
-    split_parent_child,
 )
 from ...sources.models import RemoteFile
 from ..file_streams import write_sync_reader_to_file
@@ -30,7 +33,15 @@ from ..upload_policy import (
     release_upload_payload,
     remote_upload_policy,
 )
-from .s3 import parse_uri
+from . import (
+    direct_child_items,
+    next_page_token,
+    requested_child_items,
+    requested_directory_groups,
+    retryable_sdk_error,
+    sdk_error_identity,
+)
+from .s3 import _directory_location, parse_uri
 
 
 def _client_options() -> dict[str, Any]:
@@ -48,9 +59,11 @@ class _S3ClientOwner:
     """Retryable physical owner for one synchronous Botocore client."""
 
     def __init__(self) -> None:
+        """Create an empty slot for the blocking Botocore client."""
         self.client: Any | None = None
 
     def close(self) -> None:
+        """Physically close the Botocore client before clearing its authoritative slot."""
         client = self.client
         if client is None:
             return
@@ -87,28 +100,9 @@ def open_client() -> Iterator[Any]:
                 raise
 
 
-def _error_identity(exc: Exception) -> tuple[Any, Any]:
-    """Return one Botocore error's status and service code."""
-    response = getattr(exc, "response", None)
-    if not isinstance(response, dict):
-        return None, None
-    metadata = response.get("ResponseMetadata")
-    status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
-    error = response.get("Error")
-    code = error.get("Code") if isinstance(error, dict) else None
-    return status, code
-
-
 def _retryable(exc: Exception) -> bool:
     """Return whether one idempotent S3 request is transient."""
-    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
-        return True
-    status, code = _error_identity(exc)
-    return (
-        status == 429
-        or (isinstance(status, int) and status >= 500)
-        or code in {"InternalError", "RequestTimeout", "ServiceUnavailable", "SlowDown"}
-    )
+    return retryable_sdk_error(exc)
 
 
 def file_metadata(uri: str, *, memory_limit_bytes: int | None = None) -> RemoteFile | None:
@@ -126,7 +120,7 @@ def file_metadata(uri: str, *, memory_limit_bytes: int | None = None) -> RemoteF
                 request, retries=retries, should_retry=_retryable, throttle_key="s3"
             )
         except Exception as exc:
-            status, code = _error_identity(exc)
+            status, code = sdk_error_identity(exc)
             if status == 404 or code in {"404", "NoSuchKey", "NotFound"}:
                 return None
             if status in {401, 403} or code in {"403", "AccessDenied"}:
@@ -335,22 +329,25 @@ def list_files(
                 should_retry=_retryable,
                 throttle_key="s3",
             )
-            for item in payload.get("Contents", ()):
-                key = item.get("Key")
-                if not isinstance(key, str):
-                    continue
-                relative = key[len(prefix) :] if key.startswith(prefix) else key
-                if not relative or "/" in relative or not name_matches(relative, suffixes):
-                    continue
+            for item, relative in direct_child_items(
+                payload.get("Contents", ()),
+                prefix,
+                suffixes,
+                "Key",
+            ):
+                key = item["Key"]
                 size = item.get("Size") if isinstance(item.get("Size"), int) else None
                 remote_file = RemoteFile(f"s3://{ref.bucket}/{key}", relative, size)
                 metadata_budget.charge_file(remote_file, associations=4)
                 files.append(remote_file)
-            if not payload.get("IsTruncated"):
+            token = next_page_token(
+                payload,
+                "NextContinuationToken",
+                truncated_key="IsTruncated",
+                missing_error=f"S3 list for {uri!r} was truncated without a token",
+            )
+            if token is None:
                 break
-            token = payload.get("NextContinuationToken")
-            if not isinstance(token, str) or not token:
-                raise RuntimeError(f"S3 list for {uri!r} was truncated without a token")
     governed_sort(files, key=lambda file: file.name, stage="remote_discovery_sort")
     return files
 
@@ -368,19 +365,11 @@ def directories_containing_files(
         uris,
         metadata_budget=metadata_budget,
     )
-    groups: dict[tuple[str, str], dict[str, list[str]]] = {}
-    for uri in uris:
-        ref = parse_uri(uri)
-        parsed = split_parent_child(ref.key)
-        if parsed is None:
-            continue
-        parent_prefix, child = parsed
-        # pass63 proof anchor: metadata_budget.charge_group_associations()
-        discovery.publish_group_association(
-            lambda: (
-                groups.setdefault((ref.bucket, parent_prefix), {}).setdefault(child, []).append(uri)
-            )
-        )
+    groups = requested_directory_groups(
+        uris,
+        discovery,
+        _directory_location,
+    )
     retries = memory_budget(memory_limit_bytes).async_retries
     with open_client() as client:
         for (bucket, parent_prefix), children in groups.items():
@@ -393,27 +382,29 @@ def directories_containing_files(
                     should_retry=_retryable,
                     throttle_key="s3",
                 )
-                for item in payload.get("Contents", ()):
-                    key = item.get("Key")
-                    if not isinstance(key, str) or not key.startswith(prefix):
-                        continue
-                    relative = key[len(prefix) :]
-                    child, separator, filename = relative.partition("/")
-                    child_uris = children.get(child) if separator else None
-                    if not child_uris or "/" in filename or not name_matches(filename, accepted):
-                        continue
+                for item, child_uris, filename in requested_child_items(
+                    payload.get("Contents", ()),
+                    prefix,
+                    children,
+                    accepted,
+                    "Key",
+                ):
+                    key = item["Key"]
                     size = item.get("Size") if isinstance(item.get("Size"), int) else None
                     discovery.add(
                         child_uris,
                         RemoteFile(f"s3://{bucket}/{key}", filename, size),
                     )
-                if not payload.get("IsTruncated"):
-                    break
-                token = payload.get("NextContinuationToken")
-                if not isinstance(token, str) or not token:
-                    raise RuntimeError(
+                token = next_page_token(
+                    payload,
+                    "NextContinuationToken",
+                    truncated_key="IsTruncated",
+                    missing_error=(
                         f"S3 bulk source discovery for {parent_prefix!r} was truncated without a token"
-                    )
+                    ),
+                )
+                if token is None:
+                    break
     return discovery.finish()
 
 

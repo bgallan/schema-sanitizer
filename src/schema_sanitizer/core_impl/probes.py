@@ -1,4 +1,8 @@
-"""Native schema and registry probe methods for the execution context."""
+"""Expose native schema and registry probes through the execution context.
+
+Probe-safe options are prepared before Arrow streams, path sources, and registry operations are
+submitted through the owned native execution capsule.
+"""
 
 from __future__ import annotations
 

@@ -1,8 +1,11 @@
 // Declares Python ABI3 capsule ownership and sink-result packing helpers.
+// These definitions keep interpreter ownership and method-table details behind
+// the private extension boundary.
 
 #pragma once
 
 #include <memory>
+#include <string_view>
 
 #include "internal/abi/python_abi3/base.hh"
 
@@ -12,31 +15,35 @@ struct PreparedOptions;
 
 namespace core_abi3_internal {
 
-schema_sanitizer_context *unwrap_context(PyObject *obj);
-PyObject *wrap_context_capsule(schema_sanitizer_context *ctx);
-schema_sanitizer_prepared_options *unwrap_prepared_options(PyObject *obj);
-// Resolves None to the shared default options or unwraps a prepared capsule.
+struct NativeContext;
+struct NativeDiagnostics;
+struct NativePreparedOptions;
+
+NativeContext *unwrap_context(PyObject *obj);
+PyObject *wrap_context_capsule(NativeContext *ctx);
+NativePreparedOptions *unwrap_prepared_options(PyObject *obj);
+/// Resolves None to the shared default options or unwraps a prepared capsule.
 bool resolve_prepared_options(
     PyObject *obj,
     std::shared_ptr<const sanitize::PreparedOptions> *out_prepared);
-schema_sanitizer_diagnostics *unwrap_diagnostics(PyObject *obj);
-PyObject *
-wrap_prepared_options_capsule(schema_sanitizer_prepared_options *prepared);
-PyObject *wrap_diagnostics_capsule(schema_sanitizer_diagnostics *diagnostics);
+NativeDiagnostics *unwrap_diagnostics(PyObject *obj);
+PyObject *wrap_prepared_options_capsule(NativePreparedOptions *prepared);
+PyObject *wrap_diagnostics_capsule(NativeDiagnostics *diagnostics);
 PyObject *wrap_stream_capsule_with_keepalive(PyObject *keepalive_obj,
                                              ArrowArrayStream *stream);
 void release_sink_outputs(ArrowArrayStream *main_stream,
-                          schema_sanitizer_diagnostics *diagnostics);
-PyObject *
-pack_stream_and_diagnostics(PyObject *keepalive, ArrowArrayStream *main_stream,
-                            schema_sanitizer_diagnostics *diagnostics);
+                          NativeDiagnostics *diagnostics);
+PyObject *pack_stream_and_diagnostics(PyObject *keepalive,
+                                      ArrowArrayStream *main_stream,
+                                      NativeDiagnostics *diagnostics);
 // Packs the fixed six-field registry result. native_registry_state is borrowed;
 // nullptr emits None in the final slot.
 PyObject *pack_registry_stream_result(PyObject *keepalive,
                                       ArrowArrayStream *main_stream,
-                                      schema_sanitizer_diagnostics *diagnostics,
-                                      char *registry_json, char *drifts_json,
-                                      char *conversion_timestamp,
+                                      NativeDiagnostics *diagnostics,
+                                      std::string_view registry_json,
+                                      std::string_view drifts_json,
+                                      std::string_view conversion_timestamp,
                                       PyObject *native_registry_state);
 
 } // namespace core_abi3_internal

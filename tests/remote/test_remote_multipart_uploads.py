@@ -1,4 +1,8 @@
-"""Provider publication contracts for bounded multipart and resumable uploads."""
+"""Provider publication contracts for bounded multipart and resumable uploads.
+
+The suite covers memory policy, ordered completion, retry recovery, provider-specific
+receipts, abort cleanup, earliest-failure reporting, and cancellation drainage.
+"""
 
 from __future__ import annotations
 
@@ -7,73 +11,36 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import require_native
+from _support.remote_harness import (
+    AsyncValueContext as _AsyncContext,
+)
+from _support.remote_harness import (
+    BoundedResponse as _Response,
+)
+from _support.remote_harness import (
+    sparse_file as _sparse_file,
+)
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 
-class _AsyncContext:
-    """Return one supplied object from an asynchronous context manager."""
+def _assert_expected_upload_capacity(concurrency: int, memory_limit_bytes: int) -> bool:
+    """Bind upload concurrency to the host CPU envelope without masking regressions."""
+    from schema_sanitizer.core_impl.execution_policy import execution_policy
 
-    def __init__(self, value: object) -> None:
-        """Store the context value."""
-        self.value = value
-
-    async def __aenter__(self) -> object:
-        """Return the stored value."""
-        return self.value
-
-    async def __aexit__(self, *_exc: object) -> None:
-        """Leave the fake context."""
-
-
-class _Response:
-    """Minimal aiohttp-like response context used by GCS tests."""
-
-    def __init__(
-        self,
-        status: int,
-        *,
-        headers: dict[str, str] | None = None,
-        body: bytes = b"",
-        enter_error: BaseException | None = None,
-    ) -> None:
-        """Store status, headers, body, and an optional transport failure."""
-        self.status = status
-        self.headers = headers or {}
-        self._body = body
-        self._offset = 0
-        self.content = self
-        self._enter_error = enter_error
-
-    async def __aenter__(self) -> _Response:
-        """Return this response or raise the configured transport failure."""
-        if self._enter_error is not None:
-            raise self._enter_error
-        return self
-
-    async def __aexit__(self, *_exc: object) -> None:
-        """Leave the fake response context."""
-
-    async def read(self, size: int) -> bytes:
-        """Return at most ``size`` bytes through the bounded reader API."""
-        end = min(len(self._body), self._offset + size)
-        chunk = self._body[self._offset : end]
-        self._offset = end
-        return chunk
-
-    def at_eof(self) -> bool:
-        """Report whether the configured body has been consumed."""
-        return self._offset == len(self._body)
-
-
-def _sparse_file(path: Path, size: int) -> None:
-    """Create a deterministic sparse file without allocating its full payload."""
-    with path.open("wb") as handle:
-        handle.truncate(size)
+    policy = execution_policy("multi", memory_limit_bytes)
+    if policy.available_cpus == 1:
+        assert policy.fallback_to_one_worker_reason == "cpu_limited"
+        assert policy.effective_workers == concurrency == 1
+        return False
+    assert policy.effective_workers > 1
+    assert concurrency > 1
+    return True
 
 
 def test_remote_upload_policy_bounds_memory_and_preserves_single_worker(tmp_path: Path) -> None:
-    """Provider upload buffers derive only from memory and threading mode."""
-    require_native()
+    """Upload buffers stay bounded and expose deterministic serial capacity."""
     from schema_sanitizer.remote_impl.upload_policy import remote_upload_policy
 
     source = tmp_path / "large.bin"
@@ -94,8 +61,10 @@ def test_remote_upload_policy_bounds_memory_and_preserves_single_worker(tmp_path
     assert single.multipart is True
     assert single.concurrency == 1
     assert multi.multipart is True
-    assert 1 < multi.concurrency <= 8
+    assert multi.concurrency <= 8
+    _assert_expected_upload_capacity(multi.concurrency, 256 << 20)
     assert multi.buffered_bytes <= (256 << 20) // 8
+    assert multi.buffered_bytes == multi.part_bytes * multi.concurrency
     assert single.part_count == multi.part_count
 
 
@@ -103,18 +72,24 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Out-of-order part completion still publishes an ordered S3 manifest."""
-    require_native()
+    """S3 commits ordinal parts under concurrent reordering or serial capacity."""
     from schema_sanitizer.remote_impl.providers import s3
+    from schema_sanitizer.remote_impl.upload_policy import remote_upload_policy
 
     source = tmp_path / "s3-large.bin"
     _sparse_file(source, 40 << 20)
+    tuning = remote_upload_policy(
+        "s3",
+        str(source),
+        memory_limit_bytes=256 << 20,
+        threading_mode="multi",
+    )
+    assert tuning.multipart is True
+    parallel_capacity = _assert_expected_upload_capacity(tuning.concurrency, 256 << 20)
 
     class Client:
-        """Record multipart lifecycle and force out-of-order completion."""
-
         def __init__(self) -> None:
-            """Initialize the fake provider state."""
+            """Initialize client state for active, peak active, and completed parts."""
             self.active = 0
             self.peak_active = 0
             self.completed_parts: list[dict[str, Any]] | None = None
@@ -124,39 +99,43 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
             self.completion_order: list[int] = []
 
         async def create_multipart_upload(self, **_kwargs: object) -> dict[str, str]:
-            """Start one fake upload."""
+            """Create multipart state and return its fixed upload identifier."""
             return {"UploadId": "upload-1"}
 
         async def upload_part(self, **kwargs: object) -> dict[str, str]:
-            """Complete later part numbers first."""
+            """Record one uploaded multipart part and return its provider receipt."""
             part = int(kwargs["PartNumber"])
             self.active += 1
             self.peak_active = max(self.peak_active, self.active)
             try:
-                if part == 1:
+                if parallel_capacity and part == 1:
                     self.part_one_started.set()
-                    await asyncio.wait_for(self.part_two_completed.wait(), timeout=5)
-                elif part == 2:
-                    await asyncio.wait_for(self.part_one_started.wait(), timeout=5)
+                    await asyncio.wait_for(
+                        self.part_two_completed.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
+                    )
+                elif parallel_capacity and part == 2:
+                    await asyncio.wait_for(
+                        self.part_one_started.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
+                    )
                 self.completion_order.append(part)
-                if part == 2:
+                if parallel_capacity and part == 2:
                     self.part_two_completed.set()
                 return {"ETag": f'"etag-{part}"'}
             finally:
                 self.active -= 1
 
         async def complete_multipart_upload(self, **kwargs: object) -> None:
-            """Record the ordered completion manifest."""
+            """Record multipart completion and return the configured provider result."""
             self.completed_parts = list(kwargs["MultipartUpload"]["Parts"])
 
         async def abort_multipart_upload(self, **_kwargs: object) -> None:
-            """Record an unexpected abort."""
+            """Mark the multipart upload as aborted for cleanup assertions."""
             self.aborted = True
 
     client = Client()
 
     async def open_client() -> _AsyncContext:
-        """Return the fake S3 client context."""
+        """Open the recording provider client used by this scenario."""
         return _AsyncContext(client)
 
     monkeypatch.setattr(s3, "open_client", open_client)
@@ -169,9 +148,14 @@ def test_s3_multipart_commits_parts_in_ordinal_order(
         )
     )
 
-    assert client.peak_active > 1
+    if parallel_capacity:
+        assert client.peak_active > 1
+        assert client.completion_order.index(2) < client.completion_order.index(1)
+    else:
+        assert tuning.concurrency == 1
+        assert client.peak_active == 1
+        assert client.completion_order == [1, 2, 3, 4, 5]
     assert client.aborted is False
-    assert client.completion_order.index(2) < client.completion_order.index(1)
     assert client.completed_parts is not None
     assert [part["PartNumber"] for part in client.completed_parts] == [1, 2, 3, 4, 5]
 
@@ -181,27 +165,24 @@ def test_s3_multipart_failure_drains_workers_and_aborts(
     tmp_path: Path,
 ) -> None:
     """A failed S3 part cancels later work before aborting remote state."""
-    require_native()
     from schema_sanitizer.remote_impl.providers import s3
 
     source = tmp_path / "s3-failure.bin"
     _sparse_file(source, 32 << 20)
 
     class Client:
-        """Fail part two and expose lifecycle counters."""
-
         def __init__(self) -> None:
-            """Initialize the fake provider state."""
+            """Initialize client state for active, aborted, and completed."""
             self.active = 0
             self.aborted = False
             self.completed = False
 
         async def create_multipart_upload(self, **_kwargs: object) -> dict[str, str]:
-            """Start one fake upload."""
+            """Create multipart state and return its fixed upload identifier."""
             return {"UploadId": "upload-fail"}
 
         async def upload_part(self, **kwargs: object) -> dict[str, str]:
-            """Fail the second canonical part."""
+            """Record one uploaded multipart part and return its provider receipt."""
             part = int(kwargs["PartNumber"])
             self.active += 1
             try:
@@ -213,18 +194,18 @@ def test_s3_multipart_failure_drains_workers_and_aborts(
                 self.active -= 1
 
         async def complete_multipart_upload(self, **_kwargs: object) -> None:
-            """Reject any accidental publication."""
+            """Record multipart completion and return the configured provider result."""
             self.completed = True
 
         async def abort_multipart_upload(self, **_kwargs: object) -> None:
-            """Record abort after workers drain."""
+            """Mark the multipart upload as aborted for cleanup assertions."""
             assert self.active == 0
             self.aborted = True
 
     client = Client()
 
     async def open_client() -> _AsyncContext:
-        """Return the fake S3 client context."""
+        """Open the recording provider client used by this scenario."""
         return _AsyncContext(client)
 
     monkeypatch.setattr(s3, "open_client", open_client)
@@ -248,27 +229,24 @@ def test_s3_large_single_uses_sequential_multipart(
     tmp_path: Path,
 ) -> None:
     """Large single-mode publication remains one-task but avoids PutObject limits."""
-    require_native()
     from schema_sanitizer.remote_impl.providers import s3
 
     source = tmp_path / "s3-single-large.bin"
     _sparse_file(source, 24 << 20)
 
     class Client:
-        """Track maximum active parts in single mode."""
-
         def __init__(self) -> None:
-            """Initialize the fake provider state."""
+            """Initialize client state for active, peak, and parts."""
             self.active = 0
             self.peak = 0
             self.parts = 0
 
         async def create_multipart_upload(self, **_kwargs: object) -> dict[str, str]:
-            """Start the upload."""
+            """Create multipart state and return its fixed upload identifier."""
             return {"UploadId": "single-upload"}
 
         async def upload_part(self, **kwargs: object) -> dict[str, str]:
-            """Upload one sequential part."""
+            """Record one uploaded multipart part and return its provider receipt."""
             self.active += 1
             self.peak = max(self.peak, self.active)
             try:
@@ -278,16 +256,17 @@ def test_s3_large_single_uses_sequential_multipart(
                 self.active -= 1
 
         async def complete_multipart_upload(self, **_kwargs: object) -> None:
-            """Complete the upload."""
+            """Record multipart completion and return the configured provider result."""
+            pass
 
         async def abort_multipart_upload(self, **_kwargs: object) -> None:
-            """Fail if the successful upload aborts."""
+            """Mark the multipart upload as aborted for cleanup assertions."""
             raise AssertionError("unexpected abort")
 
     client = Client()
 
     async def open_client() -> _AsyncContext:
-        """Return the fake S3 client context."""
+        """Open the recording provider client used by this scenario."""
         return _AsyncContext(client)
 
     monkeypatch.setattr(s3, "open_client", open_client)
@@ -309,35 +288,33 @@ def test_gcs_resumable_recovers_from_lost_partial_response(
     tmp_path: Path,
 ) -> None:
     """GCS status reconciliation resumes at the durable provider offset."""
-    require_native()
     from schema_sanitizer.remote_impl.providers import gcs
 
     source = tmp_path / "gcs-large.bin"
     _sparse_file(source, 20 << 20)
 
     class Session:
-        """Simulate one lost response after a partial durable commit."""
-
         def __init__(self) -> None:
-            """Initialize the fake provider state."""
+            """Initialize session state for committed end, range calls, and failed once."""
             self.committed_end = -1
             self.range_calls: list[str] = []
             self.failed_once = False
             self.aborted = False
 
         async def __aenter__(self) -> Session:
-            """Return this fake session."""
+            """Return the managed session value from context entry."""
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
-            """Close this fake session."""
+            """Finalize the session context without suppressing exceptions."""
+            pass
 
         def post(self, *_args: object, **_kwargs: object) -> _Response:
-            """Create a resumable session."""
+            """Handle a simulated HTTP POST and record its effects."""
             return _Response(200, headers={"Location": "https://upload/session"})
 
         def put(self, _url: str, *, headers: dict[str, str], data: bytes) -> _Response:
-            """Handle range uploads and status probes."""
+            """Handle a simulated HTTP PUT and record its effects."""
             content_range = headers["Content-Range"]
             if content_range.startswith("bytes */"):
                 range_header = (
@@ -359,14 +336,14 @@ def test_gcs_resumable_recovers_from_lost_partial_response(
             return _Response(308, headers={"Range": f"bytes=0-{end}"})
 
         def delete(self, _url: str) -> _Response:
-            """Record an unexpected abort."""
+            """Handle a simulated HTTP DELETE and record its effects."""
             self.aborted = True
             return _Response(204)
 
     session = Session()
 
     async def open_session(*_args: object, **_kwargs: object) -> Session:
-        """Return the fake GCS session."""
+        """Open the recording HTTP session used by the upload scenario."""
         return session
 
     monkeypatch.setattr(gcs, "open_aiohttp_session", open_session)
@@ -391,43 +368,41 @@ def test_gcs_resumable_nonretryable_failure_aborts(
     tmp_path: Path,
 ) -> None:
     """A permanent GCS failure deletes the resumable session."""
-    require_native()
     from schema_sanitizer.remote_impl.providers import gcs
 
     source = tmp_path / "gcs-failure.bin"
     _sparse_file(source, 20 << 20)
 
     class Session:
-        """Reject the first chunk with a permanent response."""
-
         def __init__(self) -> None:
-            """Initialize the fake provider state."""
+            """Initialize session state for aborted."""
             self.aborted = False
 
         async def __aenter__(self) -> Session:
-            """Return this fake session."""
+            """Return the managed session value from context entry."""
             return self
 
         async def __aexit__(self, *_exc: object) -> None:
-            """Close this fake session."""
+            """Finalize the session context without suppressing exceptions."""
+            pass
 
         def post(self, *_args: object, **_kwargs: object) -> _Response:
-            """Create a resumable session."""
+            """Handle a simulated HTTP POST and record its effects."""
             return _Response(200, headers={"Location": "https://upload/failure"})
 
         def put(self, *_args: object, **_kwargs: object) -> _Response:
-            """Reject the upload."""
+            """Handle a simulated HTTP PUT and record its effects."""
             return _Response(400, body=b"bad range")
 
         def delete(self, _url: str) -> _Response:
-            """Abort the failed session."""
+            """Handle a simulated HTTP DELETE and record its effects."""
             self.aborted = True
             return _Response(204)
 
     session = Session()
 
     async def open_session(*_args: object, **_kwargs: object) -> Session:
-        """Return the fake GCS session."""
+        """Open the recording HTTP session used by the upload scenario."""
         return session
 
     monkeypatch.setattr(gcs, "open_aiohttp_session", open_session)
@@ -450,43 +425,38 @@ def test_azure_upload_serializes_ungoverned_sdk_concurrency(
     tmp_path: Path,
 ) -> None:
     """Azure SDK fanout stays serial; governed operations own parallelism."""
-    require_native()
     from schema_sanitizer.remote_impl.providers import azure
 
     source = tmp_path / "azure-large.bin"
     _sparse_file(source, 80 << 20)
 
     class Blob:
-        """Record SDK upload options."""
-
         def __init__(self) -> None:
-            """Initialize the fake provider state."""
+            """Initialize blob state for kwargs."""
             self.kwargs: dict[str, Any] | None = None
 
         async def upload_blob(self, _handle: object, **kwargs: object) -> None:
-            """Capture the bounded transfer controls."""
+            """Record the Azure blob upload and its concurrency settings."""
             self.kwargs = dict(kwargs)
 
     class Service:
-        """Return one fake blob and record close."""
-
         def __init__(self) -> None:
-            """Initialize the fake provider state."""
+            """Initialize service state for blob and closed."""
             self.blob = Blob()
             self.closed = False
 
         def get_blob_client(self, _container: str, _blob: str) -> Blob:
-            """Return the fake blob."""
+            """Return the recording client for the requested Azure blob."""
             return self.blob
 
         async def close(self) -> None:
-            """Close the fake service."""
+            """Close the service and update closed."""
             self.closed = True
 
     service = Service()
 
     async def open_service(_ref: object) -> Service:
-        """Return the fake Azure service."""
+        """Open the recording Azure service used by this scenario."""
         return service
 
     monkeypatch.setattr(azure, "open_service", open_service)
@@ -509,52 +479,70 @@ def test_s3_multipart_reports_earliest_failing_part(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """A fast later failure cannot overtake a slower earlier part failure."""
-    require_native()
+    """S3 reports the earliest part failure under parallel or serial capacity."""
     from schema_sanitizer.remote_impl.providers import s3
+    from schema_sanitizer.remote_impl.upload_policy import remote_upload_policy
 
     source = tmp_path / "s3-ordered-failure.bin"
     _sparse_file(source, 40 << 20)
+    tuning = remote_upload_policy(
+        "s3",
+        str(source),
+        memory_limit_bytes=256 << 20,
+        threading_mode="multi",
+    )
+    assert tuning.multipart is True
+    parallel_capacity = _assert_expected_upload_capacity(tuning.concurrency, 256 << 20)
 
     class Client:
-        """Fail parts two and three in reverse completion order."""
-
         def __init__(self) -> None:
-            """Initialize the fake provider state."""
+            """Initialize client state for aborted, part two started, and part three failed."""
             self.aborted = False
             self.part_two_started = asyncio.Event()
             self.part_three_failed = asyncio.Event()
+            self.started_parts: list[int] = []
+            self.failure_order: list[int] = []
 
         async def create_multipart_upload(self, **_kwargs: object) -> dict[str, str]:
-            """Start one fake upload."""
+            """Create multipart state and return its fixed upload identifier."""
             return {"UploadId": "ordered-failure"}
 
         async def upload_part(self, **kwargs: object) -> dict[str, str]:
-            """Fail the later ordinal first in wall-clock time."""
+            """Record one uploaded multipart part and return its provider receipt."""
             part = int(kwargs["PartNumber"])
+            self.started_parts.append(part)
             if part == 2:
                 self.part_two_started.set()
-                await asyncio.wait_for(self.part_three_failed.wait(), timeout=5)
+                if parallel_capacity:
+                    await asyncio.wait_for(
+                        self.part_three_failed.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
+                    )
+                self.failure_order.append(part)
                 raise ValueError("canonical part 2 failure")
             if part == 3:
-                await asyncio.wait_for(self.part_two_started.wait(), timeout=5)
+                if not parallel_capacity:
+                    raise AssertionError("serial capacity dispatched beyond the first failure")
+                await asyncio.wait_for(
+                    self.part_two_started.wait(), timeout=SCHEDULER_TIMEOUT_SECONDS
+                )
+                self.failure_order.append(part)
                 self.part_three_failed.set()
                 raise ValueError("later part 3 failure")
             await asyncio.sleep(0)
             return {"ETag": f'"etag-{part}"'}
 
         async def complete_multipart_upload(self, **_kwargs: object) -> None:
-            """Reject accidental publication."""
+            """Record multipart completion and return the configured provider result."""
             raise AssertionError("failed multipart upload must not complete")
 
         async def abort_multipart_upload(self, **_kwargs: object) -> None:
-            """Record cleanup after ordered failure selection."""
+            """Mark the multipart upload as aborted for cleanup assertions."""
             self.aborted = True
 
     client = Client()
 
     async def open_client() -> _AsyncContext:
-        """Return the fake S3 client context."""
+        """Open the recording provider client used by this scenario."""
         return _AsyncContext(client)
 
     monkeypatch.setattr(s3, "open_client", open_client)
@@ -568,6 +556,14 @@ def test_s3_multipart_reports_earliest_failing_part(
             )
         )
     assert client.aborted is True
+    if parallel_capacity:
+        assert client.failure_order == [3, 2]
+        assert client.part_three_failed.is_set()
+    else:
+        assert tuning.concurrency == 1
+        assert client.started_parts == [1, 2]
+        assert client.failure_order == [2]
+        assert not client.part_three_failed.is_set()
 
 
 def test_s3_multipart_cancellation_drains_parts_before_abort(
@@ -575,31 +571,28 @@ def test_s3_multipart_cancellation_drains_parts_before_abort(
     tmp_path: Path,
 ) -> None:
     """Cancellation drains active part workers before aborting server state."""
-    require_native()
     from schema_sanitizer.remote_impl.providers import s3
 
     source = tmp_path / "s3-cancel.bin"
     _sparse_file(source, 40 << 20)
 
     async def scenario() -> None:
-        """Cancel one active multipart publication."""
+        """Cancel an active S3 part and verify workers drain before abort."""
         started = asyncio.Event()
 
         class Client:
-            """Block active parts until the upload task is cancelled."""
-
             def __init__(self) -> None:
-                """Initialize the fake provider state."""
+                """Initialize client state for active, aborted, and completed."""
                 self.active = 0
                 self.aborted = False
                 self.completed = False
 
             async def create_multipart_upload(self, **_kwargs: object) -> dict[str, str]:
-                """Start one fake upload."""
+                """Create multipart state and return its fixed upload identifier."""
                 return {"UploadId": "cancel-upload"}
 
             async def upload_part(self, **_kwargs: object) -> dict[str, str]:
-                """Wait indefinitely and expose worker cancellation."""
+                """Record one uploaded multipart part and return its provider receipt."""
                 self.active += 1
                 started.set()
                 try:
@@ -609,18 +602,18 @@ def test_s3_multipart_cancellation_drains_parts_before_abort(
                 raise AssertionError("cancelled part resumed unexpectedly")
 
             async def complete_multipart_upload(self, **_kwargs: object) -> None:
-                """Record accidental publication."""
+                """Record multipart completion and return the configured provider result."""
                 self.completed = True
 
             async def abort_multipart_upload(self, **_kwargs: object) -> None:
-                """Require all part tasks to be drained before abort."""
+                """Mark the multipart upload as aborted for cleanup assertions."""
                 assert self.active == 0
                 self.aborted = True
 
         client = Client()
 
         async def open_client() -> _AsyncContext:
-            """Return the fake S3 client context."""
+            """Open the recording provider client used by this scenario."""
             return _AsyncContext(client)
 
         monkeypatch.setattr(s3, "open_client", open_client)
@@ -648,56 +641,52 @@ def test_gcs_resumable_cancellation_aborts_session(
     tmp_path: Path,
 ) -> None:
     """Cancellation during a GCS range request deletes the resumable session."""
-    require_native()
     from schema_sanitizer.remote_impl.providers import gcs
 
     source = tmp_path / "gcs-cancel.bin"
     _sparse_file(source, 20 << 20)
 
     async def scenario() -> None:
-        """Cancel one active GCS resumable upload."""
+        """Cancel an active GCS range request and verify session deletion."""
         started = asyncio.Event()
 
         class BlockingResponse(_Response):
-            """Block response entry until task cancellation."""
-
             async def __aenter__(self) -> _Response:
-                """Expose request start then wait forever."""
+                """Return the managed blocking response value from context entry."""
                 started.set()
                 await asyncio.Event().wait()
                 return self
 
         class Session:
-            """Create a session then block its first range request."""
-
             def __init__(self) -> None:
-                """Initialize the fake provider state."""
+                """Initialize session state for aborted."""
                 self.aborted = False
 
             async def __aenter__(self) -> Session:
-                """Return this session."""
+                """Return the managed session value from context entry."""
                 return self
 
             async def __aexit__(self, *_exc: object) -> None:
-                """Close the fake session."""
+                """Finalize the session context without suppressing exceptions."""
+                pass
 
             def post(self, *_args: object, **_kwargs: object) -> _Response:
-                """Create a resumable session."""
+                """Handle a simulated HTTP POST and record its effects."""
                 return _Response(200, headers={"Location": "https://upload/cancel"})
 
             def put(self, *_args: object, **_kwargs: object) -> _Response:
-                """Block the active chunk request."""
+                """Handle a simulated HTTP PUT and record its effects."""
                 return BlockingResponse(308)
 
             def delete(self, _url: str) -> _Response:
-                """Record resumable-session abort."""
+                """Handle a simulated HTTP DELETE and record its effects."""
                 self.aborted = True
                 return _Response(204)
 
         session = Session()
 
         async def open_session(*_args: object, **_kwargs: object) -> Session:
-            """Return the fake GCS session."""
+            """Open the recording HTTP session used by the upload scenario."""
             return session
 
         monkeypatch.setattr(gcs, "open_aiohttp_session", open_session)

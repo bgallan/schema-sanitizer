@@ -1,4 +1,8 @@
-"""Native-first stream-to-file execution."""
+"""Native-first stream-to-file execution.
+
+It drives an owned stream into a sink or raw writer, snapshots final diagnostics, and
+closes every layer without masking the primary exception.
+"""
 
 from __future__ import annotations
 
@@ -14,16 +18,17 @@ from ..core_impl.resource_lifecycle import _close_suppressing_errors
 from ..input_impl.selection import _Format, _Source, resolve_source_and_format
 from ..options_impl.call_options import unwrap_options
 from ..options_impl.options import Options
+from .file_conversion.direct_writers import FileWriteOutcome
 from .file_conversion.writers import (
     try_write_raw_native_file_output,
     write_parquet_native_first_stream,
 )
 from .ingest import normalize_options
 from .output_diagnostics import patch_file_output_diagnostics
-from .parquet.direct_routes import parquet_direct_sink_raw_or_none
+from .parquet.direct_routes import parquet_direct_sink
 from .parquet.replay_stream import make_replayable_parquet_stream
 from .results import Result
-from .streams import Stream
+from .streams import Stream, patch_input_route_diagnostics
 
 
 def close_sink_output_or_stream(sink_out: Any, stream: Any = None) -> None:
@@ -124,7 +129,7 @@ def write_raw_stream_to_file(
                 raw, feature=feature, memory_limit_bytes=memory_limit_bytes
             )
             raw_for_native = replay.reader()
-        native_stats = try_write_raw_native_file_output(
+        native_outcome = try_write_raw_native_file_output(
             raw_for_native,
             out_path,
             writer=writer,
@@ -138,9 +143,16 @@ def write_raw_stream_to_file(
             threading_mode=threading_mode,
             parquet_retry_is_safe=not internal_parquet,
         )
-        if native_stats:
+        if native_outcome:
             result = diagnostics_only_result(raw)
-            patch_file_output_diagnostics(result, out_path, feature, native_stats=native_stats)
+            patch_file_output_diagnostics(
+                result,
+                out_path,
+                feature,
+                native_stats=native_outcome.stats,
+                file_output_route=native_outcome.route,
+                file_metadata_route=native_outcome.metadata_route,
+            )
             return result
 
         if internal_parquet:
@@ -148,7 +160,7 @@ def write_raw_stream_to_file(
                 raw, feature=feature, memory_limit_bytes=memory_limit_bytes
             )
         stream = replay.reader() if replay is not None else Stream(raw)
-        native_stats = writer(
+        outcome = writer(
             stream,
             out_path,
             feature=feature,
@@ -162,7 +174,16 @@ def write_raw_stream_to_file(
         )
         close_consumed_stream(stream)
         result = diagnostics_only_result(raw)
-        patch_file_output_diagnostics(result, out_path, feature, native_stats=native_stats)
+        patch_file_output_diagnostics(
+            result,
+            out_path,
+            feature,
+            native_stats=outcome.stats if isinstance(outcome, FileWriteOutcome) else outcome,
+            file_output_route=outcome.route if isinstance(outcome, FileWriteOutcome) else None,
+            file_metadata_route=(
+                outcome.metadata_route if isinstance(outcome, FileWriteOutcome) else None
+            ),
+        )
         return result
     except Exception as exc:
         close_sink_output_or_stream(raw, stream)
@@ -209,7 +230,7 @@ def write_table_or_stream(
     try:
         raw_for_native = sink_out.raw
         internal_parquet = raw_writer is write_parquet_native_first_stream
-        native_stats = (
+        native_outcome = (
             try_write_raw_native_file_output(
                 raw_for_native,
                 out_path,
@@ -225,16 +246,18 @@ def write_table_or_stream(
                 parquet_retry_is_safe=not internal_parquet,
             )
             if raw_writer is not None
-            else False
+            else None
         )
-        if native_stats:
+        if native_outcome:
             result = diagnostics_only_result(sink_out.raw)
             if feature is not None:
                 patch_file_output_diagnostics(
                     result,
                     out_path,
                     feature,
-                    native_stats=native_stats,
+                    native_stats=native_outcome.stats,
+                    file_output_route=native_outcome.route,
+                    file_metadata_route=native_outcome.metadata_route,
                 )
             sink_out.close()
             return result
@@ -243,7 +266,7 @@ def write_table_or_stream(
             replay = _make_parquet_replay(sink_out.raw, feature=feature or "Parquet file output")
         stream = replay.reader() if replay is not None else _stream_from_sink_or_close(sink_out)
         try:
-            native_stats = write_stream(stream, out_path)
+            outcome = write_stream(stream, out_path)
         except Exception as exc:
             close_sink_output_or_stream(sink_out, stream)
             raise translate_core_error(exc) from exc
@@ -256,7 +279,13 @@ def write_table_or_stream(
                 result,
                 out_path,
                 feature,
-                native_stats=native_stats,
+                native_stats=(outcome.stats if isinstance(outcome, FileWriteOutcome) else outcome),
+                file_output_route=(
+                    outcome.route if isinstance(outcome, FileWriteOutcome) else None
+                ),
+                file_metadata_route=(
+                    outcome.metadata_route if isinstance(outcome, FileWriteOutcome) else None
+                ),
             )
         sink_out.close()
         return result
@@ -284,7 +313,7 @@ def _try_write_direct_parquet_to_file(
     from .execution_context import default_pool
 
     memory_limit_bytes, threading_mode = _operation_limits(call_options)
-    direct_raw = parquet_direct_sink_raw_or_none(
+    direct_outcome = parquet_direct_sink(
         default_pool().get()._raw,
         data,
         sink="stream",
@@ -293,9 +322,10 @@ def _try_write_direct_parquet_to_file(
         call_options=call_options,
         prepared=unwrap_options(call_options),
     )
+    direct_raw = direct_outcome.raw
     if direct_raw is None:
         return None
-    return write_raw_stream_to_file(
+    result = write_raw_stream_to_file(
         direct_raw,
         out_path,
         writer=writer,
@@ -309,6 +339,12 @@ def _try_write_direct_parquet_to_file(
         memory_limit_bytes=memory_limit_bytes,
         threading_mode=threading_mode,
     )
+    patch_input_route_diagnostics(
+        result._raw,
+        source_route="arrow",
+        parquet_route=direct_outcome.route,
+    )
+    return result
 
 
 def write_with_file_output(

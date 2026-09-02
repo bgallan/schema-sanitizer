@@ -1,3 +1,7 @@
+// Fuzzes native Parquet footer validation, preflight, and Arrow stream decoding.
+// Each input is staged to a process-local temporary file and exercised under
+// fixed and size-derived memory limits before deterministic cleanup.
+
 #include "internal/parquet/footer_reader/api.hh"
 #include "sanitize/abi/cdata_types.hh"
 
@@ -18,6 +22,7 @@
 
 namespace {
 
+/// Returns the process-specific temporary path used for each fuzz iteration.
 std::filesystem::path fuzz_path() {
 #if defined(_WIN32)
   const auto process_id = static_cast<unsigned long>(_getpid());
@@ -29,6 +34,7 @@ std::filesystem::path fuzz_path() {
           ".parquet");
 }
 
+/// Opens and drains a bounded number of batches from a native Parquet stream.
 void consume_native_stream(const std::string &path, std::size_t input_size,
                            std::int64_t memory_limit_bytes) {
   auto stream_result =
@@ -58,6 +64,7 @@ void consume_native_stream(const std::string &path, std::size_t input_size,
 
 } // namespace
 
+/// Exercises Parquet footer and stream paths for one arbitrary byte sequence.
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t *data,
                                       std::size_t size) {
   const auto path = fuzz_path();

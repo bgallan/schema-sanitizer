@@ -1,4 +1,8 @@
-"""BigQuery and logging argument builders for example 07."""
+"""BigQuery and logging argument builders for example 07.
+
+It defines BigQuery, external-table, Hive-partition, and logging arguments with their
+boundary validation.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Azure Blob URI, discovery, and object operations."""
+"""Azure Blob URI, discovery, and object operations.
+
+It parses Blob URIs, manages asynchronous credentials and services, lists metadata,
+transfers objects, and rolls back failed client construction.
+"""
 
 from __future__ import annotations
 
@@ -11,19 +15,18 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from ...core_impl.async_scheduler import drain_ordered_iterable_results
+from ...core_impl.async_scheduler import AsyncResultMemoryContract, drain_ordered_iterable_results
 from ...core_impl.execution_policy import execution_policy
 from ...core_impl.governed_sort import governed_sort
 from ...core_impl.memory_budget import current_operation_memory_ledger
 from ...core_impl.safe_errors import add_bounded_note
 from ...core_impl.temporary_storage import StreamingStorageReservation
 from ...core_impl.terminal_ownership import publish_terminal_owner, retire_terminal_owner
-from ...core_impl.uris import name_matches, normalize_extensions
+from ...core_impl.uris import normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
     current_directory_metadata_budget,
-    split_parent_child,
 )
 from ...sources.models import RemoteFile
 from ..file_streams import write_async_iterator_to_file
@@ -31,6 +34,12 @@ from ..io_footprint import open_remote_local_file
 from ..provider_session_pool import current_provider_session_pool
 from ..transport import collect_bounded_async_chunks
 from ..upload_policy import remote_upload_policy
+from . import (
+    direct_child_name,
+    requested_child,
+    requested_directory_groups,
+    sdk_error_identity,
+)
 
 _MAX_AZURE_ROLLBACK_OWNERS = 128
 _AZURE_ROLLBACK_LOCK = threading.Lock()
@@ -51,6 +60,7 @@ _AZURE_ROLLBACK_SLOTS = [_AzureRollbackSlot() for _ in range(_MAX_AZURE_ROLLBACK
 
 
 def _azure_rollback_token(index: int, generation: int) -> int:
+    """Encode an Azure rollback slot and generation as a nonzero token."""
     return (generation << 8) | index | 1
 
 
@@ -71,6 +81,7 @@ def _reserve_azure_rollback_slot() -> tuple[int, int] | None:
 
 
 def _release_azure_rollback_reservation(reservation: tuple[int, int]) -> None:
+    """Release azure rollback reservation."""
     index, generation = reservation
     with _AZURE_ROLLBACK_LOCK:
         slot = _AZURE_ROLLBACK_SLOTS[index]
@@ -143,16 +154,6 @@ def _publish_azure_credential_rollback(reservation: tuple[int, int], credential:
     return True
 
 
-def _retain_azure_credential_rollback(credential: Any) -> bool:
-    """Compatibility wrapper that still uses preallocated terminal storage."""
-    reservation = _reserve_azure_rollback_slot()
-    return (
-        False
-        if reservation is None
-        else _publish_azure_credential_rollback(reservation, credential)
-    )
-
-
 async def drain_azure_credential_rollbacks() -> int:
     """Drive published generations that could not create a retry task."""
     pending: list[tuple[int, int]] = []
@@ -196,6 +197,7 @@ class _AzureServiceOwner:
     """Own one Blob service and credential with retryable per-resource cleanup."""
 
     def __init__(self, service: Any, credential: Any) -> None:
+        """Bind the asynchronous Blob service and credential with independent close state."""
         self._service = service
         self._credential = credential
         self._service_closed = False
@@ -203,9 +205,11 @@ class _AzureServiceOwner:
         self._closed = False
 
     def __getattr__(self, name: str) -> Any:
+        """Delegate unresolved attributes to the wrapped object."""
         return getattr(self._service, name)
 
     async def _close_one(self, resource: Any, flag_name: str) -> None:
+        """Close one Azure SDK resource without masking earlier failures."""
         if getattr(self, flag_name):
             return
         close = getattr(resource, "close", None)
@@ -277,6 +281,12 @@ def parse_uri(uri: str) -> AzureRef:
             uri,
         )
     raise ValueError(f"not an Azure Blob URI: {uri!r}")
+
+
+def _directory_location(uri: str) -> tuple[tuple[str, str], str]:
+    """Return the stable grouping location and object name for an Azure URI."""
+    ref = parse_uri(uri)
+    return (ref.account_url, ref.container), ref.blob
 
 
 async def _open_service_unpooled(ref: AzureRef) -> Any:
@@ -424,8 +434,7 @@ async def file_metadata(
         try:
             properties = await blob.get_blob_properties()
         except Exception as exc:
-            status = getattr(exc, "status_code", None)
-            code = getattr(exc, "error_code", None)
+            status, code = sdk_error_identity(exc)
             if status == 404 or code in {"BlobNotFound", "ContainerNotFound"}:
                 return None
             if status in {401, 403}:
@@ -499,13 +508,12 @@ async def list_files(
     service = await open_service(ref)
     try:
         container = service.get_container_client(ref.container)
-        async for blob in container.walk_blobs(name_starts_with=prefix, delimiter="/"):
-            name = getattr(blob, "name", None)
-            if not isinstance(name, str):
+        blobs = container.walk_blobs(name_starts_with=prefix, delimiter="/")
+        async for blob in blobs:
+            relative = direct_child_name(getattr(blob, "name", None), prefix, suffixes)
+            if relative is None:
                 continue
-            relative = name[len(prefix) :] if name.startswith(prefix) else name
-            if not relative or "/" in relative or not name_matches(relative, suffixes):
-                continue
+            name = blob.name
             size = getattr(blob, "size", None)
             remote_file = RemoteFile(
                 render_uri(ref, name), relative, size if isinstance(size, int) else None
@@ -532,22 +540,11 @@ async def directories_containing_files(
         uris,
         metadata_budget=metadata_budget,
     )
-    groups: dict[tuple[str, str, str], dict[str, list[str]]] = {}
-    for uri in uris:
-        ref = parse_uri(uri)
-        parsed = split_parent_child(ref.blob)
-        if parsed is None:
-            continue
-        parent_prefix, child = parsed
-        account_url, container = ref.account_url, ref.container
-        # pass63 proof anchor: metadata_budget.charge_group_associations()
-        discovery.publish_group_association(
-            lambda: (
-                groups.setdefault((account_url, container, parent_prefix), {})
-                .setdefault(child, [])
-                .append(uri)
-            )
-        )
+    groups = requested_directory_groups(
+        uris,
+        discovery,
+        _directory_location,
+    )
 
     if not groups:
         return discovery.finish()
@@ -569,14 +566,11 @@ async def directories_containing_files(
             container = service.get_container_client(container_name)
             async with semaphore:
                 async for blob in container.list_blobs(name_starts_with=prefix):
-                    name = getattr(blob, "name", None)
-                    if not isinstance(name, str) or not name.startswith(prefix):
+                    match = requested_child(getattr(blob, "name", None), prefix, children, accepted)
+                    if match is None:
                         continue
-                    relative = name[len(prefix) :]
-                    child, separator, filename = relative.partition("/")
-                    child_uris = children.get(child) if separator else None
-                    if not child_uris or "/" in filename or not name_matches(filename, accepted):
-                        continue
+                    child_uris, filename = match
+                    name = blob.name
                     size = getattr(blob, "size", None)
                     remote_file = RemoteFile(
                         render_uri(ref, name),
@@ -596,6 +590,6 @@ async def directories_containing_files(
         groups,
         scan_key,
         window=concurrency,
-        expected_retained_bytes=64,
+        memory_contract=AsyncResultMemoryContract(preflight_bytes=64),
     )
     return discovery.finish()

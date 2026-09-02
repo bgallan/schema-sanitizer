@@ -1,4 +1,8 @@
-"""PyArrow Parquet sink for record-batch streams."""
+"""PyArrow Parquet sink for record-batch streams.
+
+It attaches generated metadata, coalesces supported Arrow streams natively, and publishes local
+output atomically through governed descriptors.
+"""
 
 from __future__ import annotations
 
@@ -22,16 +26,10 @@ from ..pyarrow.metadata_specs import (
 )
 from .compression import pyarrow_parquet_writer_options
 
-_LAST_PARQUET_COALESCE_ROUTE = "none"
 _COALESCING_UNAVAILABLE_MESSAGES = (
     "requires an Arrow C stream",
     "requires a schema supported by the native C++ coalescing stream wrapper",
 )
-
-
-def last_parquet_coalesce_route() -> str:
-    """Return how the most recent Parquet stream write coalesced batches."""
-    return _LAST_PARQUET_COALESCE_ROUTE
 
 
 def _native_coalesced_reader(
@@ -63,9 +61,7 @@ def _write_coalesced_batches(
     memory_limit_bytes: int | None = None,
 ) -> None:
     """Write small incoming batches as bounded native-coalesced Parquet row groups."""
-    global _LAST_PARQUET_COALESCE_ROUTE
     del schema
-    _LAST_PARQUET_COALESCE_ROUTE = "none"
     try:
         native_reader = _native_coalesced_reader(
             batches,
@@ -75,11 +71,9 @@ def _write_coalesced_batches(
     except RuntimeError as exc:
         if not any(message in str(exc) for message in _COALESCING_UNAVAILABLE_MESSAGES):
             raise
-        _LAST_PARQUET_COALESCE_ROUTE = "pyarrow"
         for batch in batches:
             writer.write_batch(batch)
         return
-    _LAST_PARQUET_COALESCE_ROUTE = "native"
     for batch in native_reader:
         writer.write_batch(batch)
 

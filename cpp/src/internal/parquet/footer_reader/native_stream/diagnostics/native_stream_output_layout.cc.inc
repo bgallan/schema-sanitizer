@@ -1,3 +1,10 @@
+// Reports whether each row group can form the recursive native Arrow output
+// layout and emits deterministic field diagnostics. This fragment is included
+// by the consolidated footer reader inside its private implementation
+// namespace.
+
+/// Serializes recursive output-layout readiness and field trees for one row
+/// group.
 void append_native_recursive_output_layout_diagnostics(
     std::string &out, const RowGroupInfo &row_group) {
   std::vector<NativeParquetOutputField> layout;

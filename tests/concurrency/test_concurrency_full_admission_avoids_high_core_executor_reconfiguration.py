@@ -1,17 +1,18 @@
-"""Regression coverage for concurrency full admission avoids high core executor reconfiguration."""
+"""Ensure full admission does not reconfigure an already governed high-core executor.
+
+Both arena admission and source dispatch must preserve the scaled fixed-wide gate, keeping worker
+capacity stable after the operation has acquired its complete resource envelope.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import require_native
-
 from schema_sanitizer.core_impl.native_runtime import native_core
 
 
-def test_full_admission_avoids_high_core_executor_reconfiguration() -> None:
+def test_full_admission_avoids_high_core_executor_reconfiguration(require_native: None) -> None:
     """Fixed-wide 16-CPU output starts once at its bounded eight-worker lane."""
-    require_native()
     adaptive = native_core.output_worker_admission_probe(False)
     stable = native_core.output_worker_admission_probe(True)
 

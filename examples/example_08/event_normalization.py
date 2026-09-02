@@ -1,4 +1,8 @@
-"""Vectorized Polars normalization for wide event columns."""
+"""Vectorized Polars normalization for wide event columns.
+
+It detects encoded event headers and vectorizes them into one ordered, schema-validated
+list-of-struct column.
+"""
 
 from __future__ import annotations
 

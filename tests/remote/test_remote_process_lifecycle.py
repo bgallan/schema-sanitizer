@@ -1,4 +1,8 @@
-"""Process-signal and abrupt-shutdown contracts for remote concurrency."""
+"""Process-signal and abrupt-shutdown contracts for remote concurrency.
+
+It proves SIGINT drains an active remote operation and unclosed contexts do not prevent
+interpreter shutdown.
+"""
 
 from __future__ import annotations
 
@@ -10,13 +14,14 @@ import time
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
 def _wait_for_file(path: Path, process: subprocess.Popen[str]) -> None:
     """Wait until a child publishes readiness or exits unexpectedly."""
-    deadline = time.monotonic() + 10.0
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         try:
             if path.read_text(encoding="utf-8") == "ready":
@@ -27,7 +32,7 @@ def _wait_for_file(path: Path, process: subprocess.Popen[str]) -> None:
             break
         time.sleep(0.005)
     process.terminate()
-    stdout, stderr = process.communicate(timeout=5)
+    stdout, stderr = process.communicate(timeout=SCHEDULER_TIMEOUT_SECONDS)
     pytest.fail(
         f"child did not initialize: returncode={process.returncode} "
         f"stdout={stdout!r} stderr={stderr!r}"
@@ -39,7 +44,7 @@ def test_sigint_interrupt_drains_remote_operation_context(tmp_path: Path) -> Non
     """SIGINT must unwind the waiter and still cancel/join remote work."""
     ready = tmp_path / "ready"
     closed = tmp_path / "closed"
-    script = r"""
+    script = rf"""
 import asyncio
 from pathlib import Path
 import sys
@@ -61,7 +66,7 @@ async def block() -> None:
     await asyncio.Event().wait()
 
 future = operation.submit_remote(block)
-assert started.wait(timeout=5)
+assert started.wait(timeout={SCHEDULER_TIMEOUT_SECONDS!r})
 ready.write_text("ready", encoding="utf-8")
 try:
     future.result()
@@ -82,7 +87,7 @@ finally:
     )
     _wait_for_file(ready, process)
     process.send_signal(signal.SIGINT)
-    stdout, stderr = process.communicate(timeout=10)
+    stdout, stderr = process.communicate(timeout=SCHEDULER_TIMEOUT_SECONDS)
 
     assert process.returncode == 0, f"stdout={stdout!r} stderr={stderr!r}"
     assert closed.read_text(encoding="utf-8") == "closed"
@@ -94,7 +99,7 @@ def test_unclosed_remote_context_does_not_block_interpreter_shutdown(
 ) -> None:
     """An abandoned active remote context must not hang CPython shutdown."""
     ready = tmp_path / "ready"
-    script = r"""
+    script = rf"""
 import asyncio
 from pathlib import Path
 import sys
@@ -115,7 +120,7 @@ async def block() -> None:
     await asyncio.Event().wait()
 
 operation.submit_remote(block)
-assert started.wait(timeout=5)
+assert started.wait(timeout={SCHEDULER_TIMEOUT_SECONDS!r})
 ready.write_text("ready", encoding="utf-8")
 # Intentionally omit operation.close(). The coordinator host is daemonized so
 # an abrupt interpreter exit cannot wait forever for its event loop.
@@ -128,6 +133,6 @@ ready.write_text("ready", encoding="utf-8")
         text=True,
     )
     _wait_for_file(ready, process)
-    stdout, stderr = process.communicate(timeout=10)
+    stdout, stderr = process.communicate(timeout=SCHEDULER_TIMEOUT_SECONDS)
 
     assert process.returncode == 0, f"stdout={stdout!r} stderr={stderr!r}"

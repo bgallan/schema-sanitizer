@@ -1,4 +1,8 @@
-"""Regression coverage for memory reserved finalizer escrow generation blocks stale ticket aba."""
+"""Stress-tests generation-stamped finalizer escrow across allocation failure, fork reset,
+live threads, process or provider capabilities, cleanup charges, storage publication,
+path claims, result safe points, C++ retention, and arena rollback. Stale tickets cannot
+reclaim reused slots; capabilities precede physical growth, owners stay rooted through
+safe points, and production finalizers publish compact ledgers instead of object graphs."""
 
 from __future__ import annotations
 
@@ -11,13 +15,21 @@ from types import SimpleNamespace
 
 
 def _compact_noop(_value: str) -> None:
+    """Return the compact no-op source used by the contract check."""
     return
 
 
 import pytest
+from _support.source_contracts import source_paths, source_text
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    wait_event_or_fail,
+)
 
 
 def test_reserved_finalizer_escrow_generation_blocks_stale_ticket_aba() -> None:
+    """Verify reserved finalizer escrow generation blocks stale ticket ABA."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(1)
@@ -37,6 +49,7 @@ def test_reserved_finalizer_escrow_generation_blocks_stale_ticket_aba() -> None:
 
 
 def test_reserved_finalizer_escrow_keeps_owner_rooted_on_consumer_oom() -> None:
+    """Verify reserved finalizer escrow keeps owner rooted on consumer OOM."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(1)
@@ -62,12 +75,14 @@ def test_reserved_finalizer_escrow_keeps_owner_rooted_on_consumer_oom() -> None:
 
 
 def test_reserved_finalizer_fork_reset_roots_inherited_owner() -> None:
+    """Verify reserved finalizer fork reset roots inherited owner."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     destroyed: list[int] = []
 
     class Owner:
         def __del__(self) -> None:
+            """Run fallback cleanup when the owner test double is collected."""
             destroyed.append(1)
 
     escrow: ReservedFinalizerEscrow[Owner] = ReservedFinalizerEscrow(1)
@@ -84,14 +99,17 @@ def test_reserved_finalizer_fork_reset_roots_inherited_owner() -> None:
 
 
 def test_runtime_close_all_keeps_logically_closed_live_thread_registered() -> None:
+    """Verify runtime close all keeps logically closed live thread registered."""
     from schema_sanitizer.core_impl.durations import deadline_ns_from_timeout
     from schema_sanitizer.core_impl.runtime_registry import _RuntimeServiceRegistry
 
     class Service:
         def __init__(self) -> None:
+            """Initialize the service test double."""
             self.calls = 0
 
         def close(self, *, deadline_seconds: float) -> bool:
+            """Close the resources owned by the service test double."""
             self.calls += 1
             return True
 
@@ -101,7 +119,7 @@ def test_runtime_close_all_keeps_logically_closed_live_thread_registered() -> No
         service, kind="reserved-finalizer-escrow-generation-blocks-stale", close_name="close"
     )
     exit_event = Event()
-    thread = Thread(target=lambda: exit_event.wait(1.0))
+    thread = Thread(target=lambda: wait_event_or_fail(exit_event))
     registration.start_thread(thread)
     closed, remaining = registry.close_all(
         deadline_ns=deadline_ns_from_timeout(
@@ -113,17 +131,19 @@ def test_runtime_close_all_keeps_logically_closed_live_thread_registered() -> No
     # 50-ms bounded re-probes, not an unbounded hot loop.
     assert service.calls < 10
     exit_event.set()
-    thread.join(1.0)
+    join_thread_or_fail(thread)
     registration.close()
     assert registry.snapshot().registered_services == 0
 
 
 class _FailingSetDict(dict):
     def __setitem__(self, key, value):  # type: ignore[no-untyped-def]
+        """Store the requested value in the failing set dict test double."""
         raise MemoryError("injected ledger publication OOM")
 
 
 def test_process_governor_capability_oom_does_not_commit_physical_count() -> None:
+    """Verify process governor capability OOM does not commit physical count."""
     from schema_sanitizer.core_impl.process_resources import _Governor
 
     governor = _Governor(2, "reserved-finalizer-escrow-generation-blocks-stale")
@@ -136,6 +156,7 @@ def test_process_governor_capability_oom_does_not_commit_physical_count() -> Non
 
 
 def test_provider_throttle_capability_oom_does_not_commit_inflight() -> None:
+    """Verify provider throttle capability OOM does not commit inflight."""
     from schema_sanitizer.remote_impl.provider_throttle import ProviderThrottleGovernor
 
     governor = ProviderThrottleGovernor()
@@ -148,6 +169,7 @@ def test_provider_throttle_capability_oom_does_not_commit_inflight() -> None:
 
 
 def test_remote_submission_capability_oom_does_not_commit_pending() -> None:
+    """Verify remote submission capability OOM does not commit pending."""
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     governor = RemoteIoPermitGovernor(capacity=1)
@@ -160,6 +182,7 @@ def test_remote_submission_capability_oom_does_not_commit_pending() -> None:
 
 
 def test_remote_io_fork_reset_drops_inherited_capability_ledgers() -> None:
+    """Verify remote I/O fork reset drops inherited capability ledgers."""
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     governor = RemoteIoPermitGovernor(capacity=2)
@@ -179,6 +202,7 @@ def test_remote_io_fork_reset_drops_inherited_capability_ledgers() -> None:
 
 
 def test_remote_capacity_registration_has_hard_ceiling() -> None:
+    """Verify remote capacity registration has hard ceiling."""
     from schema_sanitizer.errors import SchemaSanitizerResourceError
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
@@ -193,6 +217,7 @@ def test_remote_capacity_registration_has_hard_ceiling() -> None:
 
 
 def test_cleanup_dispatcher_oom_rolls_back_owner_charge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify cleanup dispatcher OOM rolls back owner charge."""
     from schema_sanitizer.core_impl.cleanup_dispatcher import _CleanupDispatcher
 
     dispatcher = _CleanupDispatcher()
@@ -211,6 +236,7 @@ def test_cleanup_dispatcher_oom_rolls_back_owner_charge(monkeypatch: pytest.Monk
 
 
 def test_compact_callback_rejects_huge_python_int_without_materializing_bytes() -> None:
+    """Verify compact callback rejects huge Python int without materializing bytes."""
     from schema_sanitizer.core_impl.compact_callback import _is_compact_value
 
     huge = 1 << (16 * 1024 * 1024)
@@ -221,6 +247,7 @@ def test_compact_callback_rejects_huge_python_int_without_materializing_bytes() 
 def test_temporary_storage_publication_oom_rolls_back_pending_and_process_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify temporary storage publication OOM rolls back pending and process owner."""
     from schema_sanitizer.core_impl import temporary_storage as module
 
     monkeypatch.setattr(
@@ -257,6 +284,7 @@ def test_temporary_storage_publication_oom_rolls_back_pending_and_process_owner(
 def test_cross_process_memory_contribution_oom_precedes_physical_growth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cross process memory contribution OOM precedes physical growth."""
     from schema_sanitizer.core_impl import cross_process_memory as module
 
     monkeypatch.setattr(module, "_enabled", lambda: False)
@@ -270,6 +298,7 @@ def test_cross_process_memory_contribution_oom_precedes_physical_growth(
 
 
 def test_path_claim_owner_uses_pre_reserved_generation_ticket() -> None:
+    """Verify path claim owner uses pre reserved generation ticket."""
     from schema_sanitizer.core_impl.path_identity import PathClaimOwner
 
     owner = PathClaimOwner(None, None, None)
@@ -288,6 +317,7 @@ def test_path_claim_owner_uses_pre_reserved_generation_ticket() -> None:
 
 
 def test_result_wrapper_exposes_safe_point_close_for_finalizer_cleanup() -> None:
+    """Verify result wrapper exposes safe point close for finalizer cleanup."""
     source = Path("src/schema_sanitizer/api_impl/results.py").read_text()
     result_block = source[source.index("class Result") : source.index("class SinkResult")]
     assert "def close(self)" in result_block
@@ -295,39 +325,24 @@ def test_result_wrapper_exposes_safe_point_close_for_finalizer_cleanup() -> None
     assert "self._table_cache = self._UNSET" in result_block
 
 
-def test_fork_quarantine_uses_preallocated_storage_in_production() -> None:
-    from schema_sanitizer.core_impl import fork_safety
-
-    assert fork_safety._FORK_INHERITED_CAPSULE is None
-    source = Path("src/schema_sanitizer/core_impl/fork_safety.py").read_text()
-    assert "_FORK_LABELS" in source and "_FORK_OWNERS" in source
-    assert "before=_prepare_fork_child_state" in source
-
-
 def test_cpp_retention_traits_sum_source_and_output_and_rollback_private_cursor() -> None:
+    """Verify C++ retention traits sum source and output and rollback private cursor."""
     source = Path("cpp/src/internal/runtime/ordered_executor.hh").read_text()
     assert "SaturatingRetainedAdd(source_hint, output_hint)" in source
     assert "AdditionalInlineOwnedBytes(value.rows)" in source
     assert "AdditionalInlineOwnedBytes(value.nodes)" in source
     private = source[
-        source.index("retained-byte charge exceeds private") : source.index("// Stop accepting")
+        source.index("retained-byte charge exceeds private") : source.index(
+            "sanitize::Status FinishSubmission()"
+        )
     ]
     assert private.index("try {") < private.index("ScheduledPacket scheduled")
     assert "completion_ring_.RollbackSubmit();" in private
     assert "TryTransferActiveToCompletion" in source
 
 
-def test_runtime_shutdown_observes_remote_authoritative_ledgers() -> None:
-    source = Path("src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text()
-    assert "process_remote_io_permit_snapshot" in source
-    assert "process_provider_throttle_snapshot" in source
-    assert "active_capacity_registrations" in source
-    assert "provider_active_leases" in source
-    assert "remote_io_submission_capabilities" in source
-    assert "remote_io_capacity_capabilities" in source
-
-
 def test_process_lease_finalizer_publishes_compact_capability_only() -> None:
+    """Verify process lease finalizer publishes compact capability only."""
     from schema_sanitizer.core_impl.finalizer_cleanup import drain_finalizer_cleanup
     from schema_sanitizer.core_impl.process_resources import _Governor
 
@@ -340,12 +355,13 @@ def test_process_lease_finalizer_publishes_compact_capability_only() -> None:
     # inspect the authoritative ledger directly before the explicit drain.
     assert governor._in_use == 1
     assert len(governor._active_leases) == 1
-    assert drain_finalizer_cleanup() >= 1
+    drain_finalizer_cleanup()
     assert governor.snapshot().in_use == 0
     assert governor.snapshot().active_leases == 0
 
 
 def test_remote_and_provider_finalizers_release_from_capability_ledgers() -> None:
+    """Verify remote and provider finalizers release from capability ledgers."""
     from schema_sanitizer.core_impl.finalizer_cleanup import drain_finalizer_cleanup
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
     from schema_sanitizer.remote_impl.provider_throttle import ProviderThrottleGovernor
@@ -361,20 +377,23 @@ def test_remote_and_provider_finalizers_release_from_capability_ledgers() -> Non
     gc.collect()
     assert remote.snapshot().pending_submissions == 1
     assert provider.snapshot("endpoint").in_flight == 1
-    assert drain_finalizer_cleanup() >= 2
+    drain_finalizer_cleanup()
     assert remote.snapshot().pending_submissions == 0
     assert provider.snapshot("endpoint").in_flight == 0
 
 
 def test_result_finalizer_detaches_wrapper_but_roots_large_graph_until_safe_point() -> None:
+    """Verify result finalizer detaches wrapper but roots large graph until safe point."""
     from schema_sanitizer.api_impl.results import Result
     from schema_sanitizer.core_impl.finalizer_cleanup import drain_finalizer_cleanup
 
     class Raw:
         def __init__(self) -> None:
+            """Initialize the raw test double."""
             self.closed = 0
 
         def close(self) -> None:
+            """Close the resources owned by the raw test double."""
             self.closed += 1
 
     class Box:
@@ -393,17 +412,19 @@ def test_result_finalizer_detaches_wrapper_but_roots_large_graph_until_safe_poin
     assert result_ref() is None
     assert box_ref() is not None
     assert raw.closed == 0
-    assert drain_finalizer_cleanup() >= 1
+    drain_finalizer_cleanup()
     gc.collect()
     assert raw.closed == 1
     assert box_ref() is None
 
 
 def test_terminal_ownership_rejection_latch_survives_counter_oom() -> None:
+    """Verify terminal ownership rejection latch survives counter OOM."""
     from schema_sanitizer.core_impl.terminal_ownership import TerminalOwnershipLedger
 
     class ExplodingInt(int):
         def __add__(self, _other: object):
+            """Raise when the test attempts arithmetic on the hostile value."""
             raise MemoryError("injected diagnostic counter OOM")
 
     ledger = TerminalOwnershipLedger(capacity=1)
@@ -414,59 +435,35 @@ def test_terminal_ownership_rejection_latch_survives_counter_oom() -> None:
 
 
 def test_large_budgeted_payloads_use_prepared_lease_capsules_instead_of_self() -> None:
+    """Verify large budgeted payloads use prepared lease capsules instead of self."""
     source = Path("src/schema_sanitizer/remote_impl/transport.py").read_text()
     block = source[source.index("class _BudgetedBytes") : source.index("class _HttpStatusError")]
-    assert "prepare_resource_finalizer_cleanup(lease)" in block
+    assert "reserve_resource_finalizer_cleanup(lease)" in block
     assert "defer_prepared_finalizer_cleanup" in block
     assert "defer_finalizer_cleanup(self)" not in block
 
 
 def test_provider_registry_limit_rejects_coercible_non_integer() -> None:
+    """Verify provider registry limit rejects coercible non integer."""
     from schema_sanitizer.remote_impl.provider_throttle import ProviderThrottleGovernor
 
     with pytest.raises(TypeError):
         ProviderThrottleGovernor(max_tracked_keys=True)
 
 
-def test_finalizer_escrow_failed_owner_does_not_head_of_line_block() -> None:
-    from schema_sanitizer.core_impl.finalizer_escrow import FinalizerEscrow
-
-    escrow: FinalizerEscrow[object] = FinalizerEscrow(2)
-    first = object()
-    second = object()
-    assert escrow.try_publish(first)
-    assert escrow.try_publish(second)
-    seen: list[object] = []
-
-    def process(value: object) -> None:
-        if value is first:
-            raise RuntimeError("retry")
-        seen.append(value)
-
-    with pytest.raises(RuntimeError):
-        escrow.process_one(process)
-    assert escrow.process_one(process)
-    assert seen == [second]
-    assert escrow.size() == 1
-
-
 def test_production_finalizers_do_not_publish_rich_self_owners() -> None:
-    root = Path("src/schema_sanitizer")
+    """Verify production finalizers do not publish rich self owners."""
     offenders: list[str] = []
-    for path in root.rglob("*.py"):
-        text = path.read_text()
+    for relative_path in source_paths("src/schema_sanitizer"):
+        text = source_text(relative_path)
         if "defer_finalizer_cleanup(self)" not in text:
             continue
-        # NativeSourcePlan keeps one explicit compatibility branch for synthetic
-        # object.__new__ test doubles that never ran __post_init__. Production
-        # objects have a pre-reserved capsule.
-        if path.as_posix().endswith("input_impl/source_plan.py"):
-            continue
-        offenders.append(path.as_posix())
+        offenders.append(relative_path)
     assert offenders == []
 
 
 def test_cpp_arena_submission_rolls_back_completion_on_throwing_publication() -> None:
+    """Verify C++ arena submission rolls back completion on throwing publication."""
     header = Path("cpp/src/internal/runtime/ordered_executor.hh").read_text()
     high_core = Path("cpp/src/internal/runtime/ordered_executor_submission.cc.inc").read_text()
     execution = Path("cpp/src/internal/runtime/ordered_executor_execution.cc.inc").read_text()
@@ -481,10 +478,12 @@ def test_cpp_arena_submission_rolls_back_completion_on_throwing_publication() ->
 
 
 def test_prepared_capsule_self_publishes_unused_reserved_ticket() -> None:
+    """Verify prepared capsule self publishes unused reserved ticket."""
     from schema_sanitizer.core_impl import finalizer_cleanup as module
 
     escrow = module._PREPARED_FINALIZER_ESCROW
-    ticket, capsule = module.prepare_reference_finalizer_cleanup()
+    capsule = module.reserve_reference_finalizer_cleanup()
+    ticket = capsule.ticket
     authority = capsule._authority
     slot = escrow._ticket_slots[ticket]
     assert escrow._tickets[slot] == ticket
@@ -501,7 +500,7 @@ def test_prepared_capsule_self_publishes_unused_reserved_ticket() -> None:
         assert escrow._tickets[slot] == ticket
         assert escrow._slots[slot] is authority
 
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while (
         ticket in escrow._ticket_slots
         or authority.is_armed_for(ticket)

@@ -1,17 +1,22 @@
-"""Direct native file-output implementations and error translation."""
+"""Direct native file-output implementations and error translation.
+
+It attempts atomic native path writers, translates native statuses into typed outcomes,
+and distinguishes safe decline from terminal failure.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from ...adapters.parquet.compression import native_parquet_writer_options
-from ...adapters.pyarrow.csv_sink import _native_csv_schema_supported, mark_csv_stream_route
+from ...adapters.pyarrow.csv_sink import _native_csv_schema_supported
 from ...adapters.pyarrow.file_metadata import (
     has_metadata_columns,
-    mark_metadata_route,
     native_metadata_args_or_none,
 )
-from ...adapters.pyarrow.jsonl_sink import _schema_supports_native_jsonl, mark_jsonl_stream_route
+from ...adapters.pyarrow.jsonl_sink import _schema_supports_native_jsonl
 from ...core_impl.atomic_output import atomic_local_output
 from ...core_impl.dependencies import ensure_pyarrow
 from ...core_impl.generated_metadata import TimestampColumns
@@ -35,6 +40,15 @@ _NATIVE_PARQUET_UNSUPPORTED_MARKERS = (
     "native Parquet writer: gzip compression requested but zlib is not available",
     "native Parquet writer: gzip compression is the default but zlib is not available",
 )
+
+
+@dataclass(frozen=True, slots=True)
+class FileWriteOutcome:
+    """Stats and route selected for one completed file write."""
+
+    stats: Any
+    route: str
+    metadata_route: str
 
 
 def _call_native_writer(
@@ -74,6 +88,56 @@ def _is_native_parquet_unsupported(exc: RuntimeError) -> bool:
     return any(marker in message for marker in _NATIVE_PARQUET_UNSUPPORTED_MARKERS)
 
 
+def _try_write_record_direct_native(
+    source: Any,
+    out_path: Any,
+    *,
+    raw: bool,
+    sink_name: str,
+    write: Any,
+    write_with_metadata: Any,
+    schema_supported: Callable[[Any], bool] | None,
+    first_row_columns: dict[str, Any] | None,
+    all_row_columns: dict[str, Any] | None,
+    row_span_columns: dict[str, list[tuple[int, str | None]]] | None,
+    timestamp_columns: TimestampColumns,
+    memory_limit_bytes: int | None,
+    threading_mode: str,
+) -> FileWriteOutcome | None:
+    """Run the shared native-first CSV/JSONL file-output flow."""
+    metadata_args = native_metadata_args_or_none(
+        None if raw else source,
+        first_row_columns,
+        all_row_columns,
+        row_span_columns,
+        timestamp_columns,
+    )
+    if metadata_args is None:
+        if not raw or has_metadata_columns(
+            first_row_columns, all_row_columns, row_span_columns, timestamp_columns
+        ):
+            return None
+    elif not raw and (schema_supported is None or not schema_supported(source.schema)):
+        return None
+    output_path = local_output_path_or_reject_remote(out_path, sink_name=sink_name)
+    writer = write_with_metadata if metadata_args is not None else write
+    metadata = () if metadata_args is None else metadata_args
+    stats = _call_native_writer(
+        writer,
+        source,
+        output_path,
+        *metadata,
+        -1 if memory_limit_bytes is None else memory_limit_bytes,
+        _native_threading_mode_value(threading_mode),
+        output_path=output_path,
+    )
+    return FileWriteOutcome(
+        stats or True,
+        "native_direct",
+        "native" if metadata_args is not None else "none",
+    )
+
+
 def try_write_csv_direct_native(
     stream: Any,
     out_path: Any,
@@ -84,31 +148,23 @@ def try_write_csv_direct_native(
     timestamp_columns: TimestampColumns,
     memory_limit_bytes: int | None = None,
     threading_mode: str = "single",
-) -> Any:
+) -> FileWriteOutcome | None:
     """Write CSV by composing native metadata injection and native output."""
-    native_threading_mode = _native_threading_mode_value(threading_mode)
-    metadata_args = native_metadata_args_or_none(
+    return _try_write_record_direct_native(
         stream,
-        first_row_columns,
-        all_row_columns,
-        row_span_columns,
-        timestamp_columns,
+        out_path,
+        raw=False,
+        sink_name="CSV",
+        write=CSV_STREAM_WRITE,
+        write_with_metadata=CSV_STREAM_WRITE_WITH_METADATA,
+        schema_supported=_native_csv_schema_supported,
+        first_row_columns=first_row_columns,
+        all_row_columns=all_row_columns,
+        row_span_columns=row_span_columns,
+        timestamp_columns=timestamp_columns,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     )
-    if metadata_args is None or not _native_csv_schema_supported(stream.schema):
-        return False
-    output_path = local_output_path_or_reject_remote(out_path, sink_name="CSV")
-    stats = _call_native_writer(
-        CSV_STREAM_WRITE_WITH_METADATA,
-        stream,
-        output_path,
-        *metadata_args,
-        -1 if memory_limit_bytes is None else memory_limit_bytes,
-        native_threading_mode,
-        output_path=output_path,
-    )
-    mark_metadata_route("native")
-    mark_csv_stream_route("native")
-    return stats or True
 
 
 def try_write_csv_raw_direct_native(
@@ -121,49 +177,23 @@ def try_write_csv_raw_direct_native(
     timestamp_columns: TimestampColumns,
     memory_limit_bytes: int | None = None,
     threading_mode: str = "single",
-) -> Any:
+) -> FileWriteOutcome | None:
     """Write a raw native stream directly to CSV when supported."""
-    native_threading_mode = _native_threading_mode_value(threading_mode)
-    metadata_args = native_metadata_args_or_none(
-        None,
-        first_row_columns,
-        all_row_columns,
-        row_span_columns,
-        timestamp_columns,
-    )
-    if metadata_args is not None:
-        output_path = local_output_path_or_reject_remote(out_path, sink_name="CSV")
-        stats = _call_native_writer(
-            CSV_STREAM_WRITE_WITH_METADATA,
-            raw,
-            output_path,
-            *metadata_args,
-            -1 if memory_limit_bytes is None else memory_limit_bytes,
-            native_threading_mode,
-            output_path=output_path,
-        )
-        mark_metadata_route("native")
-        mark_csv_stream_route("native")
-        return stats or True
-    if has_metadata_columns(
-        first_row_columns,
-        all_row_columns,
-        row_span_columns,
-        timestamp_columns,
-    ):
-        return False
-    output_path = local_output_path_or_reject_remote(out_path, sink_name="CSV")
-    stats = _call_native_writer(
-        CSV_STREAM_WRITE,
+    return _try_write_record_direct_native(
         raw,
-        output_path,
-        -1 if memory_limit_bytes is None else memory_limit_bytes,
-        native_threading_mode,
-        output_path=output_path,
+        out_path,
+        raw=True,
+        sink_name="CSV",
+        write=CSV_STREAM_WRITE,
+        write_with_metadata=CSV_STREAM_WRITE_WITH_METADATA,
+        schema_supported=None,
+        first_row_columns=first_row_columns,
+        all_row_columns=all_row_columns,
+        row_span_columns=row_span_columns,
+        timestamp_columns=timestamp_columns,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     )
-    mark_metadata_route("none")
-    mark_csv_stream_route("native")
-    return stats or True
 
 
 def try_write_jsonl_direct_native(
@@ -177,34 +207,25 @@ def try_write_jsonl_direct_native(
     timestamp_columns: TimestampColumns,
     memory_limit_bytes: int | None = None,
     threading_mode: str = "single",
-) -> Any:
+) -> FileWriteOutcome | None:
     """Write JSONL by composing native metadata injection and native output."""
-    native_threading_mode = _native_threading_mode_value(threading_mode)
-    metadata_args = native_metadata_args_or_none(
+    return _try_write_record_direct_native(
         stream,
-        first_row_columns,
-        all_row_columns,
-        row_span_columns,
-        timestamp_columns,
+        out_path,
+        raw=False,
+        sink_name="JSONL",
+        write=JSONL_STREAM_WRITE,
+        write_with_metadata=JSONL_STREAM_WRITE_WITH_METADATA,
+        schema_supported=lambda schema: _schema_supports_native_jsonl(
+            schema, pa=ensure_pyarrow(feature=feature)
+        ),
+        first_row_columns=first_row_columns,
+        all_row_columns=all_row_columns,
+        row_span_columns=row_span_columns,
+        timestamp_columns=timestamp_columns,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     )
-    if metadata_args is None:
-        return False
-    pa = ensure_pyarrow(feature=feature)
-    if not _schema_supports_native_jsonl(stream.schema, pa=pa):
-        return False
-    output_path = local_output_path_or_reject_remote(out_path, sink_name="JSONL")
-    stats = _call_native_writer(
-        JSONL_STREAM_WRITE_WITH_METADATA,
-        stream,
-        output_path,
-        *metadata_args,
-        -1 if memory_limit_bytes is None else memory_limit_bytes,
-        native_threading_mode,
-        output_path=output_path,
-    )
-    mark_metadata_route("native")
-    mark_jsonl_stream_route("native")
-    return stats or True
 
 
 def try_write_jsonl_raw_direct_native(
@@ -217,49 +238,23 @@ def try_write_jsonl_raw_direct_native(
     timestamp_columns: TimestampColumns,
     memory_limit_bytes: int | None = None,
     threading_mode: str = "single",
-) -> Any:
+) -> FileWriteOutcome | None:
     """Write a raw native stream directly to JSONL when supported."""
-    native_threading_mode = _native_threading_mode_value(threading_mode)
-    metadata_args = native_metadata_args_or_none(
-        None,
-        first_row_columns,
-        all_row_columns,
-        row_span_columns,
-        timestamp_columns,
-    )
-    if metadata_args is not None:
-        output_path = local_output_path_or_reject_remote(out_path, sink_name="JSONL")
-        stats = _call_native_writer(
-            JSONL_STREAM_WRITE_WITH_METADATA,
-            raw,
-            output_path,
-            *metadata_args,
-            -1 if memory_limit_bytes is None else memory_limit_bytes,
-            native_threading_mode,
-            output_path=output_path,
-        )
-        mark_metadata_route("native")
-        mark_jsonl_stream_route("native")
-        return stats or True
-    if has_metadata_columns(
-        first_row_columns,
-        all_row_columns,
-        row_span_columns,
-        timestamp_columns,
-    ):
-        return False
-    output_path = local_output_path_or_reject_remote(out_path, sink_name="JSONL")
-    stats = _call_native_writer(
-        JSONL_STREAM_WRITE,
+    return _try_write_record_direct_native(
         raw,
-        output_path,
-        -1 if memory_limit_bytes is None else memory_limit_bytes,
-        native_threading_mode,
-        output_path=output_path,
+        out_path,
+        raw=True,
+        sink_name="JSONL",
+        write=JSONL_STREAM_WRITE,
+        write_with_metadata=JSONL_STREAM_WRITE_WITH_METADATA,
+        schema_supported=None,
+        first_row_columns=first_row_columns,
+        all_row_columns=all_row_columns,
+        row_span_columns=row_span_columns,
+        timestamp_columns=timestamp_columns,
+        memory_limit_bytes=memory_limit_bytes,
+        threading_mode=threading_mode,
     )
-    mark_metadata_route("none")
-    mark_jsonl_stream_route("native")
-    return stats or True
 
 
 def try_write_parquet_direct_native(
@@ -274,7 +269,7 @@ def try_write_parquet_direct_native(
     parquet_gzip_level: int | None = None,
     memory_limit_bytes: int | None = None,
     threading_mode: str = "single",
-) -> bool:
+) -> FileWriteOutcome | None:
     """Write Parquet directly through native output when supported."""
     native_threading_mode = _native_threading_mode_value(threading_mode)
     metadata_stream = stream if hasattr(stream, "schema") else None
@@ -291,7 +286,7 @@ def try_write_parquet_direct_native(
         row_span_columns,
         timestamp_columns,
     ):
-        return False
+        return None
 
     output_path = local_output_path_or_reject_remote(out_path, sink_name="Parquet")
     write = (
@@ -319,10 +314,13 @@ def try_write_parquet_direct_native(
         )
     except RuntimeError as exc:
         if _is_native_parquet_unsupported(exc):
-            return False
+            return None
         raise
-    mark_metadata_route("native" if metadata_args is not None else "none")
-    return True
+    return FileWriteOutcome(
+        True,
+        "native_direct",
+        "native" if metadata_args is not None else "none",
+    )
 
 
 def try_write_parquet_raw_direct_native(
@@ -337,7 +335,7 @@ def try_write_parquet_raw_direct_native(
     parquet_gzip_level: int | None = None,
     memory_limit_bytes: int | None = None,
     threading_mode: str = "single",
-) -> bool:
+) -> FileWriteOutcome | None:
     """Write a raw native stream directly to Parquet."""
     _native_threading_mode_value(threading_mode)
     return try_write_parquet_direct_native(

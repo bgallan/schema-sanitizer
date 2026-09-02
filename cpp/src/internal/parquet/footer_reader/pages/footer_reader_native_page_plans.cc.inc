@@ -1,3 +1,9 @@
+// Converts validated page metadata into bounded native decode spans and
+// row-window assignments. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
+
+/// Assigns native read page spans from validated schema and page metadata for
+/// later materialization.
 sanitize::Status assign_native_read_page_spans(FooterInfo *info) {
   if (!info) {
     return sanitize::Status::Invalid(

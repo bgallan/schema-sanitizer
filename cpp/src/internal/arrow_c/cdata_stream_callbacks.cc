@@ -1,4 +1,6 @@
 // Implements Arrow C Stream callback lifecycle and error handling.
+// The implementation preserves Arrow ownership and error contracts without
+// depending on the Arrow C++ library.
 
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 

@@ -1,4 +1,6 @@
 // Implements the bounded JSONL validation barrier ahead of materialization.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/ingest_stream/parallel_source_impl.hh"
 
@@ -12,6 +14,8 @@
 namespace sanitize::internal {
 namespace {
 
+/// Allocates validation-token capacity proportionally across bounded packet
+/// workers.
 [[nodiscard]] std::size_t
 proportional_token_share(std::size_t remaining_tokens, std::size_t packet_rows,
                          std::size_t remaining_rows) noexcept {

@@ -60,7 +60,7 @@ This is the default policy. ASCII letters are lowercased and every other byte
 is removed:
 
 ```text
-Customer ID  -> customerid
+Source ID    -> sourceid
 price_$      -> price
 123          -> field
 ```
@@ -74,7 +74,7 @@ characters become underscores, adjacent/trailing underscores are collapsed or
 removed, and a leading digit is prefixed with `field_`:
 
 ```text
-Customer ID  -> customer_id
+Source ID    -> source_id
 price-USD    -> price_usd
 123_code     -> field_123_code
 ```

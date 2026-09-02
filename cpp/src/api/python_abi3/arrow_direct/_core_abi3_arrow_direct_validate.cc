@@ -1,4 +1,7 @@
 // Validates logical Arrow C Data bounds before direct batch materialization.
+// Recursive checks cover slices, buffers, offsets, children, and dictionary
+// indices.
+
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct_validate.hh"
 
 #include "internal/memory/memory_budget.hh"
@@ -18,6 +21,7 @@ struct ValidationLimits {
   std::int64_t logical_buffer_bytes = 0;
 };
 
+/// Validates an Arrow slice, null metadata, and configured logical-slot bounds.
 sanitize::Status validate_slice(const ArrowArray &array, std::int64_t first,
                                 std::int64_t length, std::string_view label,
                                 const ValidationLimits &limits) {
@@ -50,6 +54,7 @@ sanitize::Status validate_slice(const ArrowArray &array, std::int64_t first,
   return {};
 }
 
+/// Requires the exact buffer count and a nonnull table for a physical layout.
 sanitize::Status require_buffers(const ArrowArray &array, std::int64_t expected,
                                  std::string_view label) {
   if (array.n_buffers != expected || (expected > 0 && !array.buffers)) {
@@ -59,6 +64,7 @@ sanitize::Status require_buffers(const ArrowArray &array, std::int64_t expected,
   return {};
 }
 
+/// Requires the exact child count and a nonnull table for a nested layout.
 sanitize::Status require_children(const ArrowArray &array,
                                   std::int64_t expected,
                                   std::string_view label) {
@@ -69,6 +75,7 @@ sanitize::Status require_children(const ArrowArray &array,
   return {};
 }
 
+/// Validates monotonic variable-width offsets and their configured byte bound.
 template <typename OffsetT>
 sanitize::Result<std::pair<std::int64_t, std::int64_t>>
 validate_offsets(const ArrowArray &array, std::int64_t first_row,
@@ -109,6 +116,8 @@ validate_offsets(const ArrowArray &array, std::int64_t first_row,
   return std::pair<std::int64_t, std::int64_t>{first, previous};
 }
 
+/// Determines whether an Arrow array slot is present after applying the logical
+/// offset.
 bool slot_is_valid(const ArrowArray &array, std::int64_t row) {
   if (array.null_count == 0 || !array.buffers || !array.buffers[0]) {
     return true;
@@ -119,6 +128,7 @@ bool slot_is_valid(const ArrowArray &array, std::int64_t row) {
          0;
 }
 
+/// Checks every nonnull dictionary index against the dictionary length.
 template <typename IndexT>
 sanitize::Status validate_dictionary_index_values(const ArrowArray &array,
                                                   std::int64_t first_row,
@@ -139,6 +149,8 @@ sanitize::Status validate_dictionary_index_values(const ArrowArray &array,
   return {};
 }
 
+/// Dispatches dictionary-index validation according to the physical integer
+/// width.
 sanitize::Status validate_dictionary_indices(const ArrowInputNode &node,
                                              const ArrowArray &array,
                                              std::int64_t first_row,
@@ -172,6 +184,7 @@ sanitize::Status validate_dictionary_indices(const ArrowInputNode &node,
   }
 }
 
+/// Validates one Arrow node recursively against its expected physical layout.
 sanitize::Status validate_node(const ArrowInputNode &node,
                                const ArrowArray &array, std::int64_t first_row,
                                std::int64_t length, std::int64_t depth,

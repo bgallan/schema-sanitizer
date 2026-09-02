@@ -32,10 +32,18 @@ pytest -q
 pre-commit run --all-files
 ```
 
-The ShellCheck and shfmt hooks install their exact wrapper-wheel dependencies
-inside pre-commit environments; do not require separate system executables or
-duplicate those packages in the `dev` extra. After changing either pin, use a
-fresh `PRE_COMMIT_HOME` to verify that a cold hook bootstrap succeeds.
+The first plain `pre-commit run --all-files` automatically creates one
+content-addressed, hash-verified tool environment below
+`.work/pre-commit-tools` when the active environment lacks any exact hook pin.
+It never installs into the active environment; later runs reuse the certified
+cache, while CI takes the no-bootstrap fast path from its already exact tool
+installation. ShellCheck, shfmt, and the other hook executables therefore need
+no separate system installation or duplicate entry in the `dev` extra.
+
+Pytest, mypy, Ruff, coverage, and local native builds keep their regenerable
+state below the ignored `.work/` directory. Deleting it clears those caches,
+reports, and builds without touching environments, release artifacts, or source
+files.
 
 Tests are grouped by domain under [`tests/`](../../tests/README.md):
 
@@ -69,8 +77,8 @@ and error selection across both modes.
 Build the standalone CMake target while iterating on C++:
 
 ```bash
-cmake -S . -B build/dev -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build/dev --parallel
+cmake -S . -B .work/build/dev -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build .work/build/dev --parallel
 ```
 
 Build a distributable wheel with:
@@ -81,6 +89,12 @@ python -m build --wheel
 
 Release wheels use CPython's 3.11 stable ABI and bundle pinned zlib for a
 consistent Parquet compression matrix.
+
+Production wheel builds may opt into target-private precompiled headers with
+`-DSCHEMA_SANITIZER_ENABLE_PCH=ON`. The option is deliberately off by default,
+applies only to Release configurations, and is rejected for sanitizer, coverage,
+and clang-tidy/include-hygiene builds so those diagnostics continue to parse each
+translation unit from its own declared includes.
 
 ## [Benchmarks](#index)
 
@@ -121,10 +135,12 @@ owned helper map under [`meta/ci/`](../../meta/ci/README.md) are the source of t
 - remote fault handling and Parquet contracts.
 
 Keep jobs broad enough to catch platform-specific native failures while
-avoiding duplicate jobs that exercise the same contract. The four wheel jobs
-use one pinned CPython patch, one pinned direct adapter set, and identical
-functional/stress selections; platform-specific skips should be limited to
-capabilities that genuinely do not exist on that operating system.
+avoiding duplicate jobs that exercise the same contract. The four wheel
+producers share one pinned build interpreter and toolchain contract. Their four
+matching test matrices use one pinned CPython patch, shard-specific selections
+from one locked adapter set, and identical functional/stress shard definitions;
+platform-specific skips should be limited to capabilities that genuinely do not
+exist on that operating system.
 
 ## [Documentation changes](#index)
 

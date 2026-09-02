@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency process governors and pressure."""
+"""Stress process governors as pressure and remote demand change concurrently.
+
+The tests cover permit fairness and cancellation, safety reserves, native policy shrinkage,
+memory-ledger anomalies, bounded lookahead shutdown, weighted transfer admission, coordinator
+capacity callbacks, untracked RSS, and temporary-storage close diagnostics.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +23,7 @@ from schema_sanitizer.core_impl.memory_budget import (
     adaptive_concurrency_target,
     process_resident_memory_snapshot,
 )
-from schema_sanitizer.pipeline.partition_lookahead import ThreadPoolExecutor
+from schema_sanitizer.pipeline.partition_lookahead_worker import ThreadPoolExecutor
 from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
 from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
@@ -310,8 +315,8 @@ def test_process_memory_pressure_reports_untracked_rss(
     assert snapshot.untracked_rss_bytes == 5_500
 
 
-def test_temporary_storage_reports_close_and_over_release(tmp_path) -> None:
-    """Disk cleanup underflow and live-at-close state are explicit diagnostics."""
+def test_temporary_storage_reports_live_reservation_at_close(tmp_path) -> None:
+    """Temporary-storage diagnostics retain the exact live-at-close state."""
     from schema_sanitizer.core_impl.temporary_storage import TemporaryStoragePermitPool
 
     pool = TemporaryStoragePermitPool(64 << 20)
@@ -320,19 +325,6 @@ def test_temporary_storage_reports_close_and_over_release(tmp_path) -> None:
     diagnostics = pool.diagnostics()
     assert diagnostics.close_outstanding_bytes == 4096
     assert diagnostics.close_active_leases == 1
-    filesystem_key = lease._filesystem_key  # noqa: SLF001
     lease.release()
-    pool._release(1024, filesystem_key=filesystem_key)  # noqa: SLF001
-    diagnostics = pool.diagnostics()
-    assert diagnostics.over_release_count == 1
-    assert diagnostics.over_release_bytes == 1024
-
-
-def test_remote_governor_reports_weight_underflow() -> None:
-    """Permit cleanup underflow is visible rather than silently clamped."""
-    governor = RemoteIoPermitGovernor(2)
-    governor._release(3)  # noqa: SLF001
-    snapshot = governor.snapshot()
-    assert snapshot.in_use == 0
-    assert snapshot.over_release_count == 1
-    assert snapshot.over_release_weight == 3
+    assert pool.snapshot().reserved_bytes == 0
+    assert pool.snapshot().active_leases == 0

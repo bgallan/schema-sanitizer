@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency csv coverage names the adaptive framing stage."""
+"""Certify adaptive CSV framing as the concrete parallel stage recorded by coverage.
+
+The scanner must adapt without private threads, preserve values across chunk boundaries, and keep
+wide-schema decoding and probing identical between single- and multi-worker execution.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,6 @@ import csv
 from pathlib import Path
 
 from _support.diagnostics import assert_diagnostics_semantically_equal
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.concurrency_coverage import (
@@ -66,7 +69,7 @@ def test_csv_coverage_names_the_adaptive_framing_stage() -> None:
             assert contract["eligible_multi_benefit"] is True
             assert contract["parallel_stages"]
             assert contract["benefit_proof"]
-    assert len(INPUT_CONCURRENCY_COVERAGE) == 8
+    assert len(INPUT_CONCURRENCY_COVERAGE) == 7
     assert len(OUTPUT_CONCURRENCY_COVERAGE) == 7
 
 
@@ -90,9 +93,9 @@ def test_csv_scanner_is_adaptive_without_private_threads() -> None:
 
 def test_csv_chunk_boundaries_preserve_exact_single_multi_values(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Escaped quotes, CRLF, and multiline fields survive chunk transitions."""
-    require_native()
     chunk_bytes = 1 << 20
     header = "id,text\n"
     prefix = '1,"'
@@ -139,9 +142,9 @@ def test_csv_chunk_boundaries_preserve_exact_single_multi_values(
 
 def test_wide_csv_keeps_parallel_decode_and_exact_probe_parity(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Adaptive framing continues feeding real input tasks in multi mode."""
-    require_native()
     source = tmp_path / "wide.csv"
     columns = [f"field_{index:02d}" for index in range(12)]
     payload = "abcdefghijklmnopqrstuvwxyz0123456789" * 8
@@ -160,7 +163,13 @@ def test_wide_csv_keeps_parallel_decode_and_exact_probe_parity(
     assert multi.schema_payload == single.schema_payload
     assert multi.field_names == single.field_names
     assert_diagnostics_semantically_equal(multi.diagnostics, single.diagnostics)
-    assert int(single_stats["tasks"]["input"]["submitted"]) == 0
-    assert int(multi_stats["tasks"]["input"]["submitted"]) >= 2
-    assert int(multi_stats["counters"]["peak_active_tasks"]) >= 2
+    single_tasks = single_stats["tasks"]["input"]
+    multi_tasks = multi_stats["tasks"]["input"]
+    assert int(single_tasks["submitted"]) == 0
+    assert (
+        int(multi_tasks["submitted"])
+        == int(multi_tasks["started"])
+        == int(multi_tasks["finished"])
+        >= 2
+    )
     assert int(multi_stats["memory"]["peak_bytes"]) <= 64 << 20

@@ -24,6 +24,8 @@ namespace {
 
 constexpr std::size_t kMinimumFieldBytes = 6U;
 
+/// Validates logical-schema serialization growth before extending the output
+/// buffer.
 void require_output_growth(const std::string &out, std::size_t additional) {
   if (additional > kMaxLogicalSchemaPayloadBytes ||
       out.size() > kMaxLogicalSchemaPayloadBytes - additional) {
@@ -31,6 +33,7 @@ void require_output_growth(const std::string &out, std::size_t additional) {
   }
 }
 
+/// Converts a container size to the schema wire format's bounded 32-bit length.
 std::uint32_t checked_u32_size(std::size_t value, std::string_view label) {
   if (value > std::numeric_limits<std::uint32_t>::max()) {
     throw std::length_error(std::string(label) + " exceeds uint32 range");
@@ -38,11 +41,14 @@ std::uint32_t checked_u32_size(std::size_t value, std::string_view label) {
   return static_cast<std::uint32_t>(value);
 }
 
+/// Appends one byte to the bounded logical-schema wire payload.
 void append_u8(std::string &out, std::uint8_t value) {
   require_output_growth(out, 1);
   out.push_back(static_cast<char>(value));
 }
 
+/// Appends one unsigned 32-bit integer to the logical-schema wire payload in
+/// little-endian form.
 void append_u32(std::string &out, std::uint32_t value) {
   require_output_growth(out, 4);
   for (int shift = 0; shift < 32; shift += 8) {
@@ -50,6 +56,8 @@ void append_u32(std::string &out, std::uint32_t value) {
   }
 }
 
+/// Appends one length-prefixed string to the bounded logical-schema wire
+/// payload.
 void append_string(std::string &out, std::string_view value) {
   append_u32(out, checked_u32_size(value.size(), "logical field name"));
   require_output_growth(out, value.size());
@@ -59,6 +67,7 @@ void append_string(std::string &out, std::string_view value) {
 struct LogicalSchemaWriteBudget {
   std::uint32_t remaining_nodes = kMaxLogicalSchemaNodes;
 
+  /// Consumes node from the bounded cursor or reports its exact source offset.
   void consume_node() {
     if (remaining_nodes == 0) {
       throw std::length_error("logical schema node count exceeds safety limit");
@@ -70,6 +79,8 @@ struct LogicalSchemaWriteBudget {
 void append_logical_type(std::string &out, const sanitize::LogicalType &type,
                          std::uint32_t depth, LogicalSchemaWriteBudget *budget);
 
+/// Serializes one logical field and its recursive type into the schema wire
+/// payload.
 void append_logical_field(std::string &out, const sanitize::LogicalField &field,
                           std::uint32_t depth,
                           LogicalSchemaWriteBudget *budget) {
@@ -87,6 +98,8 @@ void append_logical_field(std::string &out, const sanitize::LogicalField &field,
   }
 }
 
+/// Serializes one logical type, including nested children and temporal
+/// metadata.
 void append_logical_type(std::string &out, const sanitize::LogicalType &type,
                          std::uint32_t depth,
                          LogicalSchemaWriteBudget *budget) {
@@ -120,8 +133,12 @@ void append_logical_type(std::string &out, const sanitize::LogicalType &type,
 
 class LogicalSchemaReader {
 public:
+  /// Initializes a bounded cursor for deserializing the logical-schema wire
+  /// section.
   explicit LogicalSchemaReader(std::string_view input) : input_(input) {}
 
+  /// Deserializes a complete logical schema and rejects trailing or malformed
+  /// bytes.
   sanitize::Result<sanitize::LogicalSchema> read_schema() {
     if (input_.size() > kMaxLogicalSchemaPayloadBytes) {
       return sanitize::Status::Invalid(
@@ -149,6 +166,7 @@ public:
   }
 
 private:
+  /// Consumes one node from the deserializer's bounded schema-node budget.
   sanitize::Status consume_node() {
     if (remaining_nodes_ == 0) {
       return sanitize::Status::Invalid("deserialize_options: logical schema "
@@ -158,6 +176,8 @@ private:
     return sanitize::Status::OK();
   }
 
+  /// Validates a struct field count against safety limits and remaining input
+  /// bytes.
   sanitize::Status validate_field_collection(std::uint32_t count,
                                              std::string_view context) const {
     if (count > kMaxLogicalSchemaFieldsPerStruct) {
@@ -178,6 +198,7 @@ private:
     return sanitize::Status::OK();
   }
 
+  /// Decodes one named logical field and its nested type.
   sanitize::Status read_field(sanitize::LogicalField *out,
                               std::uint32_t depth) {
     SAN_RETURN_NOT_OK(consume_node());
@@ -200,6 +221,7 @@ private:
     return sanitize::Status::OK();
   }
 
+  /// Recursively decodes one bounded logical type node.
   sanitize::Result<sanitize::LogicalType> read_type(std::uint32_t depth) {
     if (depth > kMaxLogicalSchemaDepth) {
       return sanitize::Status::Invalid(

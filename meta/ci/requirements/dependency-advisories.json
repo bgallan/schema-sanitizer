@@ -1,0 +1,16 @@
+{
+  "artifact_lock": "python-artifact-sha256.lock",
+  "auditor": "pip-audit==2.10.1",
+  "inputs": {
+    "pyproject.toml": "dd9f814d5723d67879ae01fee9f51ee16437a11a5546c731e2ddce01653a23d5",
+    "python-artifact-sha256.lock": "4f4ae91634f10d3b562229e1889d03d5e516187100abc5027a87fe651da2b83f",
+    "requirements/build-tools.txt": "66bea80c4bc5b0bcd0458c861a589f223e87b0526c2c97620d23bb8738336470",
+    "requirements/downstream.txt": "e069483044c98ea881e343ba71b7ada13bf96d6cefda609bb2454279b2341145",
+    "requirements/platform-tests.txt": "bd64610f81a1cc949fbf83dbda19fcdddede45c7a4f861a3aa064455d353c54a",
+    "requirements/pre-commit-hooks.txt": "2c4a83fca46d5e777f4702b63ca757089c672248ce59fe178d14f0a1fc365d71",
+    "requirements/quality.txt": "531e2bdb0f0529852a4d1c7938e467ba10338431e1677c9029315667f895b308",
+    "requirements/release-verification.txt": "788e3a3d0a114f4c6f0e71e261ef6a906e541a5835248a9ccda55b91285cb51f"
+  },
+  "schema": 1,
+  "vulnerabilities": []
+}

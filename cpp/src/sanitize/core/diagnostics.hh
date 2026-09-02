@@ -1,4 +1,6 @@
-// Defines row-level diagnostics and stable diagnostic codes.
+// Defines bounded ingestion diagnostics and their stable external codes.
+// Reader, materialization, memory, and cancellation counters can be merged and
+// serialized without retaining input payloads or replacing primary failures.
 
 #pragma once
 
@@ -26,7 +28,7 @@ enum class DiagnosticCode : std::uint8_t {
   kRequiredMissing = 14,
 };
 
-// Stable string codes for JSON diagnostics output.
+/// Returns the stable JSON code for a diagnostic event.
 inline const char *DiagnosticCodeToString(DiagnosticCode c) {
   switch (c) {
   case DiagnosticCode::kRowSkipped:
@@ -81,15 +83,16 @@ struct IngestDiagnostics {
   int64_t cancellations = 0;
   std::string cancellation_reason;
 
-  // Binds and snapshots the exact operation-scoped tracked pool. The weak
-  // reference avoids extending operation leases after stream ownership ends.
+  /// Binds and snapshots the exact operation-scoped tracked pool. The weak
+  /// reference avoids extending operation leases after stream ownership ends.
   void bind_operation_memory_pool(std::shared_ptr<void> pool) noexcept;
   void capture_operation_memory() const noexcept;
   void merge_reader(const ReaderResourceDiagnostics &delta) noexcept;
   void merge(const IngestDiagnostics &other) noexcept;
   void record_cancellation(std::string_view reason) noexcept;
 
-  // Canonical JSON payload for diagnostics.
+  /// Serializes the diagnostic counters and cancellation state as canonical
+  /// JSON.
   [[nodiscard]] std::string to_json() const;
 
 private:

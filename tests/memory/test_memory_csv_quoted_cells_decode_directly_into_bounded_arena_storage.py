@@ -1,11 +1,13 @@
-"""Regression coverage for memory csv quoted cells decode directly into bounded arena storage."""
+"""Validates direct quoted-cell decoding plus CSV metadata, JSON field caches and vectors,
+and native cell or field cardinality checks. Both formats reject oversized structures
+before unbounded retention, while accepted CSV data lands directly in bounded arena
+storage."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -72,9 +74,10 @@ def test_json_object_field_vectors_are_bounded_in_both_materializers() -> None:
     assert "fields->size() >= kMaxMaterializedFieldsPerRow" in row_appender
 
 
-def test_native_json_rejects_excessive_object_field_count(tmp_path: Path) -> None:
+def test_native_json_rejects_excessive_object_field_count(
+    tmp_path: Path, require_native: None
+) -> None:
     """The native probe rejects field-reference amplification in one object."""
-    require_native()
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     path = tmp_path / "too-many-fields.json"
@@ -91,9 +94,8 @@ def test_native_json_rejects_excessive_object_field_count(tmp_path: Path) -> Non
         )
 
 
-def test_native_csv_rejects_excessive_cell_count(tmp_path: Path) -> None:
+def test_native_csv_rejects_excessive_cell_count(tmp_path: Path, require_native: None) -> None:
     """The native path-source probe rejects 65,537 cells before materialization."""
-    require_native()
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     path = tmp_path / "too-many-cells.csv"

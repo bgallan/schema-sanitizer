@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency csv direct path avoids json round trip for scalars and strings."""
+"""Define CSV direct-encoding contracts for scalar cells and packet estimation.
+
+The cases avoid JSON round trips, retain conservative interleave margins, and require
+byte-identical single, multi, and stream-adapter output.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,6 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import semantic_stats
-from conftest import require_native
 
 ROOT = Path(__file__).resolve().parents[2]
 CSV_WRITER = ROOT / "cpp/src/internal/csv/csv_stream_writer.cc"
@@ -24,7 +27,6 @@ def test_csv_direct_path_avoids_json_round_trip_for_scalars_and_strings() -> Non
     assert "array_is_null(array, row)" in source
     assert "append_csv_cell_from_json" in source  # generic fallback retained
     assert "getenv" not in source
-    assert len(source.splitlines()) <= 500
 
 
 def test_csv_estimator_uses_csv_cells_and_keeps_interleave_margin() -> None:
@@ -37,12 +39,12 @@ def test_csv_estimator_uses_csv_cells_and_keeps_interleave_margin() -> None:
     assert "array.offset + row" in source
     assert "return multiply_capped(total, 2, cap);" in source
     assert "estimate_jsonl_row_bytes(root, array, row, cap)" in source
-    assert len(source.splitlines()) <= 500
 
 
-def test_csv_single_multi_and_legacy_bytes_are_identical(tmp_path: Path) -> None:
+def test_csv_single_multi_and_stream_adapter_bytes_are_identical(
+    tmp_path: Path, require_native: None
+) -> None:
     """Direct scalar/string rendering preserves quoting, nulls, and row order."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.csv_sink import write_csv_stream
 

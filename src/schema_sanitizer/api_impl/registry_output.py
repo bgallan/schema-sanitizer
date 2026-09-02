@@ -1,4 +1,8 @@
-"""Registry-backed file output routing and native stream ownership."""
+"""Registry-backed file output routing and native stream ownership.
+
+It routes registry streams to raw or metadata-aware file writers, handles direct native
+paths, and returns diagnostics after authoritative cleanup.
+"""
 
 from __future__ import annotations
 
@@ -31,22 +35,22 @@ from .file_conversion.writers import (
 from .ingest import native_ingest_plan, normalize_options
 from .input.memory_limits import enforce_materialized_input_limit
 from .parquet.direct_routes import (
-    last_parquet_direct_route,
-    parquet_direct_registry_sink_raw_or_none,
-    parquet_direct_stream_factory_or_none,
+    parquet_direct_registry_sink,
+    parquet_direct_stream_factory,
 )
 from .parquet.errors import unsupported_direct_parquet_ingestion
 from .results import Result
 from .source_plan.attached import source_plan_from_data
 from .source_plan.registry import write_source_plan_registry_to_file
 from .stream_output import write_raw_stream_to_file
+from .streams import patch_input_route_diagnostics
 
 
 def write_registry_raw_stream_to_file(
     raw: Any,
     out_path: Any,
     *,
-    writer: Callable[..., None],
+    writer: Callable[..., Any],
     feature: str,
     first_row_columns: dict[str, Any] | None,
     all_row_columns: dict[str, Any] | None = None,
@@ -103,7 +107,7 @@ def _try_write_direct_parquet_registry_to_file(
     out_path: Any,
     *,
     source: _Source,
-    writer: Callable[..., None],
+    writer: Callable[..., Any],
     feature: str,
     call_options: Options | None,
     first_row_columns: dict[str, Any] | None,
@@ -123,7 +127,7 @@ def _try_write_direct_parquet_registry_to_file(
         if call_options is not None
         else "single"
     )
-    raw = parquet_direct_registry_sink_raw_or_none(
+    direct_outcome = parquet_direct_registry_sink(
         default_pool().get()._raw,
         data,
         source=source,
@@ -133,22 +137,28 @@ def _try_write_direct_parquet_registry_to_file(
         field_name_policy=field_name_policy,
         schema_mode=schema_mode,
     )
+    raw = direct_outcome.raw
+    parquet_route = direct_outcome.route
+    parquet_fallback_reason: str | None = None
     fallback_registry_json: str | None = None
     fallback_drifts_json: str | None = None
     if raw is None:
-        if last_parquet_direct_route() != "pyarrow_registry_unavailable":
+        if direct_outcome.route != "native_registry_arrow_stream_error":
             return None
-        raw = parquet_direct_stream_factory_or_none(
+        factory_outcome = parquet_direct_stream_factory(
             data,
             source=source,
             feature=feature,
             call_options=call_options,
         )
+        raw = factory_outcome.raw
         if raw is None:
             return None
+        parquet_route = "arrow_factory"
+        parquet_fallback_reason = direct_outcome.route
         fallback_registry_json = schema_registry_json
         fallback_drifts_json = "[]"
-    return write_registry_raw_stream_to_file(
+    result = write_registry_raw_stream_to_file(
         raw,
         out_path,
         writer=writer,
@@ -164,6 +174,13 @@ def _try_write_direct_parquet_registry_to_file(
         memory_limit_bytes=memory_limit_bytes,
         threading_mode=threading_mode,
     )
+    patch_input_route_diagnostics(
+        result._raw,
+        source_route="arrow",
+        parquet_route=parquet_route,
+        parquet_fallback_reason=parquet_fallback_reason,
+    )
+    return result
 
 
 def _write_registry_file(
@@ -173,7 +190,7 @@ def _write_registry_file(
     options: Options | dict[str, Any] | None,
     format: _Format,
     source: _Source,
-    writer: Callable[..., None],
+    writer: Callable[..., Any],
     feature: str,
     first_row_columns: dict[str, Any] | None,
     all_row_columns: dict[str, Any] | None,
@@ -260,6 +277,7 @@ def _write_registry_file(
             row_span_columns=row_span_columns or {},
             timestamp_columns=timestamp_columns,
         )
+        patch_input_route_diagnostics(raw, source_route=source)
         return write_registry_raw_stream_to_file(
             raw,
             out_path,
@@ -294,6 +312,7 @@ def _write_registry_file(
             timestamp_columns=timestamp_columns,
             error_context=reader_error_context(plan.format, plan.source, plan.data),
         )
+        patch_input_route_diagnostics(raw, source_route=plan.source)
         return write_registry_raw_stream_to_file(
             raw,
             out_path,

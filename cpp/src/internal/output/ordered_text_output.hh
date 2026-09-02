@@ -1,4 +1,7 @@
 // Provides bounded parallel preparation and ordered commit for text outputs.
+// The helpers bound parallel text encoding memory while committing prepared
+// fragments in source order.
+
 #pragma once
 
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
@@ -32,6 +35,7 @@ inline constexpr std::int64_t kDefaultOutputWorkerCeiling =
     std::numeric_limits<std::int64_t>::max();
 inline constexpr std::int64_t kCompactLanePromotionWaves = 16;
 
+/// Maps the serialized threading option to a validated execution-policy mode.
 [[nodiscard]] inline sanitize::Result<sanitize::ThreadingMode>
 threading_mode_from_int(std::int64_t value) {
   if (value == static_cast<std::int64_t>(sanitize::ThreadingMode::kSingle)) {
@@ -54,7 +58,11 @@ struct BatchPacket {
 
 class EncodedFragment final {
 public:
+  /// Creates an empty encoded fragment with no outstanding ownership or memory
+  /// reservation.
   EncodedFragment() = default;
+  /// Takes ownership of an encoded text fragment and its outstanding memory
+  /// reservation.
   EncodedFragment(std::shared_ptr<sanitize::CArrayGuard> batch_owner,
                   TextBuffer encoded, std::int64_t rows,
                   std::int64_t reserved_bytes,
@@ -63,8 +71,14 @@ public:
         bytes(std::move(encoded)), row_count(rows),
         reserved_output_bytes(reserved_bytes) {}
 
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   EncodedFragment(const EncodedFragment &) = delete;
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   EncodedFragment &operator=(const EncodedFragment &) = delete;
+  /// Transfers owned buffers and reservations while leaving the source safe to
+  /// destroy.
   EncodedFragment(EncodedFragment &&other) noexcept
       : owner(std::move(other.owner)),
         memory_owner(std::move(other.memory_owner)),
@@ -73,6 +87,8 @@ public:
     other.row_count = 0;
     other.reserved_output_bytes = 0;
   }
+  /// Transfers owned buffers and reservations while leaving the source safe to
+  /// destroy.
   EncodedFragment &operator=(EncodedFragment &&other) noexcept {
     if (this != &other) {
       this->~EncodedFragment();
@@ -80,8 +96,12 @@ public:
     }
     return *this;
   }
+  /// Securely wipes encoded bytes and releases the fragment's batch and memory
+  /// ownership.
   ~EncodedFragment() { wipe(); }
 
+  /// Securely clears fragment bytes when configured, then releases or reuses
+  /// bounded capacity.
   void wipe() noexcept {
     if (secure_memory_cleanup_enabled() && !bytes.empty()) {
       secure_zero_memory(bytes.data(), bytes.size());
@@ -99,6 +119,8 @@ public:
   std::int64_t reserved_output_bytes = 0;
 };
 
+/// Derives the bounded text-output worker policy from operation settings and
+/// Arrow batch shape.
 [[nodiscard]] inline ExecutionPolicy output_execution_policy(
     sanitize::ThreadingMode mode, std::int64_t memory_limit_bytes,
     std::int64_t worker_ceiling = kDefaultOutputWorkerCeiling,
@@ -134,6 +156,8 @@ public:
 }
 
 template <class EstimateRow>
+/// Refreshes row-size estimator state for the current Arrow batch before packet
+/// sizing.
 void prepare_row_estimator_for_batch(EstimateRow &estimate_row,
                                      const ArrowArray &array) noexcept {
   if constexpr (requires { estimate_row.prepare(array); }) {
@@ -142,6 +166,8 @@ void prepare_row_estimator_for_batch(EstimateRow &estimate_row,
 }
 
 template <class EstimateRow>
+/// Estimates capped output work for a row range before admitting parallel
+/// preparation.
 [[nodiscard]] std::int64_t
 estimate_output_work_items(const ArrowArray &array,
                            const ExecutionPolicy &policy,
@@ -172,6 +198,8 @@ estimate_output_work_items(const ArrowArray &array,
 
 template <class Stats, class Output, class ValidateBatch, class EstimateRow,
           class EncodePacket>
+/// Drains an Arrow stream through bounded parallel encoding and source-order
+/// output commit.
 sanitize::Result<Stats>
 write_stream(ArrowArrayStream *stream, Output &output,
              std::int64_t memory_limit_bytes, sanitize::ThreadingMode mode,

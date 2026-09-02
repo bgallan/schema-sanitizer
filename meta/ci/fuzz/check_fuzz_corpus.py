@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate the CI layout and byte integrity of native fuzz inputs."""
+"""Validate the CI layout and byte integrity of native fuzz inputs.
+
+It checks root and target layouts, content-addressed names, digest manifests, and
+deterministic archive contents before fuzzing.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +13,13 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
-TARGETS = ("json", "csv", "xml", "parquet")
+try:
+    from meta.ci.fuzz.corpus_io import ARCHIVE_SUFFIX, TARGETS, target_inputs
+except ModuleNotFoundError:
+    from corpus_io import ARCHIVE_SUFFIX, TARGETS, target_inputs
+
 ROLES = ("corpus", "regressions")
-SHA1_NAME = re.compile(r"[0-9a-f]{40}")
-HEX40_NAME = re.compile(r"[0-9A-Fa-f]{40}")
+LEGACY_LIBFUZZER_NAME = re.compile(r"[0-9a-f]{40}")
 EXPECTED_INPUT_COUNTS = {
     ("corpus", "json"): 7,
     ("corpus", "csv"): 4,
@@ -23,7 +30,7 @@ EXPECTED_INPUT_COUNTS = {
     ("regressions", "xml"): 84,
     ("regressions", "parquet"): 5,
 }
-EXPECTED_TREE_SHA256 = "7c6167755bf670e838b2ef95491a3c54df4fd07064520999e0c5e72efeae5f36"
+EXPECTED_TREE_SHA256 = "6f0edba72c6823df471cd0ab3392d5f095449938d1ace52f38b21cbc3eb40831"
 DESCRIPTIVE_REGRESSION_SHA256 = {
     "csv/unterminated.csv": "17a373d8a99cbc0238d1b1b87088915e04040adec99d3605d930099ee4f42df0",
     "json/truncated.json": "ee3bb016ee1b1e395152b5db18af8d7e785aa19a2ab541c9bd9d13dfa8a2a0f0",
@@ -41,13 +48,8 @@ class FuzzInventory(NamedTuple):
 
     corpus_inputs: int
     regression_inputs: int
-    content_addressed_inputs: int
+    legacy_libfuzzer_inputs: int
     unique_campaign_inputs: int
-
-
-def _sha1(data: bytes) -> str:
-    """Return the libFuzzer-compatible content identifier for one input."""
-    return hashlib.sha1(data, usedforsecurity=False).hexdigest()
 
 
 def _sha256(data: bytes) -> str:
@@ -68,6 +70,7 @@ def _tree_sha256(entries: list[tuple[str, int, bytes]]) -> str:
 
 
 def _validate_root_entries(fuzz_root: Path, errors: list[str]) -> None:
+    """Reject unexpected files or directories at the fuzz corpus root."""
     expected = {"README.md", *ROLES}
     actual = {path.name for path in fuzz_root.iterdir()}
     for name in sorted(expected - actual):
@@ -76,19 +79,28 @@ def _validate_root_entries(fuzz_root: Path, errors: list[str]) -> None:
         errors.append(f"unexpected fuzz root entry: {name}")
 
 
-def _validate_role_entries(fuzz_root: Path, role: str, errors: list[str]) -> Path:
+def _validate_role_entries(fuzz_root: Path, role: str, errors: list[str]) -> Path | None:
+    """Validate one role directory without traversing rejected symlinks."""
     role_root = fuzz_root / role
     if not role_root.is_dir() or role_root.is_symlink():
         errors.append(f"missing regular directory: {role}")
-        return role_root
+        return None
 
     expected = set(TARGETS)
+    allowed = set(expected)
     if role == "regressions":
         expected.add("README.md")
+        allowed.add("README.md")
+        archives = {f"{target}{ARCHIVE_SUFFIX}" for target in TARGETS}
+        present_archives = {path.name for path in role_root.iterdir()} & archives
+        if present_archives and present_archives != archives:
+            missing = sorted(archives - present_archives)
+            errors.append(f"regression archives must be all-or-none; missing: {missing}")
+        allowed.update(archives)
     actual = {path.name for path in role_root.iterdir()}
     for name in sorted(expected - actual):
         errors.append(f"missing {role} entry: {name}")
-    for name in sorted(actual - expected):
+    for name in sorted(actual - allowed):
         errors.append(f"unexpected {role} entry: {name}")
     return role_root
 
@@ -102,39 +114,45 @@ def check_fuzz_tree(fuzz_root: Path) -> FuzzInventory:
     _validate_root_entries(fuzz_root, errors)
     role_roots = {role: _validate_role_entries(fuzz_root, role, errors) for role in ROLES}
     counts = {role: 0 for role in ROLES}
-    content_addressed = 0
+    legacy_libfuzzer = 0
     campaign_inputs = {target: set() for target in TARGETS}
     tree_entries: list[tuple[str, int, bytes]] = []
 
     for role, role_root in role_roots.items():
+        if role_root is None:
+            continue
         for target in TARGETS:
             target_root = role_root / target
             if not target_root.is_dir() or target_root.is_symlink():
                 errors.append(f"missing regular directory: {role}/{target}")
                 continue
             target_count = 0
-            for path in sorted(target_root.iterdir()):
-                relative = path.relative_to(fuzz_root)
-                if path.is_symlink() or not path.is_file():
-                    errors.append(f"fuzz target directories must stay flat: {relative}")
-                    continue
-                if path.name.startswith("."):
-                    errors.append(f"hidden fuzz input is not allowed: {relative}")
-                    continue
-
-                data = path.read_bytes()
+            cases = target_inputs(role_root, target, errors=errors)
+            archive = role_root / f"{target}{ARCHIVE_SUFFIX}"
+            archive_present = not archive.is_symlink() and archive.is_file()
+            if archive_present:
+                loose_hashes = [
+                    case.name
+                    for case in cases
+                    if not case.archived and LEGACY_LIBFUZZER_NAME.fullmatch(case.name)
+                ]
+                if loose_hashes:
+                    errors.append(
+                        f"content-addressed regressions must be packed under {role}/{target}: "
+                        f"{loose_hashes[:5]}"
+                    )
+            for case in cases:
+                relative = Path(role, target, case.name)
+                data = case.data
                 counts[role] += 1
                 target_count += 1
                 content_digest = hashlib.sha256(data).digest()
                 campaign_inputs[target].add(content_digest)
                 tree_entries.append((relative.as_posix(), len(data), content_digest))
-                if HEX40_NAME.fullmatch(path.name) is not None:
-                    content_addressed += 1
-                    actual = _sha1(data)
-                    if SHA1_NAME.fullmatch(path.name) is None or actual != path.name:
-                        errors.append(f"content hash mismatch: {relative} (actual SHA-1: {actual})")
+                if LEGACY_LIBFUZZER_NAME.fullmatch(case.name) is not None:
+                    legacy_libfuzzer += 1
                 elif role == "regressions":
-                    manifest_name = f"{target}/{path.name}"
+                    manifest_name = f"{target}/{case.name}"
                     expected = DESCRIPTIVE_REGRESSION_SHA256.get(manifest_name)
                     actual = _sha256(data)
                     if expected is not None and actual != expected:
@@ -151,10 +169,14 @@ def check_fuzz_tree(fuzz_root: Path) -> FuzzInventory:
                     f"expected {expected_count}, found {target_count}"
                 )
 
-    for manifest_name in sorted(DESCRIPTIVE_REGRESSION_SHA256):
-        path = role_roots["regressions"] / manifest_name
-        if not path.is_file():
-            errors.append(f"missing descriptive regression fixture: regressions/{manifest_name}")
+    regression_root = role_roots["regressions"]
+    if regression_root is not None:
+        for manifest_name in sorted(DESCRIPTIVE_REGRESSION_SHA256):
+            path = regression_root / manifest_name
+            if path.is_symlink() or not path.is_file():
+                errors.append(
+                    f"missing descriptive regression fixture: regressions/{manifest_name}"
+                )
 
     tree_sha256 = _tree_sha256(tree_entries)
     if tree_sha256 != EXPECTED_TREE_SHA256:
@@ -167,7 +189,7 @@ def check_fuzz_tree(fuzz_root: Path) -> FuzzInventory:
     return FuzzInventory(
         corpus_inputs=counts["corpus"],
         regression_inputs=counts["regressions"],
-        content_addressed_inputs=content_addressed,
+        legacy_libfuzzer_inputs=legacy_libfuzzer,
         unique_campaign_inputs=sum(map(len, campaign_inputs.values())),
     )
 
@@ -190,7 +212,7 @@ def main() -> None:
         "Fuzz corpus integrity passed: "
         f"corpus={inventory.corpus_inputs}, "
         f"regressions={inventory.regression_inputs}, "
-        f"content_addressed={inventory.content_addressed_inputs}, "
+        f"legacy_libfuzzer={inventory.legacy_libfuzzer_inputs}, "
         f"unique_campaign_inputs={inventory.unique_campaign_inputs}."
     )
 

@@ -1,4 +1,6 @@
 // Parses ISO clock times into seconds since midnight.
+// The fixed-width path validates separators and civil clock ranges before
+// committing an Arrow-compatible scalar value.
 
 #include "sanitize/core/primitives.hh"
 

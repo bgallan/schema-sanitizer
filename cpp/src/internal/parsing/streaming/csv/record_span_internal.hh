@@ -1,4 +1,6 @@
 // Declares record-level CSV scanning across chunk boundaries.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #pragma once
 
@@ -16,14 +18,24 @@ public:
   sanitize::Result<TextSlice> scan();
 
 private:
+  /// Retains the current chunk fragment while enforcing record and segment
+  /// limits.
   sanitize::Status push_segment(std::size_t end_pos);
+  /// Saves the current fragment and refills the scanner for a continued record.
   sanitize::Status span_to_next_chunk();
+  /// Removes a trailing carriage return from a segmented record.
   void trim_trailing_cr();
+  /// Copies retained record fragments into one arena-owned text slice.
   sanitize::Result<TextSlice> materialize_segments();
+  /// Advances past an LF or CRLF boundary, including a split CRLF pair.
   void consume_newline(char current);
+  /// Completes a newline-terminated record as a view or arena-owned slice.
   sanitize::Result<TextSlice> finish_newline_record(char current);
+  /// Completes the final record or reports an unterminated quoted field.
   sanitize::Result<TextSlice> finish_eof_record();
+  /// Refills at a chunk boundary or completes the record when input ends.
   sanitize::Status handle_chunk_end(TextSlice *out, bool *finished);
+  /// Updates quoted-field state, including escaped and chunk-split quotes.
   sanitize::Status handle_quote();
 
   CsvStreamingScanner &scanner_;

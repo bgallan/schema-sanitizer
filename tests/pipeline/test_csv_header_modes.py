@@ -1,4 +1,8 @@
-"""Typed CSV header-mode API contracts."""
+"""Typed CSV header-mode API contracts.
+
+It validates typed exact and union modes across all converters, then checks identical
+rows, mismatch handling, and option propagation.
+"""
 
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ from schema_sanitizer.options_impl.options import (
     Options as InternalOptions,
 )
 from schema_sanitizer.options_impl.options import (
-    require_implemented_csv_header_mode,
+    normalize_csv_header_mode,
 )
 
 PUBLIC_CONVERTERS = (
@@ -73,7 +77,7 @@ def test_union_mode_reaches_the_normal_input_lifecycle(tmp_path: Path) -> None:
         )
 
 
-def _business_rows(path: Path) -> list[dict[str, object]]:
+def _stable_rows(path: Path) -> list[dict[str, object]]:
     """Return stable user/provenance fields from generated JSON Lines."""
     return [
         {
@@ -86,7 +90,7 @@ def _business_rows(path: Path) -> list[dict[str, object]]:
 
 
 def test_exact_default_and_explicit_mode_materialize_the_same_rows(tmp_path: Path) -> None:
-    """Spelling out exact mode leaves the historical successful path unchanged."""
+    """Spelling out exact mode materializes the same rows as the default."""
     folder = tmp_path / "input"
     folder.mkdir()
     (folder / "a.csv").write_text("id,name\n1,Ana\n", encoding="utf-8")
@@ -103,7 +107,7 @@ def test_exact_default_and_explicit_mode_materialize_the_same_rows(tmp_path: Pat
         csv_header_mode="exact",
     )
 
-    assert _business_rows(default_output) == _business_rows(exact_output)
+    assert _stable_rows(default_output) == _stable_rows(exact_output)
 
 
 def test_exact_default_and_explicit_mode_reject_the_same_mismatch(tmp_path: Path) -> None:
@@ -138,7 +142,7 @@ def test_native_catalog_validates_csv_header_mode() -> None:
         validate_options(InternalOptions(csv={"csv_header_mode": "merge"}).raw)
 
 
-def test_both_header_modes_are_implemented() -> None:
-    """The native reader accepts both public reconciliation policies."""
-    assert require_implemented_csv_header_mode("exact") == "exact"
-    assert require_implemented_csv_header_mode("union") == "union"
+def test_both_header_modes_normalize() -> None:
+    """Both public reconciliation policies normalize to canonical values."""
+    assert normalize_csv_header_mode("exact") == "exact"
+    assert normalize_csv_header_mode("union") == "union"

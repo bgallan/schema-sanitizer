@@ -1,4 +1,6 @@
 // Provides the internal strict, budget-aware CSV cell parser.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #pragma once
 
@@ -19,6 +21,8 @@ inline constexpr std::size_t kMaxCsvFieldBytes =
 inline constexpr std::size_t kMaxCsvDecodedRecordBytes =
     static_cast<std::size_t>(256) * 1024U * 1024U;
 
+/// Validates a CSV cell as complete UTF-8 before scalar conversion or string
+/// retention.
 inline sanitize::Status validate_csv_utf8(std::string_view text,
                                           std::size_t base_offset = 0) {
   std::size_t position = 0;
@@ -76,7 +80,7 @@ inline sanitize::Status validate_csv_utf8(std::string_view text,
   return sanitize::Status::OK();
 }
 
-// Trims spaces and tabs from an unquoted CSV cell.
+/// Trims spaces and tabs from an unquoted CSV cell.
 inline std::string_view trim_csv_cell(std::string_view cell) {
   while (!cell.empty() && (cell.front() == ' ' || cell.front() == '\t')) {
     cell.remove_prefix(1);
@@ -92,7 +96,7 @@ struct QuotedCsvCellScan {
   std::size_t end_position = 0;
 };
 
-// Returns the decoded size and the first byte after a required closing quote.
+/// Returns the decoded size and the first byte after a required closing quote.
 inline sanitize::Result<QuotedCsvCellScan> scan_quoted_csv_cell(
     std::string_view row, std::size_t start, std::size_t base_offset = 0,
     std::size_t max_field_bytes = kMaxCsvFieldBytes, char escape_char = '\0') {
@@ -174,7 +178,7 @@ inline sanitize::Result<QuotedCsvCellScan> scan_quoted_csv_cell(
       ": unterminated quoted field at end of record");
 }
 
-// Parses and unescapes one quoted CSV cell directly into arena storage.
+/// Parses and unescapes one quoted CSV cell directly into arena storage.
 inline sanitize::Result<std::string_view>
 parse_quoted_csv_cell(std::string_view row, std::size_t *position,
                       BumpArena *arena, std::size_t base_offset = 0,
@@ -229,7 +233,7 @@ parse_quoted_csv_cell(std::string_view row, std::size_t *position,
   return std::string_view(destination, written);
 }
 
-// Validates bytes after a closing quote and advances over one delimiter.
+/// Validates bytes after a closing quote and advances over one delimiter.
 inline sanitize::Status
 advance_after_quoted_csv_cell(std::string_view row, std::size_t *position,
                               char delimiter, std::size_t base_offset = 0) {
@@ -250,6 +254,8 @@ advance_after_quoted_csv_cell(std::string_view row, std::size_t *position,
 }
 
 template <typename CellVector>
+/// Appends one parsed cell to the record, quoting delimiters and embedded
+/// quotes as required.
 inline sanitize::Status append_csv_cell(CellVector *out,
                                         std::string_view value) {
   if (out->size() >= kMaxCsvCellsPerRecord) {
@@ -261,8 +267,8 @@ inline sanitize::Status append_csv_cell(CellVector *out,
   return sanitize::Status::OK();
 }
 
-// Parses one strict CSV record. Quoted fields must close, doubled quotes are
-// decoded, and an optional explicit escape dialect can decode escaped bytes.
+/// Parses one strict CSV record with decoded quoting and optional escaped
+/// bytes.
 template <typename CellVector>
 inline sanitize::Status parse_csv_cells(
     std::string_view row, char delimiter, CellVector *out, BumpArena *arena,

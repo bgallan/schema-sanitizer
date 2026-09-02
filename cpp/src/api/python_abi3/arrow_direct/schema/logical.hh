@@ -1,4 +1,6 @@
-// Declares Arrow C schema parsing for direct ingestion.
+// Declares Arrow C schema parsing for direct ingestion. These routines keep
+// Arrow schema interpretation and buffer ownership explicit at the ABI
+// boundary.
 
 #pragma once
 
@@ -13,7 +15,8 @@
 
 namespace core_abi3_internal {
 
-// Parses an Arrow C stream schema into the logical schema and direct node plan.
+/// Parses an Arrow C stream schema into the logical schema and direct node
+/// plan.
 sanitize::Result<sanitize::LogicalSchema>
 logical_schema_from_arrow_schema(const ArrowSchema *schema,
                                  std::vector<ArrowInputNode> *fields,

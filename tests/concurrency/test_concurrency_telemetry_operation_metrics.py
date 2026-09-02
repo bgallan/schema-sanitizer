@@ -1,19 +1,46 @@
-"""Regression coverage for concurrency telemetry operation metrics."""
+"""Validate lifecycle and contents of native per-operation telemetry reports.
+
+A fresh context starts empty, completed and prepare-failed operations publish bounded phase, task,
+and memory metrics, and each subsequent operation replaces the report with a higher identifier.
+"""
 
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
-from conftest import require_native
+import pytest
 
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
 from schema_sanitizer.api_impl.file_conversion.writers import write_jsonl_native_first_stream
 from schema_sanitizer.api_impl.stream_output import write_raw_stream_to_file
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
+pytestmark = pytest.mark.usefixtures("require_native")
+
 _MEMORY_LIMIT = 128 * 1024 * 1024
 _COLUMNS = tuple(f"column_{index:03d}" for index in range(128))
+
+
+@contextmanager
+def _two_cpu_affinity_when_supported() -> Iterator[None]:
+    """Exercise the private-runner topology without changing other tests."""
+    if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
+        yield
+        return
+    original = os.sched_getaffinity(0)
+    if len(original) <= 2:
+        yield
+        return
+    selected = set(sorted(original)[:2])
+    os.sched_setaffinity(0, selected)
+    try:
+        yield
+    finally:
+        os.sched_setaffinity(0, original)
 
 
 def _write_wide_jsonl(path: Path, rows: int) -> None:
@@ -52,7 +79,6 @@ def _run_native_jsonl(context: ExecutionContext, source: Path, output: Path) -> 
 
 def test_fresh_context_has_no_operation_telemetry() -> None:
     """No synthetic report is exposed before the first operation."""
-    require_native()
     assert ExecutionContext().performance_stats() == {}
 
 
@@ -60,12 +86,12 @@ def test_completed_operation_reports_phases_tasks_and_bounded_memory(
     tmp_path: Path,
 ) -> None:
     """The public report covers phases, workers, queues, and operation memory."""
-    require_native()
     source = tmp_path / "wide.jsonl"
     output = tmp_path / "wide-output.jsonl"
     _write_wide_jsonl(source, 2_000)
 
-    report = _run_native_jsonl(ExecutionContext(), source, output)
+    with _two_cpu_affinity_when_supported():
+        report = _run_native_jsonl(ExecutionContext(), source, output)
 
     assert report["schema_version"] == 1
     assert report["operation_id"] == 1
@@ -110,7 +136,6 @@ def test_completed_operation_reports_phases_tasks_and_bounded_memory(
 
 def test_prepare_failure_finishes_the_latest_report(tmp_path: Path) -> None:
     """An operation rejected during preparation does not remain in progress."""
-    require_native()
     source = tmp_path / "invalid-json.jsonl"
     source.write_text('{"value":\n', encoding="utf-8")
     context = ExecutionContext()
@@ -141,7 +166,6 @@ def test_prepare_failure_finishes_the_latest_report(tmp_path: Path) -> None:
 
 def test_context_replaces_report_and_increments_operation_id(tmp_path: Path) -> None:
     """A reused context exposes only its latest operation with a stable sequence id."""
-    require_native()
     context = ExecutionContext()
     source = tmp_path / "input.jsonl"
     _write_wide_jsonl(source, 64)

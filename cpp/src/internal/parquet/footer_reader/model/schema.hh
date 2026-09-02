@@ -1,4 +1,6 @@
-// Parquet schema metadata used by the bounded footer reader.
+// Declares Parquet schema metadata used by the bounded footer reader. These
+// definitions support the internal pipeline without expanding its public
+// interface.
 
 #pragma once
 

@@ -1,4 +1,6 @@
-// Exposes catalog-backed option metadata from the C++ source of truth.
+// Exposes catalog-backed option metadata from the C++ source of truth. The
+// boundary converts Python inputs into validated native policy and
+// memory-budget state.
 
 #include "internal/abi/python_abi3/methods.hh"
 
@@ -22,6 +24,7 @@ namespace {
 using LogicalSchemaOption = std::optional<sanitize::LogicalSchema>;
 using StringListOption = std::vector<std::string>;
 
+/// Classifies an option descriptor into its Python catalog value category.
 template <class T> constexpr std::string_view option_kind() {
   if constexpr (std::same_as<T, bool>) {
     return "bool";
@@ -48,11 +51,13 @@ template <class T> constexpr std::string_view option_kind() {
   }
 }
 
+/// Creates a Python Unicode value from a borrowed UTF-8 view.
 PyObject *unicode_from_view(std::string_view value) {
   return PyUnicode_FromStringAndSize(value.data(),
                                      static_cast<Py_ssize_t>(value.size()));
 }
 
+/// Converts an option descriptor default into the matching Python object.
 template <class T> PyObject *default_value(const T &value) {
   if constexpr (std::same_as<T, bool>) {
     return PyBool_FromLong(value ? 1 : 0);
@@ -84,6 +89,7 @@ template <class T> PyObject *default_value(const T &value) {
   }
 }
 
+/// Appends one `(name, kind, default, group)` descriptor to the Python catalog.
 template <class T>
 bool append_descriptor(PyObject *catalog, Py_ssize_t index,
                        std::string_view name, std::string_view group,
@@ -113,6 +119,7 @@ constexpr Py_ssize_t kOptionCount = 0
 
 } // namespace
 
+/// Returns the native memory-budget fields derived from a requested byte limit.
 PyObject *py_memory_budget(PyObject *, PyObject *args) {
   long long requested = -1;
   if (!PyArg_ParseTuple(args, "L", &requested)) {
@@ -152,6 +159,7 @@ PyObject *py_memory_budget(PyObject *, PyObject *args) {
   return out;
 }
 
+/// Returns process memory-governor capacity, leased bytes, and waiter count.
 PyObject *py_process_memory_governor_stats(PyObject *, PyObject *) {
   const auto stats = sanitize::internal::process_memory_governor_stats();
   PyObject *out = PyTuple_New(3);
@@ -167,6 +175,7 @@ PyObject *py_process_memory_governor_stats(PyObject *, PyObject *) {
   return out;
 }
 
+/// Returns process resident-memory capacity, reservation, and peak usage.
 PyObject *py_process_resident_memory_stats(PyObject *, PyObject *) {
   const auto stats = sanitize::internal::process_resident_memory_stats();
   PyObject *out = PyTuple_New(3);
@@ -183,6 +192,7 @@ PyObject *py_process_resident_memory_stats(PyObject *, PyObject *) {
   return out;
 }
 
+/// Returns allocation-registry capacity, occupancy, and collision diagnostics.
 PyObject *py_allocation_registry_stats(PyObject *, PyObject *) {
   const auto stats = sanitize::internal::allocation_registry_stats();
   PyObject *out = PyTuple_New(8);
@@ -208,6 +218,8 @@ PyObject *py_allocation_registry_stats(PyObject *, PyObject *) {
   return out;
 }
 
+/// Resolves threading and memory inputs into the effective native execution
+/// policy.
 PyObject *py_execution_policy(PyObject *, PyObject *args) {
   int mode_value = 0;
   long long requested = -1;
@@ -256,6 +268,8 @@ PyObject *py_execution_policy(PyObject *, PyObject *args) {
   return out;
 }
 
+/// Returns every native option descriptor together with its group and default
+/// value.
 PyObject *py_options_catalog(PyObject *, PyObject *) {
   sanitize::Options defaults;
   PyObject *catalog = PyTuple_New(kOptionCount);

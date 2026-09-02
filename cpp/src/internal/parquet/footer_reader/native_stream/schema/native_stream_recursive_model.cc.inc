@@ -1,5 +1,6 @@
-// Recursive materialization model and non-recursive tree traversal helpers.
-// Included by footer_reader.cc inside its implementation namespace.
+// Defines the recursive materialization model and non-recursive tree traversal
+// helpers. This fragment is included by footer_reader.cc inside its
+// implementation namespace.
 
 enum class NativeRecursiveMaterializationNodeKind {
   Leaf,
@@ -68,6 +69,8 @@ struct NativeRecursivePathPlan {
       "native Parquet reader: recursive path was not planned");
 };
 
+/// Returns the contiguous leaf-column span covered by one planned recursive
+/// node.
 sanitize::Result<std::span<const std::size_t>>
 native_recursive_materialization_leaf_columns_from_node(
     const NativeRecursiveMaterializationTree &tree, std::size_t node_index) {
@@ -89,6 +92,7 @@ native_recursive_materialization_leaf_columns_from_node(
       node.subtree_leaf_offset, node.subtree_leaf_count);
 }
 
+/// Returns the leaf-column span covered by the recursive tree root.
 sanitize::Result<std::span<const std::size_t>>
 native_recursive_materialization_leaf_columns(
     const NativeRecursiveMaterializationTree &tree) {
@@ -96,6 +100,8 @@ native_recursive_materialization_leaf_columns(
                                                                  tree.root);
 }
 
+/// Plans native recursive materialization tree iteratively while enforcing
+/// supported nesting and bounded resources.
 sanitize::Result<std::vector<NativeRecursiveMaterializationResourceCounts>>
 plan_native_recursive_materialization_tree(
     NativeRecursiveMaterializationTree *tree) {

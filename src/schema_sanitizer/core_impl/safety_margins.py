@@ -1,4 +1,8 @@
-"""Bounded, opt-in tuning of safety margins from local resource telemetry."""
+"""Tune safety margins from bounded local resource telemetry when explicitly enabled.
+
+Samples are persisted under file locking and reduced to conservative percentile-based memory and
+free-space margins without affecting callers that leave telemetry tuning disabled.
+"""
 
 from __future__ import annotations
 
@@ -19,7 +23,7 @@ from .coordination_journal import (
     open_coordination_file,
     recover_locked_payload,
 )
-from .process_identity import process_identity_matches, process_start_token
+from .process_identity import process_is_alive, process_start_token
 
 try:  # pragma: no cover - POSIX CI path
     import fcntl
@@ -44,7 +48,7 @@ def telemetry_tuning_enabled() -> bool:
 
 
 def _path() -> Path:
-    """Implement the internal _path helper."""
+    """Return the process-local resource telemetry profile path."""
     base = Path(os.getenv(_ENV_DIRECTORY, tempfile.gettempdir()))
     base.mkdir(parents=True, exist_ok=True)
     return base / "schema-sanitizer-resource-telemetry.json"
@@ -61,25 +65,6 @@ def _should_fsync() -> bool:
         _WRITES_SINCE_FSYNC = 0
         _LAST_FSYNC = now
         return True
-
-
-def _process_start_token(pid: int) -> str:
-    """Return the shared PID-reuse-safe process start token."""
-    return process_start_token(pid)
-
-
-def _process_alive(pid: int, start_token: str) -> bool:
-    """Return whether a journal owner still represents the same process."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    current = _process_start_token(pid)
-    return process_identity_matches(start_token, current)
 
 
 def _decode_profile(raw: bytes) -> dict[str, object]:
@@ -122,9 +107,7 @@ def _locked_profile(
                 path,
                 handle,
                 max_payload_bytes=_MAX_FILE_BYTES,
-                validate=_decode_profile,
-                canonicalize=_encode_profile,
-                process_alive=_process_alive,
+                process_alive=process_is_alive,
             )
             profile = _decode_profile(raw)
             baseline = _encode_profile(profile)
@@ -149,7 +132,7 @@ def _locked_profile(
                             before=raw,
                             after=payload,
                             max_payload_bytes=_MAX_FILE_BYTES,
-                            process_start=_process_start_token(os.getpid()),
+                            process_start=process_start_token(os.getpid()),
                         )
 
 
@@ -189,7 +172,7 @@ def record_resource_telemetry(
 
 
 def _percentile(values: list[int], quantile: float) -> int | None:
-    """Implement the internal _percentile helper."""
+    """Return the bounded nearest-rank percentile for retained samples."""
     if not values:
         return None
     ordered = sorted(max(0, int(value)) for value in values)
@@ -198,7 +181,7 @@ def _percentile(values: list[int], quantile: float) -> int | None:
 
 
 def _samples() -> list[dict[str, object]]:
-    """Implement the internal _samples helper."""
+    """Load valid resource telemetry samples when tuning is enabled."""
     if not telemetry_tuning_enabled() or not _path().exists():
         return []
     try:
@@ -210,7 +193,7 @@ def _samples() -> list[dict[str, object]]:
 
 
 def tuned_memory_reserve_bytes(capacity_bytes: int, fallback_bytes: int) -> int:
-    """Implement the internal tuned_memory_reserve_bytes helper."""
+    """Derive a bounded memory reserve from observed untracked RSS."""
     capacity = max(0, int(capacity_bytes))
     fallback = max(0, int(fallback_bytes))
     values = [
@@ -224,7 +207,7 @@ def tuned_memory_reserve_bytes(capacity_bytes: int, fallback_bytes: int) -> int:
 
 
 def tuned_temporary_free_bytes(fallback_bytes: int) -> int:
-    """Implement the internal tuned_temporary_free_bytes helper."""
+    """Derive a bounded free-space floor from observed telemetry."""
     fallback = max(0, int(fallback_bytes))
     values = [
         value
@@ -236,7 +219,7 @@ def tuned_temporary_free_bytes(fallback_bytes: int) -> int:
 
 
 def _reset_after_fork() -> None:
-    """Implement the internal _reset_after_fork helper."""
+    """Reset telemetry synchronization state in a forked child."""
     global _SYNC_LOCK, _LAST_FSYNC, _WRITES_SINCE_FSYNC
     _SYNC_LOCK = Lock()
     _LAST_FSYNC = 0.0

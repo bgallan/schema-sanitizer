@@ -1,4 +1,8 @@
-"""Embedded BigQuery schema-registry queries and namespace workflows."""
+"""Embedded BigQuery schema-registry queries and namespace workflows.
+
+It builds embedded registry queries, applies partition filters and deterministic
+ordering, and exposes namespace-driven lookup workflows.
+"""
 
 from __future__ import annotations
 

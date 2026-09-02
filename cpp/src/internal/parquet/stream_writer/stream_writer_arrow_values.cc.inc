@@ -1,4 +1,8 @@
-// Appends one little-endian 32-bit integer.
+// Reads Arrow values, validity, offsets, and dictionary indexes for native
+// Parquet encoding. This fragment is included by the consolidated writer to
+// isolate format-specific implementation details.
+
+/// Appends a 32-bit unsigned integer in little-endian byte order.
 void append_u32_le(std::string &out, std::uint32_t value) {
   static_assert(std::endian::native == std::endian::little ||
                 std::endian::native == std::endian::big);
@@ -8,12 +12,12 @@ void append_u32_le(std::string &out, std::uint32_t value) {
   out.append(reinterpret_cast<const char *>(&value), sizeof(value));
 }
 
-// Appends raw bytes to a string buffer.
+/// Appends raw bytes to a string buffer.
 void append_bytes(std::string &out, const void *data, std::size_t size) {
   out.append(static_cast<const char *>(data), size);
 }
 
-// Returns whether an Arrow value is valid at a logical row index.
+/// Returns whether an Arrow value is valid at a logical row index.
 bool bitmap_is_valid(const ArrowArray &array, std::int64_t logical_index) {
   if (array.n_buffers <= 0 || !array.buffers || !array.buffers[0]) {
     return true;
@@ -23,7 +27,7 @@ bool bitmap_is_valid(const ArrowArray &array, std::int64_t logical_index) {
   return (bits[index >> 3] & (std::uint8_t{1} << (index & 7))) != 0;
 }
 
-// Reads one boolean value from an Arrow bitmap array.
+/// Reads one boolean value from an Arrow bitmap array.
 bool bool_value(const ArrowArray &array, std::int64_t logical_index) {
   if (array.n_buffers <= 1 || !array.buffers || !array.buffers[1]) {
     return false;
@@ -33,7 +37,7 @@ bool bool_value(const ArrowArray &array, std::int64_t logical_index) {
   return (bits[index >> 3] & (std::uint8_t{1} << (index & 7))) != 0;
 }
 
-// Returns a typed pointer to a fixed-width Arrow value buffer.
+/// Returns a typed pointer to a fixed-width Arrow value buffer.
 template <class T> const T *data_buffer(const ArrowArray &array) {
   if (array.n_buffers <= 1 || !array.buffers || !array.buffers[1]) {
     return nullptr;
@@ -41,7 +45,7 @@ template <class T> const T *data_buffer(const ArrowArray &array) {
   return static_cast<const T *>(array.buffers[1]);
 }
 
-// Reads one supported Arrow dictionary index.
+/// Reads one supported Arrow dictionary index.
 template <class T>
 std::optional<std::int64_t> dictionary_index_value(const ArrowArray &array,
                                                    std::int64_t row) {
@@ -52,6 +56,8 @@ std::optional<std::int64_t> dictionary_index_value(const ArrowArray &array,
   return static_cast<std::int64_t>(values[array.offset + row]);
 }
 
+/// Reads one signed or unsigned dictionary index using the field's declared
+/// physical width.
 std::optional<std::int64_t> dictionary_index_at(const ArrowArray &array,
                                                 jsonl::JsonlKind index_kind,
                                                 std::int64_t row) {
@@ -77,7 +83,7 @@ std::optional<std::int64_t> dictionary_index_at(const ArrowArray &array,
 
 // Encodes supported Arrow primitive and dictionary values.
 
-// Appends non-null fixed-width values from one Arrow array.
+/// Appends non-null fixed-width values from one Arrow array.
 template <class T>
 sanitize::Status append_fixed_value(std::string &out, const ArrowArray &array,
                                     std::int64_t row) {
@@ -91,7 +97,7 @@ sanitize::Status append_fixed_value(std::string &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
-// Appends an Arrow integer using the physical Parquet storage width.
+/// Appends an Arrow integer using the physical Parquet storage width.
 template <class Source, class Physical>
 sanitize::Status append_integer_value(std::string &out, const ArrowArray &array,
                                       std::int64_t row) {
@@ -105,7 +111,7 @@ sanitize::Status append_integer_value(std::string &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
-// Appends an Arrow time32[s] value as Parquet TIME(MILLIS).
+/// Appends an Arrow time32[s] value as Parquet TIME(MILLIS).
 sanitize::Status append_time32s_as_millis(std::string &out,
                                           const ArrowArray &array,
                                           std::int64_t row) {
@@ -125,13 +131,13 @@ sanitize::Status append_time32s_as_millis(std::string &out,
   return sanitize::Status::OK();
 }
 
-// Appends one non-null boolean value to a staging byte vector.
+/// Appends one non-null boolean value to a staging byte vector.
 void append_bool_value(std::vector<bool> *values, const ArrowArray &array,
                        std::int64_t row) {
   values->push_back(bool_value(array, row));
 }
 
-// Appends one non-null binary or string value as a Parquet byte array.
+/// Appends one non-null binary or string value as a Parquet byte array.
 template <class Offset>
 sanitize::Status append_binary_value(std::string &out, const ArrowArray &array,
                                      std::int64_t row) {
@@ -161,7 +167,7 @@ sanitize::Status append_binary_value(std::string &out, const ArrowArray &array,
   return sanitize::Status::OK();
 }
 
-// Appends one Arrow decimal128/decimal256 value as Parquet fixed bytes.
+/// Appends one Arrow decimal128/decimal256 value as Parquet fixed bytes.
 sanitize::Status append_decimal_value(std::string &out, const ParquetNode &node,
                                       const ArrowArray &array,
                                       std::int64_t row) {
@@ -179,7 +185,7 @@ sanitize::Status append_decimal_value(std::string &out, const ParquetNode &node,
   return sanitize::Status::OK();
 }
 
-// Appends one Arrow fixed-size binary value as Parquet fixed bytes.
+/// Appends one Arrow fixed-size binary value as Parquet fixed bytes.
 sanitize::Status append_fixed_size_binary_value(std::string &out,
                                                 const ParquetNode &node,
                                                 const ArrowArray &array,
@@ -197,7 +203,7 @@ sanitize::Status append_fixed_size_binary_value(std::string &out,
   return sanitize::Status::OK();
 }
 
-// Appends one non-null primitive value.
+/// Appends one non-null primitive value.
 sanitize::Status append_plain_primitive_value(
     std::string &out, std::vector<bool> *bool_values, const ParquetNode &node,
     jsonl::JsonlKind value_kind, const ArrowArray &array, std::int64_t row) {
@@ -253,7 +259,7 @@ sanitize::Status append_plain_primitive_value(
   }
 }
 
-// Appends one non-null dictionary value as its plain value representation.
+/// Appends one non-null dictionary value as its plain value representation.
 sanitize::Status append_dictionary_value(std::string &out,
                                          std::vector<bool> *bool_values,
                                          const ParquetNode &node,
@@ -273,8 +279,7 @@ sanitize::Status append_dictionary_value(std::string &out,
                                       *array.dictionary, *index);
 }
 
-// Returns whether a non-null dictionary index points at a null dictionary
-// value.
+/// Reports whether a valid dictionary index references a null dictionary value.
 sanitize::Result<bool> dictionary_value_is_null(const ParquetNode &node,
                                                 const ArrowArray &array,
                                                 std::int64_t row) {
@@ -298,7 +303,7 @@ sanitize::Result<bool> dictionary_value_is_null(const ParquetNode &node,
   return is_null;
 }
 
-// Appends one non-null primitive value.
+/// Appends one non-null primitive value.
 sanitize::Status append_primitive_value(std::string &out,
                                         std::vector<bool> *bool_values,
                                         const ParquetNode &node,

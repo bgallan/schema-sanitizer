@@ -1,4 +1,8 @@
-"""Shared invariants and load bounds for the native completion probe."""
+"""Define shared invariants and load bounds for the native ordered-completion probe.
+
+The helpers calculate ring generations, reproduce deterministic checksums, and assert exact
+inline-versus-arena results.
+"""
 
 from __future__ import annotations
 

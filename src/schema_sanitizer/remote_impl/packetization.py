@@ -1,4 +1,8 @@
-"""Deterministic file-and-byte packetization for remote staging."""
+"""Deterministic file-and-byte packetization for remote staging.
+
+It groups files by count and known bytes, isolates oversized objects, and keeps
+unknown-size inputs within the hard file cap.
+"""
 
 from __future__ import annotations
 

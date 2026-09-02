@@ -1,4 +1,6 @@
 // Defines memory-accounted row packets for parallel materialization.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 
@@ -32,8 +34,14 @@ struct OwnedRowBatch {
 // Owns row views from exactly one frontend batch. The owner keeps both the
 // canonical RowRef storage and all referenced frontend bytes alive.
 struct OwnedRowPacket {
+  /// Creates an empty owned row packet with no outstanding ownership or memory
+  /// reservation.
   OwnedRowPacket() = default;
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   OwnedRowPacket(const OwnedRowPacket &) = delete;
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   OwnedRowPacket &operator=(const OwnedRowPacket &) = delete;
   OwnedRowPacket(OwnedRowPacket &&other) noexcept;
   OwnedRowPacket &operator=(OwnedRowPacket &&other) noexcept;
@@ -52,32 +60,30 @@ struct OwnedRowPacket {
   std::size_t json_skipped_rows = 0;
 };
 
-// Derives an adaptive row cap from the immutable operation policy and the
-// coordinator's observed materialized bytes per row.
+/// Derives adaptive packet row and byte caps from policy and observed row cost.
 [[nodiscard]] MaterializationPacketLimits
 materialization_packet_limits(const ExecutionPolicy &policy,
                               std::int64_t observed_bytes_per_row) noexcept;
 
-// Narrows the host-wide policy for one compiled materialization plan. Cheap
-// scalar plans use fewer workers to avoid synchronization dominating useful
-// work; wide or nested plans can consume the full safe host policy.
+/// Narrows host execution policy according to materialization cost and input
+/// size.
 [[nodiscard]] ExecutionPolicy materialization_execution_policy(
     const CompiledPlan &plan, const ExecutionPolicy &policy,
     std::int64_t expected_rows, std::int64_t input_size_hint_bytes) noexcept;
 
-// Retargets wide JSONL row packets to expose up to two bounded packets per
-// effective worker while retaining all host and memory ceilings.
+/// Retargets JSON Lines row parallelism while preserving host and memory
+/// ceilings.
 [[nodiscard]] ExecutionPolicy jsonl_row_parallel_execution_policy(
     const ExecutionPolicy &policy, std::int64_t expected_rows,
     std::int64_t input_size_hint_bytes) noexcept;
 
-// Moves one frontend batch into a single shared owner without copying rows.
+/// Moves one frontend batch into a single shared owner without copying rows.
 sanitize::Result<std::shared_ptr<OwnedRowBatch>> make_owned_row_batch(
     std::vector<RowRef> rows, std::shared_ptr<const void> source_owner,
     std::shared_ptr<sanitize::RowBatchReleaser> releaser = nullptr);
 
-// Builds the next contiguous packet from one canonical frontend batch. Every
-// packet contains at least one row; an individual oversized row is isolated.
+/// Builds the next non-empty contiguous packet, isolating an individually
+/// oversized row.
 sanitize::Result<OwnedRowPacket>
 build_owned_row_packet(const std::shared_ptr<OwnedRowBatch> &batch_owner,
                        std::size_t start, MaterializationPacketLimits limits);

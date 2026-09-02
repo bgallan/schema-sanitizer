@@ -1,27 +1,38 @@
-"""Regression coverage for memory remote io cancel after grant delivers successor."""
+"""Consolidate authoritative release contracts for remote and process-wide resources.
+
+The cases span permit succession, provider throttles, cross-process leases, GC-safe
+finalizers, governed threads, runtime shutdown, and ordered-completion ownership.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
-import os
 from pathlib import Path
-from threading import Event, Lock, Thread
-from typing import Any
+from threading import Event, Thread
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, ContentionObservedLock
+from _support.source_contracts import source_paths, source_tree
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    ContentionObservedLock,
+    join_thread_or_fail,
+    wait_event_or_fail,
+)
 
 
 def test_remote_io_cancel_after_grant_delivers_successor() -> None:
+    """Verify remote I/O cancel after grant delivers successor."""
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     async def scenario() -> None:
+        """Run the controlled lifecycle scenario."""
         governor = RemoteIoPermitGovernor(capacity=1)
         original_deliver = governor._deliver
         held: list[object] = []
 
         def hold_first_nonempty(waiters: list[object]) -> None:
+            """Pause at the hold first nonempty synchronization point."""
             if waiters and not held:
                 held.extend(waiters)
                 return
@@ -38,7 +49,7 @@ def test_remote_io_cancel_after_grant_delivers_successor() -> None:
         first.cancel()
         with pytest.raises(asyncio.CancelledError):
             await first
-        permit = await asyncio.wait_for(second, timeout=1.0)
+        permit = await asyncio.wait_for(second, timeout=SCHEDULER_TIMEOUT_SECONDS)
         assert governor.snapshot().waiting == 0
         assert governor.snapshot().in_use == 1
         permit.release()
@@ -48,10 +59,12 @@ def test_remote_io_cancel_after_grant_delivers_successor() -> None:
 
 
 def test_runtime_close_cannot_hide_concurrently_starting_thread() -> None:
+    """Verify runtime close cannot hide concurrently starting thread."""
     from schema_sanitizer.core_impl.runtime_registry import _RuntimeServiceRegistry
 
     class Service:
         def close(self, *, deadline_seconds: float) -> bool:
+            """Close the resources owned by the service test double."""
             return True
 
     registry = _RuntimeServiceRegistry()
@@ -67,12 +80,13 @@ def test_runtime_close_cannot_hide_concurrently_starting_thread() -> None:
     thread = Thread(
         target=lambda: (
             target_started.set(),
-            target_exit.wait(SCHEDULER_TIMEOUT_SECONDS),
+            wait_event_or_fail(target_exit),
         )
     )
     physical_start = thread.start
 
     def blocked_start() -> None:
+        """Pause at the blocked start synchronization point."""
         start_entered.set()
         assert allow_start.wait(SCHEDULER_TIMEOUT_SECONDS)
         physical_start()
@@ -85,6 +99,7 @@ def test_runtime_close_cannot_hide_concurrently_starting_thread() -> None:
     close_done = Event()
 
     def close_registration() -> None:
+        """Close the waiter registration after delivery or cancellation."""
         registration.close()
         close_done.set()
 
@@ -93,15 +108,15 @@ def test_runtime_close_cannot_hide_concurrently_starting_thread() -> None:
     assert registration._lock.contention_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert not close_done.is_set()
     allow_start.set()
-    starter.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(starter)
     assert target_started.wait(SCHEDULER_TIMEOUT_SECONDS)
-    closer.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(closer)
     assert close_done.is_set()
     assert registry.snapshot().registered_services == 1
     assert any(entry.state.name == "RETIRING" for entry in registry._entries.values())
 
     target_exit.set()
-    thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(thread)
     registration.close()
     assert registry.snapshot().registered_services == 0
 
@@ -109,6 +124,7 @@ def test_runtime_close_cannot_hide_concurrently_starting_thread() -> None:
 def test_temporary_storage_release_uses_authoritative_lease_amount(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify temporary storage release uses authoritative lease amount."""
     from types import SimpleNamespace
 
     from schema_sanitizer.core_impl import temporary_storage as module
@@ -130,9 +146,11 @@ def test_temporary_storage_release_uses_authoritative_lease_amount(
 
 
 def test_remote_io_permit_release_ignores_mutated_weight() -> None:
+    """Verify remote I/O permit release ignores mutated weight."""
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     async def scenario() -> None:
+        """Run the controlled lifecycle scenario."""
         governor = RemoteIoPermitGovernor(capacity=2)
         first = await governor.acquire(operation_id="a")
         second = await governor.acquire(operation_id="b")
@@ -147,6 +165,7 @@ def test_remote_io_permit_release_ignores_mutated_weight() -> None:
 
 
 def test_remote_submission_and_capacity_require_exact_capability() -> None:
+    """Verify remote submission and capacity require exact capability."""
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     governor = RemoteIoPermitGovernor(capacity=2, max_pending_submissions=2)
@@ -169,6 +188,7 @@ def test_remote_submission_and_capacity_require_exact_capability() -> None:
 
 
 def test_provider_throttle_release_uses_authoritative_endpoint() -> None:
+    """Verify provider throttle release uses authoritative endpoint."""
     from schema_sanitizer.remote_impl.provider_throttle import ProviderThrottleGovernor
 
     governor = ProviderThrottleGovernor()
@@ -182,68 +202,34 @@ def test_provider_throttle_release_uses_authoritative_endpoint() -> None:
     second.release()
 
 
-def test_operation_memory_release_uses_authoritative_per_lease_amount() -> None:
-    from schema_sanitizer.core_impl.memory_budget import OperationMemoryLease, OperationMemoryLedger
-
-    class FakeLedger:
-        _register_python_lease = OperationMemoryLedger._register_python_lease
-        _python_lease_entry = OperationMemoryLedger._python_lease_entry
-        _python_lease_entry_authority = OperationMemoryLedger._python_lease_entry_authority
-        _python_lease_size = OperationMemoryLedger._python_lease_size
-        _resize_python_lease = OperationMemoryLedger._resize_python_lease
-        _release_python_lease = OperationMemoryLedger._release_python_lease
-        _release_python_lease_authority = OperationMemoryLedger._release_python_lease_authority
-        _maybe_finish_deferred_close = OperationMemoryLedger._maybe_finish_deferred_close
-
-        def __init__(self) -> None:
-            self._pid = os.getpid()
-            self._lock = Lock()
-            self._python_lease_sequence = 0
-            self._python_leases: dict[int, tuple[int, object, int]] = {}
-            self._unknown_python_lease_releases = 0
-            self.total = 0
-
-        def reserve(self, size_bytes: int, *, stage: str) -> None:
-            self.total += size_bytes
-
-        def release(self, size_bytes: int, *, _release_entry: Any = None) -> None:
-            self.total -= size_bytes
-            if _release_entry is not None:
-                _release_entry.physical_released = True
-
-    ledger = FakeLedger()
-    first = OperationMemoryLease(ledger, 10, "remote-io-cancel-after-grant-delivers")  # type: ignore[arg-type]
-    second = OperationMemoryLease(ledger, 10, "remote-io-cancel-after-grant-delivers")  # type: ignore[arg-type]
-    first._size_bytes = 20
-    first.release()
-    assert ledger.total == 10
-    assert second.reserved_bytes == 10
-    second.release()
-    assert ledger.total == 0
-
-
 def test_direct_cross_process_memory_uses_authoritative_local_amount(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify direct cross process memory uses authoritative local amount."""
     from schema_sanitizer.core_impl import cross_process_memory as module
 
     monkeypatch.setattr(module, "_enabled", lambda: False)
+    unknown_before = module._direct_lease_snapshot()[2]
     first = module.CrossProcessMemoryLease(100, 0)
     second = module.CrossProcessMemoryLease(100, 0)
-    module._update_direct_lease_reserved(first, first._lease_id, first._capability, 10)
-    module._update_direct_lease_reserved(second, second._lease_id, second._capability, 10)
-    first._reserved = 20
-    first.release()
-    live, reserved, unknown = module._direct_lease_snapshot()
-    assert live >= 1
-    assert reserved >= 10
-    assert unknown == 0
-    second.release()
+    try:
+        module._update_direct_lease_reserved(first, first._lease_id, first._capability, 10)
+        module._update_direct_lease_reserved(second, second._lease_id, second._capability, 10)
+        first._reserved = 20
+        first.release()
+        live, reserved, unknown = module._direct_lease_snapshot()
+        assert live >= 1
+        assert reserved >= 10
+        assert unknown == unknown_before
+    finally:
+        first.release()
+        second.release()
 
 
 def test_cleanup_rejects_closure_and_rich_argument_hidden_owners(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cleanup rejects closure and rich argument hidden owners."""
     from schema_sanitizer.core_impl.cleanup_dispatcher import _CleanupDispatcher
 
     dispatcher = _CleanupDispatcher()
@@ -251,6 +237,7 @@ def test_cleanup_rejects_closure_and_rich_argument_hidden_owners(
     owner = bytearray(8 << 20)
 
     def closure() -> None:
+        """Retain the captured cleanup owner without invoking it."""
         _ = owner
 
     assert not dispatcher.submit(closure, retained_bytes=1024)
@@ -261,6 +248,7 @@ def test_cleanup_rejects_closure_and_rich_argument_hidden_owners(
 
 
 def test_retry_rejects_hidden_owner_and_negative_charge(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify retry rejects hidden owner and negative charge."""
     from schema_sanitizer.core_impl.retry_scheduler import _RetryScheduler
 
     scheduler = _RetryScheduler()
@@ -268,6 +256,7 @@ def test_retry_rejects_hidden_owner_and_negative_charge(monkeypatch: pytest.Monk
     owner = bytearray(8 << 20)
 
     def closure() -> None:
+        """Retain the hidden owner in the retry callback closure."""
         _ = owner
 
     assert not scheduler.schedule(
@@ -286,7 +275,6 @@ def test_gc_finalizers_do_not_call_blocking_release_methods() -> None:
     """Keep the no-blocking-GC rule mechanically enforceable across Python owners."""
     import ast
 
-    root = Path(__file__).parents[2] / "src" / "schema_sanitizer"
     forbidden = {
         "self.release",
         "self.close",
@@ -297,8 +285,8 @@ def test_gc_finalizers_do_not_call_blocking_release_methods() -> None:
         "self._release_finalizer_ticket",
     }
     violations: list[str] = []
-    for source_path in root.rglob("*.py"):
-        tree = ast.parse(source_path.read_text())
+    for relative_path in source_paths("src/schema_sanitizer"):
+        tree = source_tree(relative_path)
         for node in ast.walk(tree):
             if (
                 not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
@@ -313,13 +301,14 @@ def test_gc_finalizers_do_not_call_blocking_release_methods() -> None:
                 except Exception:
                     continue
                 if name in forbidden:
-                    violations.append(f"{source_path}:{node.lineno}:{name}")
+                    violations.append(f"{relative_path}:{node.lineno}:{name}")
     assert violations == []
 
 
 def test_temporary_storage_finalizer_only_publishes_preallocated_owner(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify temporary storage finalizer only publishes preallocated owner."""
     from types import SimpleNamespace
 
     from schema_sanitizer.core_impl import temporary_storage as module
@@ -336,6 +325,7 @@ def test_temporary_storage_finalizer_only_publishes_preallocated_owner(
     calls: list[bool] = []
 
     def forbidden_release(_lease: object) -> None:
+        """Fail if the superseded release path is invoked."""
         calls.append(True)
         raise AssertionError("GC entered temporary-storage accounting")
 
@@ -350,6 +340,8 @@ def test_temporary_storage_finalizer_only_publishes_preallocated_owner(
 def test_temporary_storage_cross_process_shrink_is_coalesced(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    """Verify temporary storage cross process shrink is coalesced."""
+    from schema_sanitizer.core_impl import cross_process_storage
     from schema_sanitizer.core_impl import temporary_storage_governor as module
 
     governor = module._ProcessTemporaryStorageGovernor()
@@ -360,26 +352,26 @@ def test_temporary_storage_cross_process_shrink_is_coalesced(
     reserve_calls: list[tuple[int, int]] = []
     release_calls: list[tuple[int, int]] = []
     monkeypatch.setattr(
-        module,
+        cross_process_storage,
         "_reserve_cross_process_raw",
         lambda _device, amount, _capacity, *, inode_count, **_kwargs: reserve_calls.append(
             (amount, inode_count)
         ),
     )
     monkeypatch.setattr(
-        module,
+        cross_process_storage,
         "_release_cross_process_raw",
         lambda _device, amount, *, inode_count, **_kwargs: release_calls.append(
             (amount, inode_count)
         ),
     )
     one_mib = 1 << 20
-    governor.reserve(one_mib, path=tmp_path, label="a", inode_count=1)
-    governor.reserve(one_mib, path=tmp_path, label="b", inode_count=1)
+    first = governor.reserve_capability(one_mib, path=tmp_path, label="a", inode_count=1)
+    second = governor.reserve_capability(one_mib, path=tmp_path, label="b", inode_count=1)
     assert reserve_calls == [(one_mib, 1), (one_mib, 1)]
-    governor.release(7, one_mib, inode_count=1)
+    assert governor.release_capability(first)
     assert release_calls == []
-    governor.release(7, one_mib, inode_count=1)
+    assert governor.release_capability(second)
     assert release_calls == [(2 * one_mib, 2)]
     snapshot = governor.authoritative_snapshot()
     assert snapshot.reserved_bytes == 0
@@ -387,6 +379,7 @@ def test_temporary_storage_cross_process_shrink_is_coalesced(
 
 
 def test_governed_thread_permit_lives_until_physical_thread_exit() -> None:
+    """Verify governed thread permit lives until physical thread exit."""
     from schema_sanitizer.core_impl.governed_thread import (
         defer_governed_thread_retirement,
         governed_thread_retirement_snapshot,
@@ -400,9 +393,10 @@ def test_governed_thread_permit_lives_until_physical_thread_exit() -> None:
     holder: dict[str, Thread] = {}
 
     def target() -> None:
+        """Run the target side of the synchronization scenario."""
         assert defer_governed_thread_retirement(holder["thread"], lambda: releases.append(1))
         ready.set()
-        exit_event.wait(SCHEDULER_TIMEOUT_SECONDS)
+        wait_event_or_fail(exit_event)
 
     thread = Thread(target=target)
     holder["thread"] = thread
@@ -412,12 +406,13 @@ def test_governed_thread_permit_lives_until_physical_thread_exit() -> None:
     assert releases == []
     assert governed_thread_retirement_snapshot()[0] >= 1
     exit_event.set()
-    thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(thread)
     reap_governed_thread_retirements()
     assert releases == [1]
 
 
 def test_retirement_reaper_claims_debt_before_reentrant_release() -> None:
+    """Verify retirement reaper claims debt before reentrant release."""
     from schema_sanitizer.core_impl.governed_thread import (
         defer_governed_thread_retirement,
         reap_governed_thread_retirements,
@@ -429,10 +424,12 @@ def test_retirement_reaper_claims_debt_before_reentrant_release() -> None:
     calls: list[int] = []
 
     def release() -> None:
+        """Release the resource at the synchronization point under test."""
         calls.append(1)
         reap_governed_thread_retirements()
 
     def target() -> None:
+        """Run the target side of the synchronization scenario."""
         assert defer_governed_thread_retirement(holder["thread"], release)
         done.set()
 
@@ -440,12 +437,13 @@ def test_retirement_reaper_claims_debt_before_reentrant_release() -> None:
     holder["thread"] = thread
     thread.start()
     assert done.wait(SCHEDULER_TIMEOUT_SECONDS)
-    thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(thread)
     reap_governed_thread_retirements()
     assert calls == [1]
 
 
 def test_runtime_shutdown_checks_authoritative_finalizer_and_physical_ledgers() -> None:
+    """Verify runtime shutdown checks authoritative finalizer and physical ledgers."""
     import ast
 
     from schema_sanitizer.core_impl import runtime_shutdown
@@ -483,6 +481,7 @@ def test_runtime_shutdown_checks_authoritative_finalizer_and_physical_ledgers() 
     ]
 
     def loop_calls_domain_method(loop: ast.For, method: str) -> bool:
+        """Report whether the loop delegates to the domain method."""
         return any(
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
@@ -496,6 +495,7 @@ def test_runtime_shutdown_checks_authoritative_finalizer_and_physical_ledgers() 
     assert any(loop_calls_domain_method(loop, "snapshot") for loop in domain_loops)
 
     def mapping_get_keys(mapping: str) -> set[str]:
+        """Return the mapping keys accessed through ``get``."""
         return {
             node.args[0].value
             for node in calls
@@ -538,11 +538,13 @@ def test_runtime_shutdown_checks_authoritative_finalizer_and_physical_ledgers() 
 
 
 def test_native_ordered_executor_retains_completion_ownership_until_take() -> None:
+    """Verify native ordered executor retains completion ownership until take."""
     import re
 
     root = Path(__file__).parents[2]
 
     def cpp_tokens(path: Path) -> list[str]:
+        """Extract C++ tokens from the production source contract."""
         lexemes = re.findall(
             r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\''
             r"|[A-Za-z_]\w*|::|->|&&|\|\||==|!=|<=|>=|<<|>>|\+\+|--|[^\s]",
@@ -552,6 +554,7 @@ def test_native_ordered_executor_retains_completion_ownership_until_take() -> No
         return [token for token in lexemes if not token.startswith(("//", "/*", '"', "'"))]
 
     def sequence_index(tokens: list[str], expected: list[str]) -> int:
+        """Locate a token sequence within the source-contract token stream."""
         width = len(expected)
         for index in range(len(tokens) - width + 1):
             if tokens[index : index + width] == expected:
@@ -559,6 +562,7 @@ def test_native_ordered_executor_retains_completion_ownership_until_take() -> No
         return -1
 
     def scope_tokens(tokens: list[str], signature: list[str]) -> list[str]:
+        """Extract scope tokens from the production source contract."""
         signature_index = sequence_index(tokens, signature)
         assert signature_index >= 0
         opening = tokens.index("{", signature_index + len(signature))

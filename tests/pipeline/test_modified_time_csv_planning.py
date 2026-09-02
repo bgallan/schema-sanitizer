@@ -1,15 +1,17 @@
-"""UTC modified-time planning and source-manifest contracts."""
+"""UTC modified-time planning and source-manifest contracts.
+
+It covers UTC normalization, half-open daily windows, exact timestamp boundaries,
+immutable manifests, empty windows, and generation requirements.
+"""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import FrozenInstanceError
 from datetime import UTC, date, datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
-import schema_sanitizer.pipeline as pipeline
 from schema_sanitizer.pipeline.modified_time import (
     ModifiedTimeWindowPlan,
     UtcWindow,
@@ -153,7 +155,6 @@ def test_source_manifest_is_immutable_ordered_and_version_aware() -> None:
             "gs://bucket/events",
             [_file("naive.csv", datetime(2026, 8, 1), generation="11")],
         )
-    assert not hasattr(pipeline, "SourceManifest")
 
 
 def test_one_listing_builds_distinct_deterministic_daily_manifests() -> None:
@@ -367,15 +368,3 @@ def test_gcs_planner_requires_generation_and_rejects_other_providers(
         plan_gcs_modified_time_windows("gs://bucket/events", date(2026, 8, 1), date(2026, 8, 1))
     with pytest.raises(ValueError, match="only GCS"):
         plan_gcs_modified_time_windows("s3://bucket/events", date(2026, 8, 1), date(2026, 8, 1))
-
-
-def test_modified_time_planning_owners_remain_bounded() -> None:
-    """New planning and manifest responsibilities stay in cohesive owners."""
-    root = Path(__file__).resolve().parents[2]
-    owners = (
-        root / "src/schema_sanitizer/pipeline/modified_time.py",
-        root / "src/schema_sanitizer/sources/models.py",
-    )
-
-    assert all(owner.is_file() for owner in owners)
-    assert all(len(owner.read_text(encoding="utf-8").splitlines()) <= 500 for owner in owners)

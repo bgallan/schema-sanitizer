@@ -1,4 +1,6 @@
-// Defines Status and Result error propagation primitives.
+// Defines Status and Result primitives for explicit native error propagation.
+// Value-or-error ownership and return macros keep expected failures out of
+// exceptions while preserving one stable diagnostic message.
 
 #pragma once
 
@@ -23,9 +25,9 @@ enum class StatusCode : std::uint8_t {
 
 class Status {
 public:
-  // Creates a successful status.
+  /// Creates a successful status.
   Status() = default;
-  // Creates a status with a concrete code and normalized message.
+  /// Creates a status with a concrete code and normalized message.
   Status(StatusCode code, std::string message)
       : code_(code), message_(std::move(message)) {
     if (code_ == StatusCode::kOK) {
@@ -33,44 +35,44 @@ public:
     }
   }
 
-  // Returns whether the operation succeeded.
+  /// Creates a successful status.
   static Status OK() { return {}; }
 
-  // Creates an invalid-argument status.
+  /// Creates an invalid-argument status.
   template <class... Args> static Status Invalid(Args &&...args) {
     return Status(StatusCode::kInvalid,
                   build_message(std::forward<Args>(args)...));
   }
-  // Creates an out-of-memory status.
+  /// Creates an out-of-memory status.
   template <class... Args> static Status OutOfMemory(Args &&...args) {
     return Status(StatusCode::kOutOfMemory,
                   build_message(std::forward<Args>(args)...));
   }
-  // Creates a cancellation status.
+  /// Creates a cancellation status.
   template <class... Args> static Status Cancelled(Args &&...args) {
     return Status(StatusCode::kCancelled,
                   build_message(std::forward<Args>(args)...));
   }
-  // Creates an I/O error status.
+  /// Creates an I/O error status.
   template <class... Args> static Status IOError(Args &&...args) {
     return Status(StatusCode::kIOError,
                   build_message(std::forward<Args>(args)...));
   }
-  // Creates a not-implemented status.
+  /// Creates a not-implemented status.
   template <class... Args> static Status NotImplemented(Args &&...args) {
     return Status(StatusCode::kNotImplemented,
                   build_message(std::forward<Args>(args)...));
   }
 
-  // Returns whether the operation succeeded.
+  /// Returns whether the operation succeeded.
   [[nodiscard]] bool ok() const { return code_ == StatusCode::kOK; }
-  // Returns the status code.
+  /// Returns the status code.
   [[nodiscard]] StatusCode code() const { return code_; }
 
-  // Returns the status message.
+  /// Returns the status message.
   [[nodiscard]] const std::string &message() const { return message_; }
 
-  // Returns a string representation.
+  /// Returns a string representation.
   [[nodiscard]] std::string ToString() const {
     if (ok()) {
       return "OK";
@@ -85,14 +87,14 @@ public:
   }
 
 private:
-  // Builds a message by streaming all arguments.
+  /// Builds a message by streaming all arguments.
   template <class... Args> static std::string build_message(Args &&...args) {
     std::ostringstream oss;
     (oss << ... << std::forward<Args>(args));
     return oss.str();
   }
 
-  // Returns the stable name for a status code.
+  /// Returns the stable name for a status code.
   static std::string_view code_name(StatusCode code) {
     switch (code) {
     case StatusCode::kOK:
@@ -118,9 +120,9 @@ private:
 
 template <class T> class Result {
 public:
-  // Creates a successful result by copying a value.
+  /// Creates a successful result by copying a value.
   Result(const T &value) : storage_(value) {}
-  // Creates a successful result by moving a value.
+  /// Creates a successful result by moving a value.
   Result(T &&value) : storage_(std::move(value)) {}
 
   template <class U>
@@ -128,18 +130,18 @@ public:
              !std::is_same_v<std::decay_t<U>, T> &&
              !std::is_same_v<std::decay_t<U>, Status> &&
              !std::is_same_v<std::decay_t<U>, Result<T>>)
-  // Creates a successful result from a compatible value.
+  /// Creates a successful result from a compatible value.
   Result(U &&value) : storage_(T(std::forward<U>(value))) {}
 
-  // Creates a failed result by copying a status.
+  /// Creates a failed result by copying a status.
   Result(const Status &st) : storage_(normalize_error(st)) {}
-  // Creates a failed result by moving a status.
+  /// Creates a failed result by moving a status.
   Result(Status &&st) : storage_(normalize_error(std::move(st))) {}
 
-  // Returns whether the operation succeeded.
+  /// Returns whether the operation succeeded.
   [[nodiscard]] bool ok() const { return std::holds_alternative<T>(storage_); }
 
-  // Returns the current status.
+  /// Returns the current status.
   [[nodiscard]] Status status() const {
     if (ok()) {
       return Status::OK();
@@ -147,22 +149,22 @@ public:
     return std::get<Status>(storage_);
   }
 
-  // Returns the contained value or throws on an error result.
+  /// Returns the contained value or throws on an error result.
   [[nodiscard]] T &ValueOrDie() & { return std::get<T>(storage_); }
-  // Returns the contained value or throws on an error result.
+  /// Returns the contained value or throws on an error result.
   [[nodiscard]] const T &ValueOrDie() const & { return std::get<T>(storage_); }
-  // Moves the contained value or throws on an error result.
+  /// Moves the contained value or throws on an error result.
   [[nodiscard]] T ValueOrDie() && { return std::move(std::get<T>(storage_)); }
 
-  // Returns the contained value.
+  /// Returns the contained value.
   [[nodiscard]] T &operator*() & { return std::get<T>(storage_); }
-  // Returns the contained value.
+  /// Returns the contained value.
   [[nodiscard]] const T &operator*() const & { return std::get<T>(storage_); }
-  // Returns the contained value.
+  /// Returns the contained value.
   [[nodiscard]] T operator*() && { return std::move(std::get<T>(storage_)); }
 
 private:
-  // Rejects successful statuses used as failed Result states.
+  /// Rejects successful statuses used as failed Result states.
   static Status normalize_error(Status st) {
     if (st.ok()) {
       return Status::Invalid("sanitize::Result constructed from OK status");

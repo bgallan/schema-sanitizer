@@ -1,4 +1,6 @@
 // Composes scalar Arrow C Data builders by physical representation.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/builders/detail.hh"
 #include "internal/memory/size_math.hh"
@@ -21,9 +23,11 @@ using sanitize::Status;
 
 template <typename T> class FixedWidthBuilder final : public BaseBuilder {
 public:
+  /// Initializes a fixed-width Arrow builder for the compiled scalar field.
   explicit FixedWidthBuilder(std::shared_ptr<PoolResource> pool)
       : BaseBuilder(std::move(pool)), values_(pool_.get()) {}
 
+  /// Reserves fixed-width value slots for the requested row count.
   Status reserve(int64_t rows, int64_t) override {
     if (rows < 0)
       return Status::Invalid("negative fixed-width reserve");
@@ -36,7 +40,8 @@ public:
     return Status::OK();
   }
 
-  // Appends the object state.
+  /// Appends one fixed-width value or a null placeholder with matching
+  /// validity.
   Status append(const Cell &cell) override {
     if (cell.is_null)
       return append_null();
@@ -51,6 +56,7 @@ public:
     return Status::OK();
   }
 
+  /// Stores one preconverted fixed-width scalar and records its validity.
   Status append_direct(const DirectScalarValue &value) override {
     if (value.is_null)
       return append_null();
@@ -65,13 +71,14 @@ public:
     return Status::OK();
   }
 
-  // Appends null.
+  /// Appends a zero placeholder and marks the fixed-width slot null.
   Status append_null() override {
     values_.push_back(T{});
     push_validity(false);
     return Status::OK();
   }
 
+  /// Copies a fixed-width Arrow array slice and its validity into this builder.
   Status append_array(const ArrowArray &array) override {
     if (array.length < 0 || array.offset < 0 || array.n_buffers < 2 ||
         !array.buffers) {
@@ -94,7 +101,7 @@ public:
     return append_array_validity(array);
   }
 
-  // Finishes the current output.
+  /// Transfers fixed-width values and validity into an Arrow array payload.
   Status finish(ArrowArray *out) override {
     auto payload = make_array_payload(pool_);
     if (!payload)
@@ -124,7 +131,8 @@ public:
     return Status::OK();
   }
 
-  // Returns the current byte usage.
+  /// Returns retained buffer capacity in bytes for validity and fixed-width
+  /// values.
   [[nodiscard]] int64_t bytes() const noexcept override {
     return saturating_add_i64(
         saturating_size_to_i64(validity_.capacity()),
@@ -132,7 +140,7 @@ public:
   }
 
 protected:
-  // Resets values.
+  /// Clears fixed-width values while retaining their allocated capacity.
   Status reset_values() override {
     values_.clear();
     return Status::OK();
@@ -143,23 +151,26 @@ private:
 };
 class NullBuilder final : public BaseBuilder {
 public:
+  /// Initializes an Arrow null builder for a compiled null-only field.
   explicit NullBuilder(std::shared_ptr<PoolResource> pool)
       : BaseBuilder(std::move(pool)) {}
 
-  // Appends the object state.
+  /// Extends the null array by one logical element.
   Status append(const Cell &) override { return append_null(); }
 
+  /// Extends the null array by one element for a preconverted scalar.
   Status append_direct(const DirectScalarValue &) override {
     return append_null();
   }
 
-  // Appends null.
+  /// Extends the null array and its null count by one element.
   Status append_null() override {
     ++length_;
     ++null_count_;
     return Status::OK();
   }
 
+  /// Extends the null array by the validated source array length.
   Status append_array(const ArrowArray &array) override {
     if (array.length < 0) {
       return Status::Invalid("invalid null Arrow array length");
@@ -169,7 +180,7 @@ public:
     return Status::OK();
   }
 
-  // Finishes the current output.
+  /// Produces a null-type Arrow array with no physical value buffer.
   Status finish(ArrowArray *out) override {
     auto payload = make_array_payload(pool_);
     if (!payload)
@@ -186,19 +197,21 @@ public:
     return Status::OK();
   }
 
-  // Returns the current byte usage.
+  /// Reports that a null-only builder retains no value buffers.
   [[nodiscard]] int64_t bytes() const noexcept override { return 0; }
 
 protected:
-  // Resets values.
+  /// Performs no extra reset because null values have no physical storage.
   Status reset_values() override { return Status::OK(); }
 };
 
 class BoolBuilder final : public BaseBuilder {
 public:
+  /// Initializes the Boolean builder and its bit-packed Arrow value storage.
   explicit BoolBuilder(std::shared_ptr<PoolResource> pool)
       : BaseBuilder(std::move(pool)), bits_(pool_.get()) {}
 
+  /// Reserves packed Boolean bytes for the requested row count.
   Status reserve(int64_t rows, int64_t) override {
     if (rows < 0)
       return Status::Invalid("negative boolean reserve");
@@ -211,7 +224,7 @@ public:
     return Status::OK();
   }
 
-  // Appends the object state.
+  /// Packs one Boolean value or null placeholder and records its validity.
   Status append(const Cell &cell) override {
     if (cell.is_null)
       return append_null();
@@ -220,6 +233,7 @@ public:
     return Status::OK();
   }
 
+  /// Packs one preconverted Boolean value and records its validity.
   Status append_direct(const DirectScalarValue &value) override {
     if (value.is_null)
       return append_null();
@@ -228,13 +242,14 @@ public:
     return Status::OK();
   }
 
-  // Appends null.
+  /// Appends a zero Boolean placeholder and marks its validity bit false.
   Status append_null() override {
     push_bit(false);
     push_validity(false);
     return Status::OK();
   }
 
+  /// Copies Boolean values and validity bits from an Arrow array slice.
   Status append_array(const ArrowArray &array) override {
     if (array.length < 0 || array.offset < 0 || array.n_buffers < 2 ||
         !array.buffers) {
@@ -267,7 +282,7 @@ public:
     return Status::OK();
   }
 
-  // Finishes the current output.
+  /// Transfers packed Boolean values and validity into an Arrow array payload.
   Status finish(ArrowArray *out) override {
     auto payload = make_array_payload(pool_);
     if (!payload)
@@ -283,21 +298,22 @@ public:
     return Status::OK();
   }
 
-  // Returns the current byte usage.
+  /// Returns retained buffer capacity in bytes for validity and packed Boolean
+  /// values.
   [[nodiscard]] int64_t bytes() const noexcept override {
     return saturating_add_i64(saturating_size_to_i64(validity_.capacity()),
                               saturating_size_to_i64(bits_.capacity()));
   }
 
 protected:
-  // Resets values.
+  /// Clears packed Boolean values while retaining their allocated capacity.
   Status reset_values() override {
     bits_.clear();
     return Status::OK();
   }
 
 private:
-  // Performs the push bit operation.
+  /// Appends one Boolean bit to the current packed value byte.
   void push_bit(bool value) {
     if ((length_ & 7) == 0)
       bits_.push_back(0);
@@ -310,13 +326,14 @@ private:
 };
 class Utf8Builder final : public BaseBuilder {
 public:
-  // Creates a Utf8Builder.
+  /// Initializes UTF-8 data storage with the required leading zero offset.
   explicit Utf8Builder(std::shared_ptr<PoolResource> pool)
       : BaseBuilder(std::move(pool)), offsets_(pool_.get()),
         data_(pool_.get()) {
     offsets_.push_back(0);
   }
 
+  /// Reserves row offsets and bounded UTF-8 data capacity.
   Status reserve(int64_t rows, int64_t variable_bytes) override {
     if (rows < 0 || variable_bytes < 0)
       return Status::Invalid("negative UTF-8 reserve");
@@ -336,7 +353,7 @@ public:
     return Status::OK();
   }
 
-  // Resets the object state.
+  /// Clears validity and UTF-8 data while restoring the leading zero offset.
   Status reset() override {
     SAN_RETURN_NOT_OK(BaseBuilder::reset());
     offsets_.clear();
@@ -345,7 +362,7 @@ public:
     return Status::OK();
   }
 
-  // Appends the object state.
+  /// Appends one UTF-8 value's bytes and ending offset, or a null entry.
   Status append(const Cell &cell) override {
     if (cell.is_null)
       return append_null();
@@ -359,6 +376,7 @@ public:
     return Status::OK();
   }
 
+  /// Copies one preconverted UTF-8 value and records its ending offset.
   Status append_direct(const DirectScalarValue &value) override {
     if (value.is_null)
       return append_null();
@@ -373,13 +391,15 @@ public:
     return Status::OK();
   }
 
-  // Appends null.
+  /// Appends a null UTF-8 entry by repeating the previous data offset.
   Status append_null() override {
     offsets_.push_back(offsets_.empty() ? 0 : offsets_.back());
     push_validity(false);
     return Status::OK();
   }
 
+  /// Copies UTF-8 bytes, rebased offsets, and validity from an Arrow array
+  /// slice.
   Status append_array(const ArrowArray &array) override {
     if (array.length < 0 || array.offset < 0 || array.n_buffers < 3 ||
         !array.buffers || !array.buffers[1]) {
@@ -428,7 +448,7 @@ public:
     return append_array_validity(array);
   }
 
-  // Finishes the current output.
+  /// Transfers UTF-8 offsets, data, and validity into an Arrow array payload.
   Status finish(ArrowArray *out) override {
     auto payload = make_array_payload(pool_);
     if (!payload)
@@ -447,7 +467,8 @@ public:
     return Status::OK();
   }
 
-  // Returns the current byte usage.
+  /// Returns retained buffer capacity in bytes for validity, offsets, and UTF-8
+  /// data.
   [[nodiscard]] int64_t bytes() const noexcept override {
     auto total = saturating_size_to_i64(validity_.capacity());
     total = saturating_add_i64(
@@ -456,7 +477,8 @@ public:
   }
 
 protected:
-  // Resets values.
+  /// Performs no extra reset because Utf8Builder::reset clears offsets and
+  /// data.
   Status reset_values() override { return Status::OK(); }
 
 private:

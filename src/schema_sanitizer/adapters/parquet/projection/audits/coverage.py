@@ -1,4 +1,8 @@
-"""Partial and overlapping recursive projection coverage audits."""
+"""Partial and overlapping recursive projection coverage audits.
+
+It normalizes full and projected summaries, then measures missing, overlapping, and
+jointly covered recursive paths.
+"""
 
 from __future__ import annotations
 

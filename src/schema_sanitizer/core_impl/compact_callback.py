@@ -1,4 +1,8 @@
-"""Detect callback payloads that can be retained without hiding large owner graphs."""
+"""Detect callbacks whose payloads hide large retained owner graphs.
+
+Closure cells, bound arguments, partials, and callable objects are traversed under strict depth
+and item limits so compact callbacks can be retained safely.
+"""
 
 from __future__ import annotations
 

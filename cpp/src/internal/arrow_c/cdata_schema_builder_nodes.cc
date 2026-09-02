@@ -1,4 +1,6 @@
 // Builds nested Arrow C Data schema nodes from logical schema types.
+// The implementation preserves Arrow ownership and error contracts without
+// depending on the Arrow C++ library.
 
 #include "internal/arrow_c/cdata_schema_builder_internal.hh"
 
@@ -12,7 +14,7 @@
 namespace sanitize::internal::cdata_schema_builder {
 namespace {
 
-// Converts timestamp precision to an Arrow C Data format string.
+/// Converts timestamp precision to an Arrow C Data format string.
 sanitize::Result<std::string_view>
 timestamp_format(std::string_view precision) {
   if (precision == "TIMESTAMP_MILLIS") {
@@ -27,7 +29,7 @@ timestamp_format(std::string_view precision) {
   return sanitize::Status::Invalid("unsupported timestamp_precision");
 }
 
-// Converts a logical type to an Arrow C Data format string.
+/// Converts a logical type to an Arrow C Data format string.
 sanitize::Result<std::string_view>
 logical_type_to_c_schema_format(const sanitize::LogicalType &t,
                                 std::string_view timestamp_precision) {
@@ -57,7 +59,7 @@ logical_type_to_c_schema_format(const sanitize::LogicalType &t,
       "logical_type_to_c_schema_format: unsupported logical kind");
 }
 
-// Builds child ArrowSchema nodes for nested logical types.
+/// Builds child ArrowSchema nodes for nested logical types.
 sanitize::Status
 build_schema_node_children(const sanitize::LogicalType &logical_type,
                            std::string_view timestamp_precision,

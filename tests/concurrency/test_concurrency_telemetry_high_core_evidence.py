@@ -1,13 +1,19 @@
-"""Regression coverage for concurrency telemetry high core evidence."""
+"""Exercise high-core telemetry workloads without depending on optional analytical runtimes.
+
+The Arrow-stream fixture must be fully consumed and released without PyArrow, and the full-output
+workload must retain the same row count through materialization.
+"""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from conftest import require_native
+import pytest
 
 from benchmarks.concurrency.telemetry.runner import run_operation
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 _COLUMNS = tuple(f"column_{index:04d}" for index in range(128))
 _MEMORY_LIMIT = 128 * 1024 * 1024
@@ -25,7 +31,6 @@ def test_arrow_stream_workload_consumes_and_releases_without_pyarrow(
     tmp_path: Path,
 ) -> None:
     """The Arrow-only baseline owns and releases every C Stream object directly."""
-    require_native()
     source = tmp_path / "wide.jsonl"
     _write_fixture(source, 512)
 
@@ -46,7 +51,6 @@ def test_arrow_stream_workload_consumes_and_releases_without_pyarrow(
 
 def test_full_output_workload_retains_identical_row_count(tmp_path: Path) -> None:
     """The paired JSONL workload exercises the complete output encoder."""
-    require_native()
     source = tmp_path / "wide.jsonl"
     output_path = tmp_path / "wide-output.jsonl"
     _write_fixture(source, 128)

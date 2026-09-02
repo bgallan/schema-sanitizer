@@ -1,4 +1,6 @@
 // Implements decimal, duration, and interval Arrow value JSON serialization.
+// The code validates Arrow layouts and emits deterministic JSON with correct
+// null and logical-type semantics.
 
 #include "internal/json_output/jsonl_value_writer_parts.hh"
 
@@ -12,6 +14,8 @@
 namespace sanitize::internal::jsonl_stream_writer {
 namespace {
 
+/// Returns the typed Arrow values buffer after verifying that the buffer
+/// pointer is available.
 template <typename T> const T *data_buffer(const ArrowArray &array) {
   if (!array.buffers || !array.buffers[1]) {
     return nullptr;
@@ -30,6 +34,8 @@ struct MonthDayNanoInterval {
   int64_t nanoseconds = 0;
 };
 
+/// Escapes and appends one logical value's textual representation as a JSON
+/// string.
 sanitize::Status append_quoted_text(TextBuffer &out, std::string_view value) {
   sanitize::internal::json_encoding::append_string(out, value);
   return sanitize::Status::OK();
@@ -55,6 +61,7 @@ sanitize::Status append_decimal_value(TextBuffer &out, const JsonlField &field,
   return sanitize::Status::OK();
 }
 
+/// Formats one Arrow duration in its declared unit, with optional JSON quoting.
 sanitize::Status append_duration_value(TextBuffer &out, const JsonlField &field,
                                        const ArrowArray &array, int64_t row,
                                        bool quote) {
@@ -71,6 +78,8 @@ sanitize::Status append_duration_value(TextBuffer &out, const JsonlField &field,
   return sanitize::Status::OK();
 }
 
+/// Formats one Arrow interval according to its month, day-time, or
+/// month-day-nanosecond layout.
 sanitize::Status append_interval_value(TextBuffer &out, const JsonlField &field,
                                        const ArrowArray &array, int64_t row) {
   if (!array.buffers || !array.buffers[1]) {

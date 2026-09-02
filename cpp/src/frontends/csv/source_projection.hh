@@ -1,4 +1,6 @@
-// Immutable CSV source-header and physical-column projection metadata.
+// Declares immutable CSV source-header and physical-column projection metadata.
+// The mapping keeps logical field order stable as physical headers change
+// between sources.
 
 #pragma once
 

@@ -1,3 +1,7 @@
+// Builds the recursive Arrow schema root and finalizes native output layout
+// metadata. This fragment is included by the consolidated footer reader inside
+// its private implementation namespace.
+
 sanitize::Result<ArrowSchema *> build_native_recursive_schema_node(
     const NativeRecursiveSchemaSource &source,
     const NativeRecursiveMaterializationTree &tree,
@@ -70,6 +74,8 @@ sanitize::Result<ArrowSchema *> build_native_recursive_schema_node(
       "native Parquet reader: unknown recursive schema node kind");
 }
 
+/// Finalizes native stream output layout plan only after required children and
+/// layout metadata are complete.
 sanitize::Status
 finalize_native_stream_output_layout_plan(NativeParquetStreamState *stream) {
   if (!stream) {
@@ -92,6 +98,8 @@ finalize_native_stream_output_layout_plan(NativeParquetStreamState *stream) {
   return {};
 }
 
+/// Builds and caches the native output layout and recursive resource totals for
+/// a stream.
 sanitize::Status
 initialize_native_stream_output_layout(NativeParquetStreamState *stream) {
   if (!stream) {
@@ -128,6 +136,8 @@ initialize_native_stream_output_layout(NativeParquetStreamState *stream) {
   return finalize_native_stream_output_layout_plan(stream);
 }
 
+/// Builds native schema from validated Parquet metadata while preserving Arrow
+/// ownership and nesting contracts.
 sanitize::Status build_native_schema(NativeParquetStreamState *stream,
                                      ArrowSchema *out) {
   if (!stream || !out) {

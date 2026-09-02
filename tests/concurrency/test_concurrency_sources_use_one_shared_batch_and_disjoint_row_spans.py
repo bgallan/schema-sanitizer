@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency sources use one shared batch and disjoint row spans."""
+"""Require source workers to share one batch through disjoint row spans.
+
+Zero-copy packets must partition work without overlapping ownership and reproduce the exact
+single-worker oracle when their results are joined.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,6 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import assert_logical_files_equivalent, semantic_stats
-from conftest import require_native
 
 import schema_sanitizer as ss
 
@@ -31,7 +34,7 @@ def _write_rows(path: Path, rows: int) -> None:
 
 
 def test_sources_use_one_shared_batch_and_disjoint_row_spans() -> None:
-    """Parallel packets no longer allocate and copy a RowRef vector each."""
+    """Parallel packets share one batch and use disjoint row spans."""
     root = Path(__file__).resolve().parents[2]
     header = (
         root / "cpp/src/internal/materialization/ingest_stream/parallel_packets.hh"
@@ -63,9 +66,8 @@ def test_sources_use_one_shared_batch_and_disjoint_row_spans() -> None:
     assert "std::move(batch.owner)" in inference
 
 
-def test_zero_copy_packets_preserve_single_oracle(tmp_path: Path) -> None:
+def test_zero_copy_packets_preserve_single_oracle(tmp_path: Path, require_native: None) -> None:
     """Shared packet views preserve every row and byte of logical output."""
-    require_native()
     source = tmp_path / "source.jsonl"
     _write_rows(source, 12_000)
 

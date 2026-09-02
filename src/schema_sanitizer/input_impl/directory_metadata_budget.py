@@ -1,4 +1,8 @@
-"""Bound retained directory metadata before high-cardinality discovery allocates."""
+"""Bound directory metadata before high-cardinality discovery allocates it.
+
+Transient and retained charges have separate exact owners so publication can transfer capacity
+atomically, roll back failures, and enforce both item and byte ceilings.
+"""
 
 from __future__ import annotations
 
@@ -27,21 +31,18 @@ _DIRECTORY_METADATA_FIXED_OVERHEAD_BYTES = 64 * 1024
 _DIRECTORY_METADATA_CLOSE_TIMEOUT_SECONDS = 30.0
 
 
-def _utf8_size_bounded(value: str, maximum_bytes: int) -> int:
-    """Compatibility wrapper for the shared allocation-bounded UTF-8 meter."""
-    return utf8_size_bounded(value, maximum_bytes)
-
-
 class RetainedDirectoryMetadata:
     """Lifetime owner for metadata that escapes the discovery call scope."""
 
     __slots__ = ("_lease", "_lock")
 
     def __init__(self) -> None:
+        """Initialize the retained directory metadata and its owned runtime state."""
         self._lease: OperationMemoryLease | None = None
         self._lock = Lock()
 
     def _adopt(self, lease: OperationMemoryLease | None) -> None:
+        """Adopt retained metadata and its exact memory charge from another owner."""
         if lease is None:
             return
         with self._lock:
@@ -83,11 +84,13 @@ class TransientDirectoryMetadataReservation:
     __slots__ = ("_budget", "_bytes", "_lock")
 
     def __init__(self, budget: "DirectoryMetadataBudget") -> None:
+        """Initialize the transient directory metadata reservation and its owned runtime state."""
         self._budget: DirectoryMetadataBudget | None = budget
         self._bytes = 0
         self._lock = Lock()
 
     def charge_before_publish(self, associations: int = 1) -> None:
+        """Charge metadata growth before publishing it to the retained collection."""
         count = max(0, int(associations))
         amount = count * _DIRECTORY_METADATA_GROUP_ASSOCIATION_BYTES
         if amount == 0:
@@ -106,6 +109,7 @@ class TransientDirectoryMetadataReservation:
             raise
 
     def rollback_publish(self, associations: int = 1) -> None:
+        """Undo metadata charges for a publication that did not commit."""
         count = max(0, int(associations))
         amount = count * _DIRECTORY_METADATA_GROUP_ASSOCIATION_BYTES
         if amount == 0:
@@ -118,6 +122,7 @@ class TransientDirectoryMetadataReservation:
         budget._uncharge(amount)
 
     def close(self) -> None:
+        """Release resources owned by this transient directory metadata reservation."""
         with self._lock:
             budget = self._budget
             amount = self._bytes
@@ -127,9 +132,11 @@ class TransientDirectoryMetadataReservation:
             budget._uncharge(amount)
 
     def __enter__(self) -> "TransientDirectoryMetadataReservation":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        """Release managed resources when leaving the context."""
         self.close()
 
 
@@ -332,33 +339,6 @@ class DirectoryMetadataBudget:
         if amount == 0:
             return
 
-        # Compatibility for focused historical doubles constructed with
-        # ``object.__new__``. Production instances always own ``_memory_lease``.
-        if not hasattr(self, "_memory_lease"):
-            owner = self._operation_memory_ledger
-            if owner is not None:
-                owner.reserve(amount, stage="directory_metadata")
-            try:
-                with self._lock:
-                    if self._close_started:
-                        raise RuntimeError("directory metadata budget is closed")
-                    next_used = self._used_bytes + amount
-                    if next_used > self.limit_bytes:
-                        raise self._limit_error(next_used, observed)
-                    self._used_bytes = next_used
-            except BaseException as primary:
-                if owner is not None:
-                    try:
-                        owner.release(amount)
-                    except BaseException as cleanup_error:
-                        add_bounded_note(
-                            primary,
-                            "directory metadata reservation rollback also failed",
-                            cleanup_error,
-                        )
-                raise
-            return
-
         with self._admission_lock:
             with self._lock:
                 if self._close_started:
@@ -397,16 +377,6 @@ class DirectoryMetadataBudget:
         """Rollback bytes retained only by a failed or temporary materialization."""
         amount = max(0, int(size))
         if amount == 0:
-            return
-
-        if not hasattr(self, "_memory_lease"):
-            with self._lock:
-                released = min(amount, self._used_bytes)
-            owner = self._operation_memory_ledger
-            if released and owner is not None:
-                owner.release(released)
-            with self._lock:
-                self._used_bytes = max(0, self._used_bytes - released)
             return
 
         with self._admission_lock:
@@ -471,18 +441,10 @@ class DirectoryMetadataBudget:
             self._closing = True
 
         try:
-            if hasattr(self, "_memory_lease"):
-                with self._admission_lock:
-                    lease = self._memory_lease
-                    if lease is not None:
-                        lease.close()
-            else:
-                # Historical injected owner: release exactly the retained debit.
-                owner = self._operation_memory_ledger
-                with self._lock:
-                    used = self._used_bytes
-                if owner is not None and used:
-                    owner.release(used)
+            with self._admission_lock:
+                lease = self._memory_lease
+                if lease is not None:
+                    lease.close()
         except BaseException:
             with self._close_condition:
                 self._closing = False
@@ -490,8 +452,7 @@ class DirectoryMetadataBudget:
             raise
 
         with self._close_condition:
-            if hasattr(self, "_memory_lease"):
-                self._memory_lease = None
+            self._memory_lease = None
             self._used_bytes = 0
             self._closed = True
             self._closing = False

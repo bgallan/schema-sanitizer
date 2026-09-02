@@ -1,3 +1,7 @@
+// Recursively materializes child nodes into ownership-safe Arrow buffers for a
+// selected row window. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
+
 sanitize::Result<ArrowArray *> materialize_native_recursive_child_node(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree,
@@ -33,6 +37,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_child_node(
       "native Parquet reader: unknown recursive child node kind");
 }
 
+/// Builds one Arrow struct from recursively materialized children and derived
+/// validity.
 sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree,
@@ -73,6 +79,8 @@ sanitize::Result<ArrowArray *> materialize_native_recursive_struct_node(
   return &struct_array.array;
 }
 
+/// Materializes every child of a recursive struct or map node into owned Arrow
+/// arrays.
 sanitize::Status append_native_recursive_node_children(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree,
@@ -102,6 +110,8 @@ sanitize::Status append_native_recursive_node_children(
   return {};
 }
 
+/// Builds one Arrow map from repeated entry offsets, key/value children, and
+/// validity.
 sanitize::Result<ArrowArray *> materialize_native_recursive_map_node(
     NativeParquetArrayState *state, const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree, std::size_t map_node_index,

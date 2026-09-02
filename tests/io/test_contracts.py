@@ -1,4 +1,8 @@
-"""Tests contracts."""
+"""Input contract, replay, malformed-row, and extension-catalog tests.
+
+It verifies file-like rejection, row-atomic error handling, canonical extension
+catalogs, and prepared-input contract exposure.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ from conftest import read_test_json
 pa = pytest.importorskip("pyarrow")
 
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
+from schema_sanitizer.input_impl.selection import FORMAT_SUFFIXES, input_format_extensions
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
 
@@ -27,21 +32,21 @@ class OneResetFile:
     """A minimal seekable file-like."""
 
     def __init__(self, data: bytes):
-        """Initialize the test helper."""
+        """Initialize one reset file state for buf and seek0 calls."""
         self._buf = io.BytesIO(data)
         self._seek0_calls = 0
 
     def read(self, size: int = -1) -> bytes:
-        """Read from the test helper."""
+        """Read data from the in-memory transport at its current offset."""
         return self._buf.read(size)
 
     def seek(self, pos: int, whence: int = 0) -> int:
-        """Seek within the test helper."""
+        """Move the in-memory stream to the requested offset."""
         self._seek0_calls += 1
         return self._buf.seek(pos, whence)
 
     def tell(self) -> int:
-        """Return the test helper position."""
+        """Return the current in-memory stream offset."""
         return self._buf.tell()
 
 
@@ -49,12 +54,12 @@ class NonSeekable:
     """A minimal non-seekable file-like."""
 
     def __init__(self, data: bytes):
-        """Initialize the test helper."""
+        """Initialize non seekable state for data and pos."""
         self._data = data
         self._pos = 0
 
     def read(self, n: int = -1):
-        """Read from the test helper."""
+        """Read data from the in-memory transport at its current offset."""
         if n is None or n < 0:
             n = len(self._data) - self._pos
         if self._pos >= len(self._data):
@@ -64,11 +69,11 @@ class NonSeekable:
         return out
 
     def seek(self, *_args, **_kwargs):
-        """Seek within the test helper."""
+        """Move the in-memory stream to the requested offset."""
         raise OSError("non-seekable")
 
     def tell(self, *_args, **_kwargs):
-        """Return the test helper position."""
+        """Return the current in-memory stream offset."""
         raise OSError("non-seekable")
 
 
@@ -127,27 +132,15 @@ def test_skip_row_does_not_partially_append_columns() -> None:
     assert t.column("c").to_pylist() == [3, 300]
 
 
-def test_result_does_not_expose_bad_rows() -> None:
-    """Verify removed bad row queue is not exposed on Result."""
-    schema = pa.schema([("a", pa.int64()), ("b", pa.int64()), ("c", pa.int64())])
+def test_input_extension_catalog_uses_canonical_suffixes() -> None:
+    """Each file format exposes only its canonical extension."""
+    assert input_format_extensions("parquet") == ("parquet",)
+    assert input_format_extensions("jsonl") == ("jsonl",)
+    assert FORMAT_SUFFIXES["jsonl"] == (".jsonl",)
 
-    rows = [
-        {"a": 1, "b": 2, "c": 3},
-        {"a": 10, "b": 20, "c": "BAD"},
-        {"a": 100, "b": 200, "c": 300},
-    ]
 
-    res = _read_python_with_contract(
-        rows,
-        schema_contract=schema,
-        schema_mode="strict",
-        on_error="skip_row",
-    )
+def test_prepared_input_contracts_are_available_from_the_input_layer() -> None:
+    """Neutral prepared-input value objects are owned below API orchestration."""
+    from schema_sanitizer.input_impl import prepared
 
-    t = res.clean_data
-    assert t is not None
-    assert t.schema == schema
-    # The bad row must be skipped.
-    assert t.num_rows == 2
-    assert res.stats["skipped_rows"] == 1
-    assert not hasattr(res, "bad_rows")
+    assert prepared.PreparedPublicInput is not None

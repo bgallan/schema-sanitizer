@@ -1,4 +1,6 @@
-// Implements scalar and nested ValueView accessors and callbacks.
+// Implements scalar and nested ValueView accessors and traversal callbacks.
+// Each accessor validates the active logical kind while object and array walks
+// preserve the non-owning lifetime and error contract of the underlying value.
 
 #include "sanitize/core/value_view.hh"
 

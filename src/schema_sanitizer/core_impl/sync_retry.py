@@ -1,4 +1,8 @@
-"""Generic bounded synchronous retry helpers."""
+"""Generic bounded synchronous retry helpers.
+
+It combines cancellation checks, bounded exponential backoff, and optional provider-throttle
+outcomes without replaying a successful operation.
+"""
 
 from __future__ import annotations
 

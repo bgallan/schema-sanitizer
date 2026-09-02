@@ -1,4 +1,6 @@
-// Implements cached root-field filtering for JSON text frontends.
+// Implements cached root-field filtering for JSON text frontends. The pipeline
+// preserves source offsets and ownership while enforcing plan order and memory
+// bounds.
 
 #include "frontends/json/root_field_filter.hh"
 
@@ -14,6 +16,7 @@
 
 namespace sanitize::internal {
 
+/// Initializes an empty root-field cache ready for the first compiled plan.
 JsonRootFieldFilter::JsonRootFieldFilter() { rebuild_cache(); }
 
 void JsonRootFieldFilter::set_memory_pool(std::shared_ptr<void> pool) noexcept {

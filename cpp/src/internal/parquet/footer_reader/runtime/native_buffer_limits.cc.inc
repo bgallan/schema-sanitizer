@@ -1,15 +1,25 @@
+// Estimates retained column, row-group, and flat-window buffers and enforces
+// the native reader cap. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
+
+/// Returns the configured native-reader buffer cap after applying its hard
+/// bounds.
 std::int64_t
 configured_native_reader_max_buffer_bytes(std::int64_t memory_limit_bytes) {
   return sanitize::internal::memory_budget_from_limit(memory_limit_bytes)
       .parquet_reader_buffer_bytes;
 }
 
+/// Returns the configured native-reader batch row cap after applying its hard
+/// bounds.
 std::int64_t
 configured_native_reader_max_batch_rows(std::int64_t memory_limit_bytes) {
   return sanitize::internal::memory_budget_from_limit(memory_limit_bytes)
       .parquet_reader_rows;
 }
 
+/// Adds 64-bit integer checked with checked offsets, counts, and
+/// retained-capacity accounting.
 sanitize::Status add_i64_checked(std::int64_t *target, std::int64_t value,
                                  std::string_view what) {
   if (!target || value < 0 ||
@@ -21,6 +31,8 @@ sanitize::Status add_i64_checked(std::int64_t *target, std::int64_t value,
   return {};
 }
 
+/// Totals the Arrow offsets, validity, and value bytes retained for one decoded
+/// column.
 sanitize::Result<std::int64_t>
 native_reader_column_buffer_bytes(const ColumnChunkInfo &column,
                                   std::int64_t row_count) {
@@ -67,6 +79,7 @@ native_reader_column_buffer_bytes(const ColumnChunkInfo &column,
   return total;
 }
 
+/// Totals retained Arrow buffer bytes across decoded columns in one row group.
 sanitize::Result<std::int64_t>
 native_reader_row_group_buffer_bytes(const RowGroupInfo &row_group) {
   if (!row_group.has_num_rows) {
@@ -87,6 +100,8 @@ native_reader_row_group_buffer_bytes(const RowGroupInfo &row_group) {
   return total;
 }
 
+/// Scales full-column value bytes to a row window using overflow-safe
+/// arithmetic.
 sanitize::Result<std::int64_t>
 scale_window_value_bytes(std::int64_t full_bytes, std::int64_t selected_values,
                          std::int64_t total_values) {
@@ -113,6 +128,7 @@ scale_window_value_bytes(std::int64_t full_bytes, std::int64_t selected_values,
   return estimated;
 }
 
+/// Estimates retained buffers for one column restricted to a flat row window.
 sanitize::Result<std::int64_t> native_reader_flat_column_window_buffer_bytes(
     const ColumnChunkInfo &column, std::int64_t row_group_rows,
     std::int64_t first_row, std::int64_t row_count) {
@@ -205,6 +221,7 @@ sanitize::Result<std::int64_t> native_reader_flat_column_window_buffer_bytes(
   return total;
 }
 
+/// Totals the per-column buffer estimates for a flat row-group window.
 sanitize::Result<std::int64_t>
 native_reader_flat_window_buffer_bytes(const RowGroupInfo &row_group,
                                        std::int64_t first_row,

@@ -14,6 +14,27 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Require a supported build-platform tuple
+      env:
+        BUILD_ARCH: ${{ inputs.arch }}
+        PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+        PLATFORM_NAME: ${{ inputs.platform-name }}
+        RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        RUNNER_SYSTEM: ${{ runner.os }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        platform_tuple="${RUNNER_SYSTEM}:${RUNNER_ARCHITECTURE}:${PLATFORM_NAME}:${PLATFORM_ARTIFACT}:${BUILD_ARCH}"
+        case "${platform_tuple}" in
+          Linux:X64:linux-x86_64:linux:x86_64 | \
+          Windows:X64:windows-amd64:windows:AMD64 | \
+          macOS:X64:macos-x86_64:macos-x86_64:x86_64 | \
+          macOS:ARM64:macos-arm64:macos-arm64:arm64) ;;
+          *)
+            echo "Unsupported build-platform tuple: ${platform_tuple}" >&2
+            exit 2
+            ;;
+        esac
     - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
         # Use one exact patch on all four platforms. Test shards use it too.
@@ -21,45 +42,292 @@ runs:
         cache: pip
         cache-dependency-path: |-
           pyproject.toml
-          .github/actions/build-platform-wheel/action.yml
+          meta/ci/requirements/build-tools.txt
+          meta/ci/requirements/python-artifact-sha256.lock
     - name: Install wheel tooling
+      env:
+        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
-      run: >-
-        python -m pip install pip==26.1.2
-        abi3audit==0.0.26 cibuildwheel==4.2.0 pytest==9.1.1
+      run: |-
+        set -euo pipefail
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --packages abi3audit cibuildwheel pytest
+    - name: Prepare the authenticated offline cibuildwheel package source
+      env:
+        PLATFORM_ARTIFACT: ${{ inputs.artifact }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- .work/python-artifacts
+        packages=(
+          abi3audit auditwheel build cibuildwheel cmake ninja packaging pip
+          pyarrow pytest scikit-build-core setuptools virtualenv wheel
+        )
+        case "${PLATFORM_ARTIFACT}" in
+          linux) ;;
+          macos-arm64 | macos-x86_64) packages+=(delocate) ;;
+          windows) packages+=(delvewheel) ;;
+          *)
+            echo "Unsupported package-source platform: ${PLATFORM_ARTIFACT}" >&2
+            exit 2
+            ;;
+        esac
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --download .work/python-artifacts \
+          --packages "${packages[@]}"
+        python - <<'PY'
+        import hashlib
+        import json
+        from pathlib import Path
+        root = Path(".work/python-artifacts")
+        if root.is_symlink() or not root.is_dir():
+            raise SystemExit("authenticated package source directory is missing or unsafe")
+        entries = sorted(root.iterdir())
+        if not entries or any(entry.is_symlink() or not entry.is_file() for entry in entries):
+            raise SystemExit("authenticated package source contains a missing or unsafe entry")
+        unexpected = [entry.name for entry in entries if entry.suffix != ".whl"]
+        if unexpected:
+            raise SystemExit(f"authenticated package source contains non-wheels: {unexpected}")
+        certificate = Path(".work/python-artifacts-certificate.json")
+        if certificate.is_symlink() or (certificate.exists() and not certificate.is_file()):
+            raise SystemExit("authenticated package source certificate path is unsafe")
+        inventory = {
+            entry.name: hashlib.sha256(entry.read_bytes()).hexdigest() for entry in entries
+        }
+        certificate.write_text(
+            json.dumps(
+                {
+                    "files": inventory,
+                    "format": "schema-sanitizer-python-artifact-source-v1",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"authenticated offline package source: {len(entries)} wheels")
+        PY
     - name: Assert the build environment has no PyArrow
       shell: bash
       run: >-
         python -c
         "import importlib.util,sys;
         sys.exit(0 if importlib.util.find_spec('pyarrow') is None else 1)"
+    - name: Reset the owned Windows CPython package-cache path
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |-
+        set -euo pipefail
+        python - <<'PY'
+        import shutil
+        from pathlib import Path
+        workspace = Path.cwd().resolve()
+        cache_root = workspace / ".work" / "cache" / "nuget"
+        for directory in (cache_root.parents[1], cache_root.parent, cache_root):
+            if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+                raise SystemExit(f"CPython package-cache parent is unsafe: {directory}")
+            directory.mkdir(parents=True, exist_ok=True)
+        target = cache_root / "python.3.11.9.nupkg"
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.exists():
+            shutil.rmtree(target)
+        PY
+    - name: Restore the verified Windows CPython package
+      if: runner.os == 'Windows'
+      continue-on-error: true
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: .work/cache/nuget/python.3.11.9.nupkg
+        key: >-
+          nuget-cpython-v1-${{ runner.os }}-${{ runner.arch
+          }}-python-3.11.9-cibuildwheel-4.2.0-9283876d58c017e0e846f95b490da3bca0fc0a6ee1134b2870677cfb7eec3c67
+    - name: Install the verified Windows CPython package
+      if: runner.os == 'Windows'
+      shell: bash
+      env:
+        PYTHON_NUPKG_SHA256: 9283876d58c017e0e846f95b490da3bca0fc0a6ee1134b2870677cfb7eec3c67  # pragma: allowlist secret
+      run: |-
+        set -euo pipefail
+        windows_python=$(
+          python meta/ci/native/install_windows_cpython.py "${PYTHON_NUPKG_SHA256}"
+        )
+        "${windows_python}" -I - <<'PY'
+        import platform
+        import struct
+        import sys
+        if sys.version_info[:3] != (3, 11, 9):
+            raise SystemExit(f"unexpected Windows Python version: {sys.version_info[:3]}")
+        if struct.calcsize("P") != 8:
+            raise SystemExit("the Windows wheel build requires a 64-bit interpreter")
+        if platform.machine().upper() != "AMD64":
+            raise SystemExit(f"unexpected Windows Python architecture: {platform.machine()}")
+        PY
     - name: Prevent Arrow C++ headers
       if: runner.os == 'Linux'
       shell: bash
       run: meta/ci/native/check_no_arrow_cpp.sh
-    - name: Build and test the CPython 3.11 ABI3 wheel
+    - name: Select the macOS release toolchain
+      if: runner.os == 'macOS'
       env:
-        CIBW_ARCH: ${{ inputs.arch }}
-        # cibuildwheel Linux builds run in a container; explicitly propagate
-        # the deterministic timestamp and bounded/non-interactive pip policy.
-        CIBW_ENVIRONMENT_PASS_LINUX: >-
-          SOURCE_DATE_EPOCH PIP_DISABLE_PIP_VERSION_CHECK PIP_NO_INPUT
-          PIP_RETRIES PIP_TIMEOUT
-      shell: bash
-      run: |-
-        set -euo pipefail
-        SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
-        [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
-        export SOURCE_DATE_EPOCH
-        python -m cibuildwheel --output-dir wheelhouse --archs "${CIBW_ARCH}"
-    - name: Audit the CPython stable ABI
-      shell: bash
-      run: python -m abi3audit --strict --report wheelhouse/*.whl
-    - name: Install the built wheel without adapters
+        DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       shell: bash
       run: |
         set -euo pipefail
-        python -m pip install wheelhouse/*.whl
+        xcode_version=$(xcodebuild -version)
+        [[ "${xcode_version}" == $'Xcode 16.4\nBuild version 16F6' ]]
+        [[ "$(xcrun --sdk macosx15.5 --show-sdk-version)" == '15.5' ]]
+        clang_version=$(xcrun --sdk macosx15.5 clang --version)
+        [[ "${clang_version%%$'\n'*}" == \
+          'Apple clang version 17.0.0 (clang-1700.0.13.5)' ]]
+    - name: Select the reviewed Windows release toolchain
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        vs_root='C:/Program Files/Microsoft Visual Studio/2022/Enterprise'
+        tools_version='14.44.35207'
+        redist_version='14.44.35112'
+        compiler="${vs_root}/VC/Tools/MSVC/${tools_version}/bin/Hostx64/x64/cl.exe"
+        sdk_root='C:/Program Files (x86)/Windows Kits/10/Lib/10.0.26100.0'
+        [[ -f "${compiler}" && -d "${sdk_root}" ]] || {
+          echo 'The reviewed MSVC 14.44.35207 / Windows SDK 10.0.26100.0 is unavailable' >&2
+          exit 2
+        }
+        redist_directory="${vs_root}/VC/Redist/MSVC/${redist_version}/x64/Microsoft.VC143.CRT"
+        for dll in \
+          msvcp140.dll msvcp140_1.dll msvcp140_atomic_wait.dll \
+          vcruntime140.dll vcruntime140_1.dll; do
+          [[ -f "${redist_directory}/${dll}" ]] || {
+            echo "Required v143 redistributable DLL is missing: ${redist_directory}/${dll}" >&2
+            exit 2
+          }
+        done
+        rm -rf -- .work/msvc-redist
+        mkdir -p .work/msvc-redist
+        cp -- "${redist_directory}"/*.dll .work/msvc-redist/
+    - name: Build and test the CPython 3.11 ABI3 wheel
+      env:
+        CIBW_ARCH: ${{ inputs.arch }}
+        CIBW_CONFIG_SETTINGS: >-
+          build.verbose=false
+          cmake.define.SCHEMA_SANITIZER_ENABLE_PCH=ON
+        # macOS and Windows inherit these host-absolute constraints without
+        # overriding platform-specific cibuildwheel configuration. Linux uses
+        # cibuildwheel's copied-project path inside its OCI container.
+        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_FIND_LINKS: ${{ github.workspace }}/.work/python-artifacts
+        PIP_NO_INDEX: '1'
+        CIBW_ENVIRONMENT_LINUX: >-
+          PIP_BUILD_CONSTRAINT=/project/meta/ci/requirements/build-tools.txt
+          PIP_CONSTRAINT=/project/meta/ci/requirements/build-tools.txt
+          PIP_FIND_LINKS=/project/.work/python-artifacts
+          PIP_NO_INDEX=1
+        # cibuildwheel Linux builds run in a container; explicitly propagate
+        # the deterministic timestamp and non-interactive pip policy.
+        CIBW_ENVIRONMENT_PASS_LINUX: >-
+          SOURCE_DATE_EPOCH PIP_DISABLE_PIP_VERSION_CHECK PIP_NO_INPUT
+          PIP_RETRIES PIP_TIMEOUT PYTHONHASHSEED PYTHONUTF8 TZ
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- wheelhouse .work/build .work/delvewheel-extract
+        mkdir -p .work
+        SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+        [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
+        export SOURCE_DATE_EPOCH
+        # Ninja receives no ambient cap; the Windows config reintroduces one lane.
+        unset CMAKE_BUILD_PARALLEL_LEVEL
+        python -m cibuildwheel --output-dir wheelhouse --archs "${CIBW_ARCH}" \
+          2>&1 | tee .work/cibuildwheel.log
+        if grep -Fq -- 'Exception ignored in:' .work/cibuildwheel.log; then
+          echo 'cibuildwheel reported an unraisable exception' >&2
+          exit 2
+        fi
+        if grep -Eq -- 'Looking in indexes:|Collecting .*https?://' \
+          .work/cibuildwheel.log; then
+          echo 'cibuildwheel attempted a registry download outside the authenticated package source' >&2
+          exit 2
+        fi
+        if grep -Fq -- 'win-x86-commandline/latest/nuget.exe' \
+          .work/cibuildwheel.log; then
+          echo 'cibuildwheel attempted a mutable NuGet download' >&2
+          exit 2
+        fi
+        if grep -Fq -- 'nuget.exe install python' .work/cibuildwheel.log || \
+          grep -Fq -- '-FallbackSource' .work/cibuildwheel.log; then
+          echo 'cibuildwheel ignored the verified local CPython installation' >&2
+          exit 2
+        fi
+        python - <<'PY'
+        import hashlib
+        import json
+        from pathlib import Path
+        root = Path(".work/python-artifacts")
+        certificate = Path(".work/python-artifacts-certificate.json")
+        if root.is_symlink() or not root.is_dir():
+            raise SystemExit("authenticated package source directory was replaced")
+        if certificate.is_symlink() or not certificate.is_file():
+            raise SystemExit("authenticated package source certificate is missing or unsafe")
+        payload = json.loads(certificate.read_text(encoding="utf-8"))
+        if payload.get("format") != "schema-sanitizer-python-artifact-source-v1":
+            raise SystemExit("authenticated package source certificate format is invalid")
+        entries = sorted(root.iterdir())
+        if any(entry.is_symlink() or not entry.is_file() for entry in entries):
+            raise SystemExit("authenticated package source was replaced during the build")
+        observed = {
+            entry.name: hashlib.sha256(entry.read_bytes()).hexdigest() for entry in entries
+        }
+        if observed != payload.get("files"):
+            raise SystemExit("authenticated package source changed during the build")
+        print(f"authenticated package source remained exact: {len(entries)} wheels")
+        PY
+    - name: Certify the Windows release toolchain
+      if: runner.os == 'Windows'
+      shell: bash
+      run: |
+        set -euo pipefail
+        python meta/ci/native/certify_windows_toolchain.py .work/build
+    - name: Audit the CPython stable ABI
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m abi3audit --strict --report wheelhouse/*.whl
+        python meta/ci/release/check_distribution_contents.py wheelhouse/*.whl
+    - name: Certify the platform-native wheel payload
+      env:
+        PLATFORM_NAME: ${{ inputs.platform-name }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        shopt -s nullglob
+        wheels=(wheelhouse/*.whl)
+        if [[ "${#wheels[@]}" -ne 1 ]]; then
+          echo "Expected exactly one platform wheel, found ${#wheels[@]}" >&2
+          exit 2
+        fi
+        certificate="wheelhouse/platform-wheel-certificate-${PLATFORM_NAME}.json"
+        python meta/ci/native/certify_platform_wheel.py create \
+          --wheel "${wheels[0]}" \
+          --certificate "${certificate}" \
+          --platform "${PLATFORM_NAME}" \
+          --github-sha "${GITHUB_SHA}" \
+          --github-run-id "${GITHUB_RUN_ID}" \
+          --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+        cat "${certificate}"
+    - name: Install the built wheel without adapters
+      env:
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+      shell: bash
+      run: |
+        set -euo pipefail
+        python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
         python - <<'PY'
         from pathlib import Path
         import schema_sanitizer as package
@@ -71,9 +339,7 @@ runs:
         print(package.__version__, extension)
         PY
         pytest --collect-only -q \
-          tests/parquet/test_parquet_contract_native_and_pipeline_status.py \
-          tests/parquet/test_parquet_contract_certification_and_batch_size.py \
-          tests/parquet/test_parquet_contract_filters_and_runtime_readiness.py
+          tests/parquet/test_parquet_contract_cases.py
     - name: Verify the extension does not link Arrow C++
       if: runner.os != 'Windows'
       shell: bash
@@ -90,70 +356,98 @@ runs:
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
         python-version: 3.12.11
-        cache: pip
-        cache-dependency-path: |-
-          pyproject.toml
-          .github/actions/build-platform-wheel/action.yml
     - name: Exercise the ABI3 wheel on CPython 3.12
       if: inputs.artifact == 'linux'
+      env:
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: |
-        python -m pip install pip==26.1.2
-        python -m pip install pyarrow==25.0.1 wheelhouse/*.whl
+        set -euo pipefail
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt --packages pyarrow
+        python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
         python -I meta/ci/release/downstream_smoke.py
     - name: Set up CPython 3.13 for stable-ABI functional coverage
       if: inputs.artifact == 'linux'
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
         python-version: 3.13.15
-        cache: pip
-        cache-dependency-path: |-
-          pyproject.toml
-          .github/actions/build-platform-wheel/action.yml
     - name: Exercise the ABI3 wheel on CPython 3.13
       if: inputs.artifact == 'linux'
+      env:
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: |
-        python -m pip install pip==26.1.2
-        python -m pip install pyarrow==25.0.1 wheelhouse/*.whl
+        set -euo pipefail
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt --packages pyarrow
+        python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
         python -I meta/ci/release/downstream_smoke.py
     - name: Set up the newest supported Python
       uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
       with:
-        python-version: 3.14.3
-        cache: pip
-        cache-dependency-path: |-
-          pyproject.toml
-          .github/actions/build-platform-wheel/action.yml
+        python-version: 3.14.7
     - name: Verify the ABI3 wheel on Python 3.14
+      env:
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: |
         set -euo pipefail
-        python -m pip install pip==26.1.2
-        python -m pip install wheelhouse/*.whl
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt --packages pyarrow
+        python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
         python -c "import sys, schema_sanitizer as s, schema_sanitizer._core_abi3 as c; print(sys.version.split()[0], s.__version__, c.__file__)"
+        python -I meta/ci/release/abi_public_smoke.py
     - name: Exercise the ABI3 wheel on CPython 3.14
       if: inputs.artifact == 'linux'
+      env:
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: |
-        python -m pip install pyarrow==25.0.1
+        set -euo pipefail
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt --packages pyarrow
         python -I meta/ci/release/downstream_smoke.py
+    - name: Set up the next CPython release candidate
+      if: inputs.artifact == 'linux'
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      with:
+        python-version: 3.15.0-rc.1
+    - name: Probe the ABI3 wheel on CPython 3.15 RC
+      if: inputs.artifact == 'linux'
+      env:
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+      shell: bash
+      run: |-
+        set -euo pipefail
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
+        python -I -c \
+          "import sys, schema_sanitizer as s, schema_sanitizer._core_abi3 as c; options=s.SanitizeOptions(); print(sys.version.split()[0], s.__version__, type(options).__name__, c.__file__)"
     - name: Upload the certified platform wheel
       id: upload-certified-platform-wheel
       continue-on-error: true
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
-        name: dist-wheels-${{ inputs.platform-name }}
-        path: wheelhouse/*.whl
+        name: candidate-wheels-${{ inputs.platform-name }}
+        path: |-
+          wheelhouse/*.whl
+          wheelhouse/platform-wheel-certificate-*.json
         if-no-files-found: error
         retention-days: 7
         compression-level: 0
+        overwrite: true
     - name: Retry certified platform wheel upload
       if: ${{ always() && steps.upload-certified-platform-wheel.outcome == 'failure' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
-        name: dist-wheels-${{ inputs.platform-name }}
-        path: wheelhouse/*.whl
+        name: candidate-wheels-${{ inputs.platform-name }}
+        path: |-
+          wheelhouse/*.whl
+          wheelhouse/platform-wheel-certificate-*.json
         if-no-files-found: error
         retention-days: 7
         compression-level: 0

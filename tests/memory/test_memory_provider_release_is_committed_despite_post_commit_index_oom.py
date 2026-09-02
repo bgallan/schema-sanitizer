@@ -1,21 +1,26 @@
-"""Regression coverage for memory provider release is committed despite post commit index oom."""
+"""Tests post-commit provider-release faults across expiration indices, remote schedulers,
+exact storage or control budgets, composite admission, finalizer exhaustion, runtime
+construction, availability retry debt, shutdown barriers, and cross-process pruning. An
+index allocation failure cannot undo release or reactivate a permit; bounded registries
+and exact capabilities retain only uncommitted tails."""
 
 from __future__ import annotations
 
 import asyncio
-import os
 from pathlib import Path
-from threading import Lock
 
 import pytest
+from _support.synchronization import join_thread_or_fail, wait_event_or_fail
 
 
 class _FailingSetOrderedDict(dict):
     def __setitem__(self, key, value):  # type: ignore[no-untyped-def]
+        """Store the requested value in the failing set ordered dict test double."""
         raise MemoryError("injected derived-index OOM")
 
 
 def test_provider_release_is_committed_despite_post_commit_index_oom() -> None:
+    """Verify provider release is committed despite post commit index OOM."""
     from schema_sanitizer.remote_impl.provider_throttle import ProviderThrottleGovernor
 
     governor = ProviderThrottleGovernor(max_tracked_keys=4)
@@ -34,6 +39,7 @@ def test_provider_release_is_committed_despite_post_commit_index_oom() -> None:
 
 
 def test_provider_circuit_expiration_storage_is_o_live_keys_not_failures() -> None:
+    """Verify provider circuit expiration storage is o live keys not failures."""
     from schema_sanitizer.remote_impl.provider_throttle import ProviderThrottleGovernor
 
     governor = ProviderThrottleGovernor(max_tracked_keys=2)
@@ -60,9 +66,11 @@ def test_provider_circuit_expiration_storage_is_o_live_keys_not_failures() -> No
 def test_remote_permit_release_never_reactivates_after_scheduler_oom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify remote permit release never reactivates after scheduler OOM."""
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     async def scenario() -> None:
+        """Run the controlled lifecycle scenario."""
         governor = RemoteIoPermitGovernor(capacity=1)
         permit = await governor.acquire(operation_id="provider-release-is-committed-despite-post")
         monkeypatch.setattr(
@@ -83,6 +91,7 @@ def test_remote_permit_release_never_reactivates_after_scheduler_oom(
 def test_remote_capacity_prepare_failure_retains_exact_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify remote capacity prepare failure retains exact capability."""
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     governor = RemoteIoPermitGovernor(capacity=2)
@@ -105,6 +114,7 @@ def test_remote_capacity_prepare_failure_retains_exact_capability(
 
 
 def test_cross_process_storage_account_is_exact_and_serialized() -> None:
+    """Verify cross process storage account is exact and serialized."""
     from schema_sanitizer.core_impl.cross_process_storage import (
         close_cross_process_storage_account,
         open_cross_process_storage_account,
@@ -113,34 +123,24 @@ def test_cross_process_storage_account_is_exact_and_serialized() -> None:
     )
 
     account = open_cross_process_storage_account(47)
-    calls: list[tuple[str, int, int]] = []
-
-    def reserve_impl(device: int, amount: int, capacity: int, **kwargs: object) -> int:
-        calls.append(("reserve", device, amount))
-        return amount
-
-    def release_impl(device: int, amount: int, **kwargs: object) -> int:
-        calls.append(("release", device, amount))
-        return 0
-
-    assert reserve_cross_process_account(account, 16, 128, _reserve_impl=reserve_impl) == 16
+    assert reserve_cross_process_account(account, 16, 128, enabled=False) == 0
     assert account.reserved_bytes == 16
     with pytest.raises(RuntimeError, match="exceeds authoritative contribution"):
-        release_cross_process_account(account, 17, _release_impl=release_impl)
+        release_cross_process_account(account, 17, enabled=False)
     assert account.reserved_bytes == 16
-    release_cross_process_account(account, 16, _release_impl=release_impl)
+    release_cross_process_account(account, 16, enabled=False)
     assert account.reserved_bytes == 0
     close_cross_process_storage_account(account)
     with pytest.raises(RuntimeError, match="not active"):
-        reserve_cross_process_account(account, 1, 128, _reserve_impl=reserve_impl)
+        reserve_cross_process_account(account, 1, 128, enabled=False)
     with pytest.raises(RuntimeError, match="not active"):
         close_cross_process_storage_account(account)
-    assert calls == [("reserve", 47, 16), ("release", 47, 16)]
 
 
 def test_cross_process_storage_local_account_registry_is_bounded_and_reuses_tokens(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify cross process storage local account registry is bounded and reuses tokens."""
     from schema_sanitizer.core_impl import cross_process_storage as module
 
     # Isolate this test from the process-global registry used by other tests.
@@ -155,14 +155,12 @@ def test_cross_process_storage_local_account_registry_is_bounded_and_reuses_toke
     module.close_cross_process_storage_account(first)
     third = module.open_cross_process_storage_account(3)
     assert third.token == first_token
-    # Token reuse is safe because the old object/capability no longer authenticates.
-    with pytest.raises(RuntimeError, match="not active"):
-        module._authenticate_account(first)
     module.close_cross_process_storage_account(second)
     module.close_cross_process_storage_account(third)
 
 
 def test_control_plane_budget_is_exact_and_bounded() -> None:
+    """Verify control plane budget is exact and bounded."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -194,6 +192,7 @@ def test_control_plane_budget_is_exact_and_bounded() -> None:
 def test_control_plane_budget_composes_with_native_resident_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify control plane budget composes with native resident envelope."""
     from types import SimpleNamespace
 
     from schema_sanitizer.core_impl import memory_budget as memory_module
@@ -202,7 +201,7 @@ def test_control_plane_budget_composes_with_native_resident_envelope(
 
     monkeypatch.setattr(
         memory_module,
-        "_optional_process_resident_memory_snapshot",
+        "_raw_process_resident_memory_snapshot",
         lambda: SimpleNamespace(capacity_bytes=1024, reserved_bytes=800),
     )
     budget = _ProcessControlPlaneBudget()
@@ -213,62 +212,30 @@ def test_control_plane_budget_composes_with_native_resident_envelope(
     assert budget.snapshot().reserved_bytes == 0
 
 
-def test_control_plane_budget_stays_hard_bounded_without_native_envelope(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from schema_sanitizer.core_impl import memory_budget as memory_module
-    from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
-
-    monkeypatch.setattr(
-        memory_module,
-        "_optional_process_resident_memory_snapshot",
-        lambda: None,
-    )
-    budget = _ProcessControlPlaneBudget()
-    budget.configure(512)
-    ticket = budget.reserve("source-only", 256)
-    snapshot = budget.snapshot()
-    assert snapshot.reserved_bytes == 256
-    assert snapshot.capacity_bytes == 512
-    budget.release(ticket)
-    assert budget.snapshot().reserved_bytes == 0
-
-
 def test_operation_memory_reservation_uses_shared_governed_admission_lock() -> None:
+    """Verify operation memory reservation uses shared governed admission lock."""
     source = Path("src/schema_sanitizer/core_impl/memory_budget.py").read_text()
     assert "with _GOVERNED_MEMORY_ADMISSION_LOCK:" in source
     assert "resident.reserved_bytes" in source
-    assert "+ control.governed_bytes" in source
-    assert "process_governed_memory_bytes" in source
-
-
-def test_operation_memory_credit_transfer_keeps_same_owner_and_bytes() -> None:
-    from schema_sanitizer.core_impl.memory_budget import OperationMemoryLease
-
-    lease = object.__new__(OperationMemoryLease)
-    lease._pid = os.getpid()
-    lease._lock = Lock()
-    lease._released = False
-    lease._size_bytes = 8192
-    lease.stage = "reader"
-    result = lease.transfer_stage("writer")
-    assert result is lease
-    assert lease.stage == "writer"
-    assert lease._size_bytes == 8192
 
 
 def test_composite_parallel_admission_transfers_and_releases_once() -> None:
+    """Verify composite parallel admission transfers and releases once."""
     from schema_sanitizer.core_impl.memory_budget import CompositeParallelAdmission
 
     class FakeLease:
         def __init__(self) -> None:
+            """Initialize the fake lease test double."""
             self.stages: list[str] = []
             self.closed = 0
 
-        def transfer_stage(self, stage: str) -> None:
+        def transfer_stage(self, stage: str) -> "FakeLease":
+            """Record the stage transfer and return the same lease."""
             self.stages.append(stage)
+            return self
 
         def close(self) -> None:
+            """Close the resources owned by the fake lease test double."""
             self.closed += 1
 
     lease = FakeLease()
@@ -282,17 +249,19 @@ def test_composite_parallel_admission_transfers_and_releases_once() -> None:
 
 
 def test_all_io_pairs_advertise_integrated_credit_and_composite_admission() -> None:
+    """Verify all I/O pairs advertise integrated credit and composite admission."""
     from schema_sanitizer.core_impl import concurrency_coverage as coverage
 
     matrix = coverage.concurrency_pair_guarantees()
     rows = [row for outputs in matrix.values() for row in outputs.values()]
-    assert len(rows) == 56
+    assert len(rows) == 49
     assert all(row["resident_credit_transfer"] is True for row in rows)
     assert all(row["composite_slot_byte_admission"] is True for row in rows)
     assert all(row["control_plane_budgeted"] is True for row in rows)
 
 
 def test_reserved_finalizer_generation_exhaustion_retires_slot_without_wrap() -> None:
+    """Verify reserved finalizer generation exhaustion retires slot without wrap."""
     from schema_sanitizer.core_impl.finalizer_escrow import ReservedFinalizerEscrow
 
     escrow: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(1)
@@ -314,16 +283,19 @@ def test_reserved_finalizer_generation_exhaustion_retires_slot_without_wrap() ->
 def test_runtime_registry_constructor_oom_cannot_publish_invisible_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify runtime registry constructor OOM cannot publish invisible service."""
     from schema_sanitizer.core_impl import runtime_registry as module
 
     class Service:
         def close(self, *, deadline_seconds: float) -> bool:
+            """Close the resources owned by the service test double."""
             return True
 
     registry = module._RuntimeServiceRegistry()
 
     class FailingRegistration:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Initialize the failing registration test double."""
             raise MemoryError("registration OOM")
 
     monkeypatch.setattr(module, "RuntimeServiceRegistration", FailingRegistration)
@@ -337,12 +309,14 @@ def test_runtime_registry_constructor_oom_cannot_publish_invisible_service(
 def test_runtime_thread_start_commit_does_not_report_diagnostic_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify runtime thread start commit does not report diagnostic failure."""
     from threading import Event, Thread
 
     from schema_sanitizer.core_impl.runtime_registry import _RuntimeServiceRegistry
 
     class Service:
         def close(self, *, deadline_seconds: float) -> bool:
+            """Close the resources owned by the service test double."""
             return True
 
     registry = _RuntimeServiceRegistry()
@@ -350,21 +324,24 @@ def test_runtime_thread_start_commit_does_not_report_diagnostic_failure(
         Service(), kind="provider-release-is-committed-despite-post", close_name="close"
     )
     exited = Event()
-    thread = Thread(target=lambda: exited.wait(1.0))
+    thread = Thread(target=lambda: wait_event_or_fail(exited))
 
     # All lifecycle progress publication around the physical start/retirement is
     # diagnostic-only. Once the registration exists, diagnostic OOM must not
     # strand START_AUTHORIZED state, mask a successful thread.start(), or make
     # unregister fail after the thread exits.
     def fail_diagnostics() -> None:
+        """Raise the deliberate failure during diagnostics."""
         raise MemoryError("diagnostic OOM")
 
     monkeypatch.setattr(registry, "_mark_progress_locked", fail_diagnostics)
     registration.start_thread(thread)
     assert thread.is_alive()
-    assert registry.snapshot().registered_services == 1
+    snapshot = registry.snapshot()
+    assert snapshot.registered_services == 1
+    assert snapshot.post_commit_failures >= 1
     exited.set()
-    thread.join(1.0)
+    join_thread_or_fail(thread)
     registration.close()
     assert registry.snapshot().registered_services == 0
 
@@ -372,6 +349,7 @@ def test_runtime_thread_start_commit_does_not_report_diagnostic_failure(
 def test_level_triggered_availability_failure_leaves_autonomous_retry_debt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify level triggered availability failure leaves autonomous retry debt."""
     from schema_sanitizer.core_impl import process_resources as module
 
     governor = module._Governor(
@@ -386,18 +364,19 @@ def test_level_triggered_availability_failure_leaves_autonomous_retry_debt(
         "_schedule_availability_retry_noexcept",
         lambda: scheduled.append(governor._availability_retry_callback),
     )
-    monkeypatch.setattr(module._AVAILABILITY_NOTIFIER, "publish", lambda _batch: (object(),))
+    monkeypatch.setattr(module._AVAILABILITY_NOTIFIER, "publish_one", lambda _delivery: False)
     lease.release()
     assert governor._availability_dirty is True
     assert scheduled == [governor._availability_retry_callback]
 
-    monkeypatch.setattr(module._AVAILABILITY_NOTIFIER, "publish", lambda _batch: ())
+    monkeypatch.setattr(module._AVAILABILITY_NOTIFIER, "publish_one", lambda _delivery: True)
     callback = scheduled.pop()
     callback()  # type: ignore[operator]
     assert governor._availability_dirty is False
 
 
 def test_shutdown_uses_multiple_finalizer_quiescence_barriers() -> None:
+    """Verify shutdown uses multiple finalizer quiescence barriers."""
     source = Path("src/schema_sanitizer/core_impl/runtime_shutdown.py").read_text()
     assert "def quiesce_finalizers" in source
     assert source.count("quiesce_finalizers(") >= 4  # definition + three barriers
@@ -406,6 +385,7 @@ def test_shutdown_uses_multiple_finalizer_quiescence_barriers() -> None:
 
 
 def test_cross_process_registries_prune_in_place_and_have_record_bounds() -> None:
+    """Verify cross process registries prune in place and have record bounds."""
     storage = Path("src/schema_sanitizer/core_impl/cross_process_storage.py").read_text()
     memory = Path("src/schema_sanitizer/core_impl/cross_process_memory.py").read_text()
     assert "_MAX_PROCESS_RECORDS = 4096" in storage

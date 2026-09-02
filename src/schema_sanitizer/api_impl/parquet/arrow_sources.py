@@ -1,4 +1,8 @@
-"""Direct Parquet Arrow-source planning and lifecycle."""
+"""Direct Parquet Arrow-source planning and lifecycle.
+
+It wraps Parquet paths and factories as Arrow sources, retains their readers and
+keepalives, and records whether native or fallback routing was used.
+"""
 
 from __future__ import annotations
 
@@ -108,7 +112,8 @@ def parquet_arrow_stream_factory_or_none(
             return None
         if not parquet_memory_limit_allows_direct_ingest(memory_limit_bytes):
             _set_route(set_route, "memory_limit")
-            assert memory_limit_bytes is not None
+            if memory_limit_bytes is None:
+                raise AssertionError("rejected Parquet memory limit cannot be absent")
             raise direct_parquet_memory_limit_error(memory_limit_bytes)
         factory = open_parquet_record_batch_stream_factory(
             data,
@@ -121,7 +126,8 @@ def parquet_arrow_stream_factory_or_none(
     if not parquet_memory_limit_allows_direct_ingest(memory_limit_bytes):
         _set_route(set_route, "memory_limit")
         close_parquet_arrow_factory(factory)
-        assert memory_limit_bytes is not None
+        if memory_limit_bytes is None:
+            raise AssertionError("rejected Parquet memory limit cannot be absent")
         raise direct_parquet_memory_limit_error(memory_limit_bytes)
     pa = ensure_pyarrow(feature=feature)
     if not parquet_schema_is_direct_native_eligible(

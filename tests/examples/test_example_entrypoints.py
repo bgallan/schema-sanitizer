@@ -1,4 +1,8 @@
-"""Smoke contracts for every executable example shipped with the project."""
+"""Smoke contracts for every executable example shipped with the project.
+
+It runs every shipped help entry point offline and keeps the example index, executable
+links, and optional dependency groups synchronized.
+"""
 
 from __future__ import annotations
 
@@ -49,8 +53,6 @@ def test_example_readme_uses_current_optional_dependency_groups() -> None:
     assert {"gcs", "bigquery", "polars"} <= extras.keys()
     assert 'pip install "schema-sanitizer[gcs,bigquery]"' in readme
     assert 'pip install "schema-sanitizer[polars,gcs,bigquery]"' in readme
-    assert "schema-sanitizer[pyarrow,cloud]" not in readme
-    assert "schema-sanitizer[polars,pyarrow,cloud]" not in readme
 
 
 def test_example_readme_links_every_executable_entrypoint() -> None:

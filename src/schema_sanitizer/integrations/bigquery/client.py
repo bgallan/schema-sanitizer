@@ -1,4 +1,8 @@
-"""Small DB-API query helpers for BigQuery ADBC usage."""
+"""Small DB-API query helpers for BigQuery ADBC usage.
+
+It opens DB-API cursors safely, executes statements, fetches scalar results, and closes
+cursor ownership on every path.
+"""
 
 from __future__ import annotations
 

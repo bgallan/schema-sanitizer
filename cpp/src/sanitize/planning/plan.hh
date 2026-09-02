@@ -1,4 +1,6 @@
-// Defines compiled column plans and struct dispatch lookup tables.
+// Defines compiled column plans and struct field-dispatch metadata.
+// Immutable recursive plans bind logical types, conversions, aliases, and
+// lookup strategies before concurrent materialization begins.
 
 #pragma once
 
@@ -45,15 +47,15 @@ struct StructLayout {
     std::vector<std::string_view> keys; // only valid when hashes[i] != 0
     std::vector<FieldIndex> values;     // only valid when hashes[i] != 0
 
-    // Computes the hash for key.
+    /// Computes the stable nonzero dispatch hash for a source key.
     static uint64_t hash_key(std::string_view s) noexcept {
       return detail::hash_key64(s);
     }
 
-    // Returns whether the feature is enabled.
+    /// Reports whether the open-addressing dispatch storage is initialized.
     [[nodiscard]] bool enabled() const noexcept { return !hashes.empty(); }
 
-    // Finds a field index in the dispatch table.
+    /// Finds a field index in the dispatch table.
     [[nodiscard]] const FieldIndex *find(std::string_view key,
                                          uint64_t prehash) const noexcept {
       if (hashes.empty())
@@ -77,7 +79,7 @@ struct StructLayout {
   std::vector<KeyEntry> alias_sorted;
   DispatchTable alias_table;
 
-  // Finds a field index using the layout's selected lookup strategy.
+  /// Finds a field index using the layout's selected lookup strategy.
   [[nodiscard]] const FieldIndex *find(std::string_view key,
                                        uint64_t prehash = 0) const noexcept {
     if (table.enabled())
@@ -91,7 +93,7 @@ struct StructLayout {
     return nullptr;
   }
 
-  // Finds a field index using precomputed alternate source-name aliases.
+  /// Finds a field index using precomputed alternate source-name aliases.
   [[nodiscard]] const FieldIndex *
   find_alias(std::string_view key, uint64_t prehash = 0) const noexcept {
     if (alias_table.enabled())
@@ -133,7 +135,7 @@ struct CompiledPlan {
   StructLayout root_layout;
   std::vector<ColumnPlan> columns;
 
-  // Creates a CompiledPlan.
+  /// Initializes a compiled plan with the interned list-path marker.
   CompiledPlan();
 };
 

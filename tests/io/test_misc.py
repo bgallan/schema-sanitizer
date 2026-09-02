@@ -1,4 +1,8 @@
-"""Miscellaneous behavior tests for the supported public API."""
+"""Cross-cutting path, schema-contract, chunking, and memory-limit reader tests.
+
+It combines Windows and file-URI normalization, schema parity and rejection, chunk
+invariance, inference stability, and typed memory-limit failures.
+"""
 
 from __future__ import annotations
 
@@ -11,7 +15,6 @@ from conftest import (
     read_test_jsonl,
     read_test_path,
     read_test_python,
-    require_native,
 )
 
 pa = pytest.importorskip("pyarrow")
@@ -39,7 +42,7 @@ def _read_with_contract(
 
 
 def _csv_ref_table(text: str, schema: pa.Schema) -> pa.Table:
-    """Return csv ref table for the test."""
+    """Parse CSV text with PyArrow to produce the reference table."""
     from pyarrow import csv as pacsv
 
     convert = pacsv.ConvertOptions(
@@ -53,7 +56,7 @@ def _csv_ref_table(text: str, schema: pa.Schema) -> pa.Table:
 
 
 def test_local_path_uri_helpers_do_not_reject_windows_drive_paths() -> None:
-    """Verify Windows drive paths are not mistaken for remote URI schemes."""
+    """Verify local path URI helpers do not reject windows drive paths."""
     windows_path = r"C:\temp\out.jsonl"
     file_uri_path = Path(local_path_from_file_uri("file:///tmp/out.jsonl"))
 
@@ -66,10 +69,10 @@ def test_local_path_uri_helpers_do_not_reject_windows_drive_paths() -> None:
 def test_local_path_from_file_uri_normalizes_windows_drive_uri(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify Windows file URI drive paths do not keep a leading slash."""
+    """Verify local path from file URI normalizes windows drive URI."""
     from schema_sanitizer.core_impl import uris
 
-    monkeypatch.setattr(uris.os, "name", "nt")
+    monkeypatch.setattr(uris, "_IS_WINDOWS", True)
 
     assert (
         uris.local_path_from_file_uri("file:///C:/Users/runner/AppData/out%20file.parquet")
@@ -78,7 +81,7 @@ def test_local_path_from_file_uri_normalizes_windows_drive_uri(
 
 
 def test_file_uri_auto_format_uses_platform_path_normalization() -> None:
-    """Verify file URI format detection uses native path normalization."""
+    """Verify file URI auto format uses platform path normalization."""
     data, source, format_name = resolve_source_and_format(
         "file:///tmp/events.jsonl",
         format="auto",
@@ -91,7 +94,7 @@ def test_file_uri_auto_format_uses_platform_path_normalization() -> None:
 
 
 def test_csv_contract_matches_pyarrow(tmp_path: Path) -> None:
-    """Verify csv contract matches pyarrow."""
+    """Verify CSV contract matches PyArrow."""
     csv_text = "a,b\n1,hello\n2,world\n3,\n"
     path = tmp_path / "rows.csv"
     path.write_text(csv_text, encoding="utf-8")
@@ -105,7 +108,7 @@ def test_csv_contract_matches_pyarrow(tmp_path: Path) -> None:
 
 
 def test_json_contract_matches_pyarrow_json_reader(tmp_path: Path) -> None:
-    """Verify json contract matches pyarrow json reader."""
+    """Verify JSON contract matches PyArrow JSON reader."""
     jsonl_text = '{"a": 1, "b": "x"}\n{"a": 2, "b": "y"}\n'
     path = tmp_path / "rows.jsonl"
     path.write_text(jsonl_text, encoding="utf-8")
@@ -149,7 +152,7 @@ def test_strict_schema_rejects_extra_fields() -> None:
 
 
 def test_strict_schema_ignores_empty_container_extra_fields() -> None:
-    """Verify empty unknown containers behave like absent fields."""
+    """Verify strict schema ignores empty container extra fields."""
     schema = pa.schema(
         [
             ("a", pa.int64()),
@@ -176,7 +179,7 @@ def test_strict_schema_ignores_empty_container_extra_fields() -> None:
 
 
 def test_strict_csv_schema_rejects_extra_header_field(tmp_path: Path) -> None:
-    """Verify strict csv schema rejects extra header field."""
+    """Verify strict CSV schema rejects extra header field."""
     schema = pa.schema([("a", pa.int64())])
     path = tmp_path / "rows.csv"
     path.write_text("a,b\n1,2\n", encoding="utf-8")
@@ -186,7 +189,7 @@ def test_strict_csv_schema_rejects_extra_header_field(tmp_path: Path) -> None:
 
 
 def test_strict_xml_schema_rejects_extra_field(tmp_path: Path) -> None:
-    """Verify strict xml schema rejects extra fields."""
+    """Verify strict XML schema rejects extra field."""
     schema = pa.schema([("a", pa.int64())])
     path = tmp_path / "rows.xml"
     path.write_text("<rows><row><a>1</a><b>2</b></row></rows>", encoding="utf-8")
@@ -243,7 +246,7 @@ def test_mixed_scalar_and_struct_list_elements_are_wrapped() -> None:
 
 
 def test_default_scalar_object_key_is_already_sanitized_in_preserve_mode() -> None:
-    """Verify the built-in scalar wrapper key does not contain an underscore."""
+    """Verify default scalar object key is already sanitized in preserve mode."""
     result = read_test_python(
         [{"a": {"b": [1, {"c": "d"}]}}],
         output_format="pyarrow",
@@ -276,7 +279,7 @@ def test_stats_reflect_materialized_batches_and_skipped_rows() -> None:
 
 
 def test_inference_scans_all_source_rows() -> None:
-    """Verify schema inference scans every source row."""
+    """Verify inference scans all source rows."""
     rows = [{"a": i} for i in range(37)]
     rows.append({"a": 37, "latefield": {"nested": "observed"}})
 
@@ -287,9 +290,10 @@ def test_inference_scans_all_source_rows() -> None:
     assert result.clean_data.schema.get_field_index("latefield") >= 0
 
 
-def test_schema_contract_rejects_logical_schema_payload_bytes(tmp_path: Path) -> None:
+def test_schema_contract_rejects_logical_schema_payload_bytes(
+    tmp_path: Path, require_native: None
+) -> None:
     """Verify schema contract rejects logical schema payload bytes."""
-    require_native()
     csv_text = "a,b\n1,hello\n2,world\n"
     path = tmp_path / "rows.csv"
     path.write_text(csv_text, encoding="utf-8")
@@ -320,7 +324,7 @@ def test_schema_contract_rejects_logical_schema_dict_spec(tmp_path: Path) -> Non
 
 
 def _run_csv(path: Path, memory_limit_bytes: int) -> pa.Table:
-    """Run csv."""
+    """Read the CSV under a strict schema and explicit memory limit."""
     schema = pa.schema([("a", pa.int64()), ("b", pa.string())])
     return _read_with_contract(
         path,
@@ -332,7 +336,7 @@ def _run_csv(path: Path, memory_limit_bytes: int) -> pa.Table:
 
 
 def test_chunking_invariance_csv(tmp_path: Path) -> None:
-    """Verify chunking invariance csv."""
+    """Verify chunking invariance CSV."""
     csv_text = "a,b\n" + "\n".join(f"{i},x{i}" for i in range(1, 5000)) + "\n"
     path = tmp_path / "rows.csv"
     path.write_text(csv_text, encoding="utf-8")
@@ -345,7 +349,7 @@ def test_chunking_invariance_csv(tmp_path: Path) -> None:
 
 
 def test_inference_invariance_json(tmp_path: Path) -> None:
-    """Verify inference invariance json."""
+    """Verify inference invariance JSON."""
     rows = [
         {"id": i, "payload": {"a": i, "b": f"x{i}"}, "items": [i, i + 1]} for i in range(1, 500)
     ]
@@ -360,7 +364,7 @@ def test_inference_invariance_json(tmp_path: Path) -> None:
 
 
 def test_full_scan_inference_keeps_latefields() -> None:
-    """Verify full scan inference keeps late fields."""
+    """Verify full scan inference keeps latefields."""
     result = read_test_python([{"a": 1}, {"a": 2, "b": 99}])
 
     assert result.clean_data.schema.names == ["a", "b"]
@@ -386,7 +390,7 @@ def test_string_outputs_are_plain_utf8() -> None:
 
 
 def test_input_text_encoding_decodes_non_utf8_path_csv(tmp_path: Path) -> None:
-    """Verify input text encoding decodes non utf8 path csv."""
+    """Verify input text encoding decodes non utf8 path CSV."""
     path = tmp_path / "names.csv"
     path.write_bytes("name\ncafé\n".encode("latin-1"))
     result = read_test_csv(path, input_text_encoding="iso8859-1")
@@ -397,12 +401,12 @@ def test_input_text_encoding_streams_non_utf8_path_csv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify non UTF-8 path CSV input avoids full-file Python reads."""
+    """Verify input text encoding streams non utf8 path CSV."""
     path = tmp_path / "names.csv"
     path.write_bytes("name\ncafé\nmañana\n".encode("latin-1"))
 
     def fail_read_bytes(self: Path) -> bytes:
-        """Reject the old full-file read branch."""
+        """Reject full-file reads from the streaming path."""
         raise AssertionError(f"unexpected full read of {self}")
 
     monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
@@ -413,7 +417,7 @@ def test_input_text_encoding_streams_non_utf8_path_csv(
 
 
 def test_input_text_encoding_native_supported_path_stays_path(tmp_path: Path) -> None:
-    """Verify native-supported encodings do not route local paths through Python streams."""
+    """Verify input text encoding native supported path stays path."""
     from schema_sanitizer.api_impl.input.preparation import prepare_public_input
 
     path = tmp_path / "names.csv"
@@ -438,12 +442,12 @@ def test_execution_context_streams_non_utf8_path_csv(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify direct context path input uses bounded transcoding."""
+    """Verify execution context streams non utf8 path CSV."""
     path = tmp_path / "names.csv"
     path.write_bytes("name\ncafé\n".encode("latin-1"))
 
     def fail_read_bytes(self: Path) -> bytes:
-        """Reject the old full-file read branch."""
+        """Reject full-file reads from the streaming path."""
         raise AssertionError(f"unexpected full read of {self}")
 
     monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
@@ -462,12 +466,12 @@ def test_input_text_encoding_streams_non_utf8_path_jsonl(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify non UTF-8 JSONL paths are transcoded as bounded streams."""
+    """Verify input text encoding streams non utf8 path JSONL."""
     path = tmp_path / "rows.jsonl"
     path.write_bytes('{"name":"café"}\n{"name":"mañana"}\n'.encode("latin-1"))
 
     def fail_read_bytes(self: Path) -> bytes:
-        """Reject the old full-file read branch."""
+        """Reject full-file reads from the streaming path."""
         raise AssertionError(f"unexpected full read of {self}")
 
     monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
@@ -481,12 +485,12 @@ def test_input_text_encoding_streams_non_utf8_path_json_array(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify non UTF-8 JSON-array paths are parsed after streaming transcode."""
+    """Verify input text encoding streams non utf8 path JSON array."""
     path = tmp_path / "rows.json"
     path.write_bytes('[{"name":"café"},{"name":"mañana"}]\n'.encode("latin-1"))
 
     def fail_read_bytes(self: Path) -> bytes:
-        """Reject the old full-file read branch."""
+        """Reject full-file reads from the streaming path."""
         raise AssertionError(f"unexpected full read of {self}")
 
     monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
@@ -497,7 +501,7 @@ def test_input_text_encoding_streams_non_utf8_path_json_array(
 
 
 def test_input_text_encoding_decodes_utf16_path_csv(tmp_path: Path) -> None:
-    """Verify native path transcoding handles UTF-16 text input."""
+    """Verify input text encoding decodes utf16 path CSV."""
     path = tmp_path / "names.csv"
     path.write_bytes("name\ncafé\n".encode("utf-16"))
 

@@ -1,3 +1,7 @@
+// Summarizes recursive schema nodes, repeated-level layouts, and
+// materialization support for diagnostics. This fragment is included by the
+// consolidated footer reader inside its private implementation namespace.
+
 struct NativeRecursiveMaterializationDiagnostics {
   std::size_t node_count = 0;
   std::size_t leaf_count = 0;
@@ -14,6 +18,7 @@ struct NativeRecursiveMaterializationDiagnostics {
   std::vector<std::vector<std::string>> repeated_node_path_components;
 };
 
+/// Joins recursive path components into a stable dotted diagnostic label.
 std::string
 native_recursive_path_label(const std::vector<std::string> &components) {
   if (components.empty()) {
@@ -36,6 +41,8 @@ struct NativeRecursiveDiagnosticsFrame {
   bool entered = false;
 };
 
+/// Traverses a recursive tree to collect shape signatures, path lists, and node
+/// counts.
 sanitize::Result<NativeRecursiveMaterializationDiagnostics>
 native_recursive_materialization_diagnostics(
     const NativeRecursiveMaterializationTree &tree) {
@@ -148,6 +155,8 @@ native_recursive_materialization_diagnostics(
   return diagnostics;
 }
 
+/// Serializes a size vector as a compact JSON array for native-reader
+/// diagnostics.
 void append_size_array(std::string &out,
                        const std::vector<std::size_t> &items) {
   out.push_back('[');

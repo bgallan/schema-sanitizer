@@ -1,18 +1,21 @@
-"""Regression coverage for memory options decoder rejects impossible string count before reserve."""
+"""Checks option and schema decoders plus Parquet writer metadata against impossible string
+counts, physical-byte limits, iterable materialization, row-group budgets, page indexes,
+and validity bitmaps. Cardinality and payload limits are explicit results enforced
+before reserve or duplicate retention."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_options_decoder_rejects_impossible_string_count_before_reserve() -> None:
+def test_options_decoder_rejects_impossible_string_count_before_reserve(
+    require_native: None,
+) -> None:
     """A four-byte hostile count must be invalid, not an allocation request."""
-    require_native()
     from schema_sanitizer.core_impl import native_options
     from schema_sanitizer.core_impl.native_runtime import native_core
 
@@ -23,9 +26,8 @@ def test_options_decoder_rejects_impossible_string_count_before_reserve() -> Non
         native_core.options_prepare_bytes(bytes(payload))
 
 
-def test_logical_schema_decoder_checks_physical_bytes_before_reserve() -> None:
+def test_logical_schema_decoder_checks_physical_bytes_before_reserve(require_native: None) -> None:
     """A declared field collection must fit in the remaining wire payload."""
-    require_native()
     from schema_sanitizer.core_impl.logical_schema import LogicalSchemaPayload
 
     payload = (65_536).to_bytes(4, "little")
@@ -54,10 +56,11 @@ def test_options_string_iterable_is_bounded_without_list_materialization(
 
 
 def test_native_parquet_writer_bounds_retained_row_group_metadata(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
 ) -> None:
     """The writer must reject a pathological row-group count before growing footer state."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.api_impl.file_conversion import direct_writers
 
@@ -93,9 +96,8 @@ def test_schema_payload_and_page_indexes_avoid_duplicate_materialization() -> No
     assert "std::pmr::deque<std::pmr::string>" in interner_source
 
 
-def test_metadata_stream_omits_redundant_validity_bitmap() -> None:
+def test_metadata_stream_omits_redundant_validity_bitmap(require_native: None) -> None:
     """Non-null generated metadata should not allocate one validity bit per row."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.adapters.pyarrow.metadata_native import CapsuleArrowStream
     from schema_sanitizer.core_impl.native_symbols import METADATA_STREAM_WRAP

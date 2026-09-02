@@ -1,4 +1,6 @@
-// Implements the hardened XML frontend lifecycle, batching, and vtable.
+// Implements the hardened XML frontend lifecycle, batching, and vtable. It
+// frames XML rows, records parser diagnostics, and returns budget-owned batches
+// in source order.
 
 #include "frontends/builtin_frontends.hh"
 #include "frontends/xml/frontend_internal.hh"
@@ -29,6 +31,8 @@ struct XmlParseRange {
 };
 
 struct XmlParsedChunk {
+
+  /// Creates pool-backed storage for parsed XML nodes from one work packet.
   explicit XmlParsedChunk(std::pmr::memory_resource *resource)
       : nodes(resource) {}
 
@@ -36,6 +40,7 @@ struct XmlParsedChunk {
   ReaderResourceDiagnostics diagnostics;
 };
 
+/// Accumulates parser diagnostics into bounded XML frontend diagnostics.
 void record_parser_diagnostics(ReaderResourceDiagnostics *target,
                                const XmlParser &parser) noexcept {
   if (!target) {
@@ -48,6 +53,8 @@ void record_parser_diagnostics(ReaderResourceDiagnostics *target,
   target->records += 1;
 }
 
+/// Creates the XML row scanner and derives its memory bounds from prepared
+/// options.
 XmlFrontend::XmlFrontend(ChunkSourcePtr src, const Options &options)
     : src_(std::move(src)), default_key_(options.default_key_name),
       default_key_hash_(sanitize::detail::hash_key64(default_key_)),
@@ -88,6 +95,8 @@ sanitize::Status XmlFrontend::ensure_initialized() {
   }
 }
 
+/// Rewinds the XML frontend to its initial input position and clears per-pass
+/// state.
 void XmlFrontend::reset() noexcept {
   row_index_ = 0;
   done_ = false;
@@ -97,6 +106,7 @@ void XmlFrontend::reset() noexcept {
   }
 }
 
+/// Transitions the XML frontend from inference to execution mode.
 void XmlFrontend::set_plan(const CompiledPlan *) noexcept {
   execution_mode_ = true;
   if (!scanner_ && root_) {
@@ -109,10 +119,12 @@ void XmlFrontend::set_plan(const CompiledPlan *) noexcept {
   }
 }
 
+/// Retains the memory pool that owns XML output batches.
 void XmlFrontend::set_memory_pool(std::shared_ptr<void> pool) noexcept {
   memory_pool_ = std::move(pool);
 }
 
+/// Retains the task arena used for parallel XML row materialization.
 void XmlFrontend::set_task_arena(
     std::shared_ptr<OperationTaskArena> task_arena) noexcept {
   task_arena_ = std::move(task_arena);
@@ -159,6 +171,7 @@ void XmlFrontend::select_rows() {
   }
 }
 
+/// Reads and materializes the next bounded row batch from the XML frontend.
 sanitize::Result<RowBatch> XmlFrontend::next_batch(int64_t capacity) {
   RowBatch out;
   if (capacity <= 0 || done_) {
@@ -441,27 +454,35 @@ namespace {
 
 using xml_frontend_detail::XmlFrontend;
 
+/// Rewinds the XML frontend to its initial input position and clears per-pass
+/// state.
 void xml_reset(void *self) noexcept {
   static_cast<XmlFrontend *>(self)->reset();
 }
 
+/// Reads and materializes the next bounded row batch from the XML frontend.
 sanitize::Result<RowBatch> xml_next_batch(void *self, int64_t capacity) {
   return static_cast<XmlFrontend *>(self)->next_batch(capacity);
 }
 
+/// Forwards a compiled plan through the XML frontend callback table.
 void xml_set_plan(void *self, const CompiledPlan *plan) noexcept {
   static_cast<XmlFrontend *>(self)->set_plan(plan);
 }
 
+/// Forwards memory-pool ownership through the XML frontend callback table.
 void xml_set_memory_pool(void *self, std::shared_ptr<void> pool) noexcept {
   static_cast<XmlFrontend *>(self)->set_memory_pool(std::move(pool));
 }
 
+/// Forwards task-arena ownership through the XML frontend callback table.
 void xml_set_task_arena(
     void *self, std::shared_ptr<OperationTaskArena> task_arena) noexcept {
   static_cast<XmlFrontend *>(self)->set_task_arena(std::move(task_arena));
 }
 
+/// Destroys the heap-owned XML frontend state after its final callback
+/// completes.
 void xml_destroy(void *self) noexcept {
   delete static_cast<XmlFrontend *>(self);
 }

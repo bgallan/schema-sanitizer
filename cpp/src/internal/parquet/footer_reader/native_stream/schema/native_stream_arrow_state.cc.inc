@@ -1,4 +1,6 @@
-// Included by footer_reader.cc inside its implementation namespace.
+// Defines Arrow array, row-window, and worker ownership state for native
+// Parquet streaming. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
 
 struct NativeParquetColumnSchema {
   ArrowSchema schema{};
@@ -79,6 +81,7 @@ struct NativeElementRange {
   std::int64_t first = 0;
   std::int64_t count = 0;
 
+  /// Returns the exclusive source-row boundary of this bounded window.
   [[nodiscard]] std::int64_t end() const noexcept {
     if (first < 0 || count < 0 ||
         count > std::numeric_limits<std::int64_t>::max() - first) {
@@ -86,9 +89,11 @@ struct NativeElementRange {
     }
     return first + count;
   }
+  /// Reports whether the requested element index lies within this bounded view.
   [[nodiscard]] bool contains(std::int64_t index) const noexcept {
     return first >= 0 && count >= 0 && index >= first && index < end();
   }
+  /// Converts an absolute source row into this window's zero-based local index.
   [[nodiscard]] std::int64_t local(std::int64_t index) const noexcept {
     return index - first;
   }
@@ -104,6 +109,7 @@ struct NativeFlatRowWindow {
   std::int64_t first_row = 0;
   std::int64_t row_count = 0;
 
+  /// Returns the exclusive row boundary after applying the window length.
   [[nodiscard]] std::int64_t end_row() const noexcept {
     if (first_row < 0 || row_count < 0 ||
         row_count > std::numeric_limits<std::int64_t>::max() - first_row) {
@@ -112,14 +118,18 @@ struct NativeFlatRowWindow {
     return first_row + row_count;
   }
 
+  /// Reports whether the requested row lies within this bounded view.
   [[nodiscard]] bool contains(std::int64_t row) const noexcept {
     return row >= first_row && row < end_row();
   }
 
+  /// Converts an absolute source row into this flat window's local row index.
   [[nodiscard]] std::int64_t local_row(std::int64_t row) const noexcept {
     return row - first_row;
   }
 
+  /// Reports whether this row window intersects the supplied half-open source
+  /// interval.
   [[nodiscard]] bool overlaps(std::int64_t first,
                               std::int64_t count) const noexcept {
     if (first < 0 || count <= 0 ||
@@ -130,6 +140,7 @@ struct NativeFlatRowWindow {
   }
 };
 
+/// Validates a bounded half-open row interval within its source row group.
 sanitize::Status
 validate_native_flat_row_window(const NativeFlatRowWindow &window) {
   if (window.row_group_rows < 0 || window.first_row < 0 ||
@@ -143,6 +154,8 @@ validate_native_flat_row_window(const NativeFlatRowWindow &window) {
   return {};
 }
 
+/// Reports whether a planned recursive tree can be materialized in independent
+/// row windows.
 bool native_recursive_tree_supports_row_windows(
     const NativeRecursiveMaterializationTree &tree) {
   return tree.valid && tree.traversal_plan_valid &&
@@ -161,6 +174,8 @@ bool native_recursive_tree_supports_row_windows(
              });
 }
 
+/// Reports whether every output field can be sliced into independent flat row
+/// windows.
 bool native_output_layout_supports_flat_windows(
     const std::vector<NativeParquetOutputField> &output_layout,
     const RowGroupInfo &row_group) {
@@ -172,6 +187,8 @@ bool native_output_layout_supports_flat_windows(
   });
 }
 
+/// Returns the next memory-bounded row window for native Parquet
+/// materialization.
 sanitize::Result<NativeFlatRowWindow> next_native_flat_row_window(
     const RowGroupInfo &row_group,
     const std::vector<NativeParquetOutputField> &output_layout,
@@ -220,6 +237,8 @@ sanitize::Result<NativeFlatRowWindow> next_native_flat_row_window(
   return NativeFlatRowWindow{row_group.num_rows, first_row, rows};
 }
 
+/// Counts nulls in the selected validity-bitmap window without materializing
+/// new bits.
 std::int64_t native_window_null_count(const NativeParquetChildArray &child,
                                       std::int64_t row_count) {
   if (child.validity.empty()) {
@@ -257,18 +276,27 @@ struct NativeParquetColumnWorkerState {
   std::ifstream file;
   NativeParquetPageScratch page_scratch;
 
+  /// Creates an empty native Parquet column worker state with no outstanding
+  /// ownership or memory reservation.
   NativeParquetColumnWorkerState() = default;
+  /// Creates movable worker state for one independently decoded Parquet column.
   NativeParquetColumnWorkerState(const NativeParquetColumnWorkerState &) =
       delete;
+  /// Disables copying so ownership and cleanup responsibility cannot be
+  /// duplicated.
   NativeParquetColumnWorkerState &
   operator=(const NativeParquetColumnWorkerState &) = delete;
 
+  /// Transfers owned buffers and reservations while leaving the source safe to
+  /// destroy.
   NativeParquetColumnWorkerState(
       NativeParquetColumnWorkerState &&other) noexcept
       : file_fd_lease(std::move(other.file_fd_lease)),
         file(std::move(other.file)),
         page_scratch(std::move(other.page_scratch)) {}
 
+  /// Transfers owned buffers and reservations while leaving the source safe to
+  /// destroy.
   NativeParquetColumnWorkerState &
   operator=(NativeParquetColumnWorkerState &&other) noexcept {
     if (this != &other) {
@@ -283,6 +311,8 @@ struct NativeParquetColumnWorkerState {
     return *this;
   }
 
+  /// Closes the worker's Parquet file before releasing its process
+  /// file-descriptor lease.
   ~NativeParquetColumnWorkerState() noexcept {
     sanitize::internal::close_stream_and_commit(file, file_fd_lease);
   }
@@ -293,6 +323,8 @@ struct NativeParquetStreamState {
   sanitize::internal::ProcessFdPermitLease file_fd_lease;
   std::ifstream file;
 
+  /// Closes the stream's Parquet file before releasing its process
+  /// file-descriptor lease.
   ~NativeParquetStreamState() noexcept {
     sanitize::internal::close_stream_and_commit(file, file_fd_lease);
   }
@@ -319,6 +351,8 @@ struct NativeParquetStreamState {
   std::string last_error;
 };
 
+/// Clears a borrowed child schema after its parent-owned state has handled
+/// storage lifetime.
 void native_parquet_schema_child_release(ArrowSchema *schema) {
   if (!schema || !schema->release) {
     return;
@@ -326,6 +360,8 @@ void native_parquet_schema_child_release(ArrowSchema *schema) {
   sanitize::internal::cdata_stream::clear_schema(schema);
 }
 
+/// Deletes root schema ownership state and clears the exported Arrow schema
+/// exactly once.
 void native_parquet_schema_release(ArrowSchema *schema) {
   if (!schema || !schema->release) {
     return;
@@ -335,6 +371,8 @@ void native_parquet_schema_release(ArrowSchema *schema) {
   sanitize::internal::cdata_stream::clear_schema(schema);
 }
 
+/// Clears a borrowed child array after its parent-owned state has handled
+/// buffer lifetime.
 void native_parquet_array_child_release(ArrowArray *array) {
   if (!array || !array->release) {
     return;
@@ -342,6 +380,8 @@ void native_parquet_array_child_release(ArrowArray *array) {
   sanitize::internal::cdata_stream::clear_array(array);
 }
 
+/// Deletes root array ownership state and clears the exported Arrow array
+/// exactly once.
 void native_parquet_array_release(ArrowArray *array) {
   if (!array || !array->release) {
     return;

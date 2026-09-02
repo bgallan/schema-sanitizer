@@ -1,4 +1,6 @@
-// Declares binary serialization for public option state.
+// Declares stable binary serialization for public option state.
+// The SZOPT envelope preserves cross-language option semantics while allowing
+// decoders to reject unsupported versions and malformed bounded fields.
 
 #pragma once
 
@@ -10,8 +12,7 @@
 
 namespace sanitize {
 
-// Portable binary decoding for sanitize::Options.
-
+/// Decodes options from the portable versioned binary representation.
 sanitize::Result<Options> deserialize_options(std::string_view bytes);
 
 } // namespace sanitize

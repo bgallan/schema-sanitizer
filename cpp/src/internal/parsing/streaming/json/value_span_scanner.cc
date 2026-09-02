@@ -1,4 +1,6 @@
 // Scans JSON values that cross chunk boundaries.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/streaming/json/value_span_scanner.hh"
 
@@ -6,13 +8,14 @@ namespace sanitize::internal {
 
 namespace {
 
-// Returns whether a byte is JSON whitespace.
+/// Returns whether a byte is JSON whitespace.
 bool is_json_ws(unsigned char c) {
   return c == ' ' || c == '\n' || c == '\r' || c == '\t';
 }
 
 } // namespace
 
+/// Initializes cross-chunk JSON value scanning with bounded scratch storage.
 JsonValueSpanScanner::JsonValueSpanScanner(JsonStreamingScanner &scanner,
                                            BumpArena *arena)
     : scanner_(scanner), arena_(arena),

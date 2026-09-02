@@ -1,4 +1,6 @@
 // Builds XML node projections exposed through generic ValueView objects.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/xml/document.hh"
 
@@ -16,6 +18,7 @@
 namespace sanitize::internal {
 namespace {
 
+/// Removes leading and trailing XML whitespace without allocating.
 std::string_view trim_xml_whitespace(std::string_view text) noexcept {
   while (!text.empty() && xml_tokens::is_xml_whitespace(text.front())) {
     text.remove_prefix(1U);
@@ -26,6 +29,7 @@ std::string_view trim_xml_whitespace(std::string_view text) noexcept {
   return text;
 }
 
+/// Adds one scalar XML projection field while preserving source-child order.
 void append_scalar_field(XmlNode *node, std::string_view key,
                          std::string_view value) {
   XmlField field(node->resource);
@@ -36,6 +40,8 @@ void append_scalar_field(XmlNode *node, std::string_view key,
   node->fields.push_back(std::move(field));
 }
 
+/// Adds one nested XML node projection field while preserving source-child
+/// order.
 void append_node_field(XmlNode *node, std::string_view key,
                        const XmlNode *child) {
   XmlField field(node->resource);
@@ -46,6 +52,7 @@ void append_node_field(XmlNode *node, std::string_view key,
   node->fields.push_back(std::move(field));
 }
 
+/// Adds one repeated XML child group as an array-valued projection field.
 void append_group_field(XmlNode *node, std::string_view key,
                         const XmlArrayGroup *group) {
   XmlField field(node->resource);
@@ -82,6 +89,7 @@ const ValueView::ObjectVTable kXmlObjectVTable{.for_each =
                                                    &xml_object_for_each};
 
 struct GroupAccumulator {
+  /// Initializes XML child-group accumulation for one projected object field.
   GroupAccumulator(std::string_view group_name,
                    std::pmr::memory_resource *resource)
       : name(group_name), elements(resource) {}
@@ -90,6 +98,8 @@ struct GroupAccumulator {
   std::pmr::vector<const XmlNode *> elements;
 };
 
+/// Builds one XML node from the parsed XML tree without exceeding the
+/// document's bounded resources.
 sanitize::Status build_one_xml_node(XmlNode *node) {
   const std::string_view text = trim_xml_whitespace(node->text);
   node->groups.clear();

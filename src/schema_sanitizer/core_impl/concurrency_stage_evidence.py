@@ -1,11 +1,8 @@
-"""Format-specific runtime stage evidence for release certification.
+"""Record format-specific runtime stage evidence for release certification.
 
-Shared admission contracts prove that every public pair participates in the
-same bounded runtime.  This module adds a second dimension: one primary stage
-that is specific to each input and output route is recorded only after that
-route successfully executes.  Release certification can therefore detect a
-format path that silently stops traversing the concurrency mechanism advertised
-for that format while the generic pair contracts continue to pass.
+Each successful input and output route records its primary stage in addition to shared
+admission evidence. Certification can therefore detect a format path that bypasses its
+advertised concurrency mechanism even when generic pair contracts still pass.
 """
 
 from __future__ import annotations
@@ -19,7 +16,6 @@ _INPUT_PRIMARY_STAGE = {
     "json": "worker_authoritative_structural_framing",
     "json_array": "worker_authoritative_structural_framing",
     "jsonl": "row_validation",
-    "ndjson": "row_validation",
     "xml": "frontend_row_decode",
     "parquet": "column_decode",
     "python": "native_iterator_batching",

@@ -1,10 +1,16 @@
-"""PID-reuse- and reboot-safe process identity helpers for coordination state."""
+"""Build process identities that survive PID reuse and host reboots safely.
+
+Linux process start tokens and boot identifiers are combined with the PID so coordination files
+can distinguish a live owner from stale state.
+"""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-_UNKNOWN_START_TOKEN = "unknown"
+# This is a public process-identity sentinel, never authentication material.
+_UNKNOWN_START_TOKEN = "unknown"  # nosec B105
 _BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 
 
@@ -47,23 +53,31 @@ def process_start_token(pid: int) -> str:
 
 
 def process_identity_matches(recorded: str, current: str) -> bool:
-    """Compare new composite tokens while accepting legacy start-only writers."""
+    """Compare canonical composite tokens, conservatively handling unknowns."""
     recorded = str(recorded)
     current = str(current)
     if recorded == _UNKNOWN_START_TOKEN or current == _UNKNOWN_START_TOKEN:
         return True
-    if recorded == current:
-        return True
-    recorded_composite = ":" in recorded
-    current_composite = ":" in current
-    if recorded_composite and current_composite:
+    return recorded == current
+
+
+def process_is_alive(pid: int, start_token: str) -> bool:
+    """Return whether the recorded process still owns its PID instance."""
+    if pid <= 0:
         return False
-    return recorded.rsplit(":", 1)[-1] == current.rsplit(":", 1)[-1]
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return process_identity_matches(start_token, process_start_token(pid))
 
 
 __all__ = [
     "linux_boot_id",
     "parse_linux_proc_start_token",
     "process_identity_matches",
+    "process_is_alive",
     "process_start_token",
 ]

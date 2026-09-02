@@ -1,4 +1,8 @@
-"""Public contracts for the compact pipeline facade."""
+"""Public contracts for the compact pipeline facade.
+
+It runs local Hive conversion, inspects generated cloud plans, renders modified-time
+outputs, and verifies delegation to the shared engine.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +11,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.uris import local_path_from_file_uri
@@ -19,9 +22,8 @@ from schema_sanitizer.pipeline import (
 )
 
 
-def test_hive_pipeline_executes_local_end_to_end(tmp_path: Path) -> None:
+def test_hive_pipeline_executes_local_end_to_end(tmp_path: Path, require_native: None) -> None:
     """The high-level facade discovers and writes one real local partition."""
-    require_native()
     pytest.importorskip("pyarrow")
     logical_date = date(2026, 1, 2)
     source_root = tmp_path / "raw"
@@ -91,6 +93,7 @@ def test_modified_time_pipeline_renders_one_output_per_day(
         source_window = SimpleNamespace(logical_date=logical_date)
 
         def to_partition_run_plan(self, output_uri: str) -> object:
+            """Attach the rendered output URI to the partition run plan."""
             partition_plan.output_uri = output_uri
             return partition_plan
 
@@ -117,6 +120,7 @@ def test_pipeline_run_passes_reusable_options_to_existing_engine(
     expected = object()
 
     def run(plans: object, **kwargs: object) -> object:
+        """Capture delegated plans and options, then return the sentinel result."""
         captured["plans"] = plans
         captured.update(kwargs)
         return expected

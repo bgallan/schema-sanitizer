@@ -1,4 +1,8 @@
-"""Source/output URI argument builders for example 07."""
+"""Source/output URI argument builders for example 07.
+
+It defines source, output, date-range, prefix, discovery, and schema-warm-up arguments
+for the pipeline.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,7 @@ def add_source_args(parser: argparse.ArgumentParser) -> None:
     """Add source/output URI planning arguments."""
     parser.add_argument(
         "--input-format",
-        choices=("csv", "json", "json_array", "jsonl", "ndjson", "xml", "parquet"),
+        choices=("csv", "json", "json_array", "jsonl", "xml", "parquet"),
         default="json_array",
         help=(
             "Source format passed to schema_sanitizer.to_parquet. It also controls "

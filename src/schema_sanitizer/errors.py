@@ -1,4 +1,8 @@
-"""Implements `schema_sanitizer.errors`."""
+"""Define stable public errors and structured diagnostic details.
+
+The exception hierarchy covers cancellation, resource exhaustion, integrity, validation, and
+native failures while preserving machine-readable error codes and context.
+"""
 
 from __future__ import annotations
 

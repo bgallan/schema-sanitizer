@@ -1,4 +1,8 @@
-"""Small, configured facade for common partition-to-Parquet workflows."""
+"""Small, configured facade for common partition-to-Parquet workflows.
+
+Its immutable configurations build plans and run the shared partition engine with
+reusable sanitizer options and explicit callbacks.
+"""
 
 from __future__ import annotations
 

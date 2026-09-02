@@ -1,10 +1,12 @@
-"""Regression coverage for concurrency failed local probe does not publish empty again."""
+"""Protect ordered publication from stale or failed producer observations.
+
+Failed local probes and stale remote candidates must not republish an empty state, while genuine
+last-packet removal, visibility ordering, and native direct-producer completion remain exact.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
-
-from conftest import require_native
 
 from schema_sanitizer.core_impl.native_runtime import native_core
 
@@ -20,7 +22,7 @@ def _function(source: str, start: str, end: str) -> str:
 
 
 def test_failed_local_probe_does_not_publish_empty_again() -> None:
-    """Verify the named concurrency regression contract."""
+    """Verify failed local probe does not publish empty again."""
     source = RUNTIME.read_text(encoding="utf-8")
     local = _function(source, "bool take_local", "bool steal_compatible")
     empty_branch = local[
@@ -35,7 +37,7 @@ def test_failed_local_probe_does_not_publish_empty_again() -> None:
 
 
 def test_stale_remote_candidate_does_not_repeat_empty_rmw() -> None:
-    """Verify the named concurrency regression contract."""
+    """Verify stale remote candidate does not repeat empty RMW."""
     source = RUNTIME.read_text(encoding="utf-8")
     steal = _function(source, "bool steal_compatible", "bool take_task")
     empty_branch = steal[
@@ -50,7 +52,7 @@ def test_stale_remote_candidate_does_not_repeat_empty_rmw() -> None:
 
 
 def test_successful_last_packet_removals_still_publish_empty() -> None:
-    """Verify the named concurrency regression contract."""
+    """Verify successful last packet removals still publish empty."""
     source = RUNTIME.read_text(encoding="utf-8")
     local = _function(source, "bool take_local", "bool steal_compatible")
     steal = _function(source, "bool steal_compatible", "bool take_task")
@@ -63,7 +65,7 @@ def test_successful_last_packet_removals_still_publish_empty() -> None:
 
 
 def test_visibility_transitions_keep_existing_ordering() -> None:
-    """Verify the named concurrency regression contract."""
+    """Verify visibility transitions keep existing ordering."""
     runtime = RUNTIME.read_text(encoding="utf-8")
 
     assert "nonempty_mask.fetch_or(" in runtime
@@ -77,9 +79,8 @@ def test_visibility_transitions_keep_existing_ordering() -> None:
     assert "nonempty_mask.load(std::memory_order_relaxed)" not in runtime
 
 
-def test_native_direct_producers_finish_exactly() -> None:
+def test_native_direct_producers_finish_exactly(require_native: None) -> None:
     """Concurrent direct producers leave no queued arena tasks."""
-    require_native()
     for workers in (2, 4, 8, 16):
         _elapsed, submitted, finished, queued, started, peak = (
             native_core.operation_task_arena_concurrent_submit_probe(workers, 2, 1_500)

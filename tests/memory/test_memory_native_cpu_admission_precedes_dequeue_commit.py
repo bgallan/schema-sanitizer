@@ -1,4 +1,8 @@
-"""Regression coverage for memory native cpu admission precedes dequeue commit."""
+"""Unifies native CPU admission with asynchronous result estimation, terminal debt, fair
+scheduling, stage order, pair gates, shutdown, cgroups, physical threads, global
+registries, remote sort scratch, and build coverage. CPU and retained bytes are reserved
+before dequeue or publication; Python and C++ share one physical-permit domain, and
+every wait or debt stays bounded and authoritative."""
 
 from __future__ import annotations
 
@@ -6,17 +10,16 @@ import ast
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import package_source_text, source_paths, source_tree
+from _support.synchronization import join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
 CPP = ROOT / "cpp/src"
 
 
-def _source(relative: str) -> str:
-    return (SRC / relative).read_text(encoding="utf-8")
-
-
 def test_native_cpu_admission_precedes_dequeue_commit() -> None:
+    """Verify native CPU admission precedes dequeue commit."""
     runtime = (CPP / "internal/runtime/operation_task_arena_runtime.cc.inc").read_text()
     start = runtime.index("void worker_loop")
     body = runtime[start:]
@@ -28,6 +31,7 @@ def test_native_cpu_admission_precedes_dequeue_commit() -> None:
 
 
 def test_native_submit_never_waits_for_retained_bytes_under_slot_mutex() -> None:
+    """Verify native submit never waits for retained bytes under slot mutex."""
     source = (CPP / "internal/runtime/operation_task_arena.cc").read_text()
     helper = source.index("sanitize::Status AcquireRetainedSubmitCredit")
     wait = source.index("retained_ready.wait_until", helper)
@@ -40,18 +44,20 @@ def test_native_submit_never_waits_for_retained_bytes_under_slot_mutex() -> None
 
 
 def test_async_results_support_pre_materialization_credit_and_reconcile_after_fetch() -> None:
-    source = _source("core_impl/async_scheduler.py")
+    """Verify async results support pre materialization credit and reconcile after fetch."""
+    source = package_source_text("core_impl/async_scheduler.py")
     start = source.index("async def _fetch_with_result_admission")
     end = source.index("async def _indexed_worker", start)
     body = source[start:end]
     reserve = body.index('stage="async_result_preflight"')
     fetch = body.index("value = await fetch(index)")
-    reconcile = body.index("resize(retained_size)")
+    reconcile = body.index("resize(retained_bound)")
     assert reserve < fetch < reconcile
-    assert "expected_retained_bytes" in source
+    assert "preflight_bytes" in source
 
 
 def test_async_result_estimator_extrapolates_unvisited_items_conservatively() -> None:
+    """Verify async result estimator extrapolates unvisited items conservatively."""
     from schema_sanitizer.core_impl.async_scheduler import _estimate_async_result_bytes
 
     payload = [b"x" * 1024 for _ in range(1_000)]
@@ -59,12 +65,13 @@ def test_async_result_estimator_extrapolates_unvisited_items_conservatively() ->
     assert estimate >= sum(len(item) for item in payload)
 
 
-def test_async_terminal_debt_is_preallocated_owns_late_queue_and_has_no_unbounded_fallback() -> (
-    None
-):
-    source = _source("core_impl/async_scheduler.py")
+def test_async_terminal_debt_preallocates_exact_result_owners_without_unbounded_fallback() -> None:
+    """Verify async terminal debt preallocates exact result owners without unbounded fallback."""
+    source = package_source_text("core_impl/async_scheduler.py")
     assert "_AsyncTerminalDebt() for _ in range(_ASYNC_TERMINAL_DEBT_CAPACITY)" in source
-    assert "self.result_queue = result_queue" in source
+    assert "debt.result_slots = result_slots" in source
+    assert "debt.pending_slots = pending_slots" in source
+    assert "debt.building_tasks = tasks" in source
     assert "async terminal debt capacity must cover every live task slot" in source
     stop = source[
         source.index("async def _stop_workers") : source.index("async def ordered_indexed_results")
@@ -74,7 +81,8 @@ def test_async_terminal_debt_is_preallocated_owns_late_queue_and_has_no_unbounde
 
 
 def test_async_scheduler_combines_fair_share_with_idle_capacity_borrowing() -> None:
-    source = _source("core_impl/async_scheduler.py")
+    """Verify async scheduler combines fair share with idle capacity borrowing."""
+    source = package_source_text("core_impl/async_scheduler.py")
     fair = source[
         source.index("def _fair_async_candidate") : source.index(
             "def _acquire_async_task_domain_exact"
@@ -92,15 +100,18 @@ def test_async_scheduler_combines_fair_share_with_idle_capacity_borrowing() -> N
 
 
 def test_stage_domains_have_one_published_global_order_and_reverse_release() -> None:
+    """Verify stage domains have one published global order and reverse release."""
     from schema_sanitizer.core_impl.memory_budget import StageConcurrencyAdmission
 
     events: list[str] = []
 
     class Lease:
         def __init__(self, name: str) -> None:
+            """Initialize the lease test double."""
             self.name = name
 
         def close(self) -> None:
+            """Close the resources owned by the lease test double."""
             events.append(self.name)
 
         release = close
@@ -115,14 +126,15 @@ def test_stage_domains_have_one_published_global_order_and_reverse_release() -> 
     )
     admission.close()
     assert events == ["async", "remote", "thread", "memory"]
-    source = _source("core_impl/memory_budget.py")
+    source = package_source_text("core_impl/memory_budget.py")
     assert "_STAGE_DOMAIN_ORDER" in source
     assert "_stage_domain_order_key" in source
     assert "sorted(" in source[source.index("def acquire_stage_concurrency_admission") :]
 
 
 def test_remote_io_is_attached_to_real_stage_admission() -> None:
-    source = _source("remote_impl/io_coordinator.py")
+    """Verify remote I/O is attached to real stage admission."""
+    source = package_source_text("remote_impl/io_coordinator.py")
     submit = source[
         source.index("    def submit(") : source.index(
             "    def permit_snapshot", source.index("    def submit(")
@@ -135,15 +147,16 @@ def test_remote_io_is_attached_to_real_stage_admission() -> None:
 
 
 def test_pair_gate_requires_real_payload_window_and_native_core_observation() -> None:
-    contracts = _source("core_impl/concurrency_contracts.py")
-    coverage = _source("core_impl/concurrency_coverage.py")
-    translation = _source("core_impl/error_translation.py")
+    """Verify pair gate requires real payload window and native core observation."""
+    contracts = package_source_text("core_impl/concurrency_contracts.py")
+    coverage = package_source_text("core_impl/concurrency_coverage.py")
+    translation = package_source_text("core_impl/error_translation.py")
     assert "payload_window_bytes" in contracts
     assert "per_slot_bytes=1" not in contracts
     assert ".resize(0)" not in contracts
     assert '"native_payload_core_call"' in coverage
     assert '"native_payload_core_call"' in translation
-    assert "memory_budget(memory_limit_bytes).io_chunk_bytes" in _source(
+    assert "memory_budget(memory_limit_bytes).io_chunk_bytes" in package_source_text(
         "api_impl/file_conversion/converters.py"
     )
 
@@ -176,7 +189,8 @@ def test_pair_payload_window_remains_charged_until_scope_close() -> None:
 
 
 def test_shutdown_async_drain_is_multiphase_and_final_snapshot_is_authoritative() -> None:
-    source = _source("core_impl/runtime_shutdown.py")
+    """Verify shutdown async drain is multiphase and final snapshot is authoritative."""
+    source = package_source_text("core_impl/runtime_shutdown.py")
     close_admission = source.index("close_async_scheduler_admission()")
     first_drain = source.index("wait_async_scheduler_quiescent", close_admission)
     producer_close = source.index("RuntimeServicePhase.PRODUCER", first_drain)
@@ -189,9 +203,10 @@ def test_shutdown_async_drain_is_multiphase_and_final_snapshot_is_authoritative(
 
 
 def test_python_lifecycle_condition_waits_are_all_bounded() -> None:
+    """Verify Python lifecycle condition waits are all bounded."""
     offenders: list[str] = []
-    for path in SRC.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    for relative_path in source_paths("src/schema_sanitizer"):
+        tree = source_tree(relative_path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -199,11 +214,12 @@ def test_python_lifecycle_condition_waits_are_all_bounded() -> None:
             if not isinstance(func, ast.Attribute) or func.attr != "wait":
                 continue
             if not node.args and not any(keyword.arg == "timeout" for keyword in node.keywords):
-                offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+                offenders.append(f"{relative_path}:{node.lineno}")
     assert offenders == []
 
 
 def test_cgroup_view_resolves_nested_membership_and_refreshes_after_short_ttl() -> None:
+    """Verify cgroup view resolves nested membership and refreshes after short ttl."""
     from schema_sanitizer.core_impl.cgroup_view import _join_mount_path
 
     nested = _join_mount_path("/sys/fs/cgroup", "/", "/user.slice/app.scope")
@@ -212,7 +228,7 @@ def test_cgroup_view_resolves_nested_membership_and_refreshes_after_short_ttl() 
     assert pod is not None
     assert nested.as_posix() == "/sys/fs/cgroup/user.slice/app.scope"
     assert pod.as_posix() == "/sys/fs/cgroup/pod/x"
-    source = _source("core_impl/cgroup_view.py")
+    source = package_source_text("core_impl/cgroup_view.py")
     assert "_CACHE_TTL_NS" in source
     assert "time.monotonic_ns()" in source
     assert 'Path("/proc/self/cgroup")' in source
@@ -220,6 +236,7 @@ def test_cgroup_view_resolves_nested_membership_and_refreshes_after_short_ttl() 
 
 
 def test_native_cgroup_view_handles_v1_v2_and_mountinfo_escapes() -> None:
+    """Verify native cgroup view handles v1 v2 and mountinfo escapes."""
     source = (CPP / "internal/runtime/cgroup_view.hh").read_text()
     assert 'fopen("/proc/self/cgroup"' in source
     assert 'fopen("/proc/self/mountinfo"' in source
@@ -230,6 +247,7 @@ def test_native_cgroup_view_handles_v1_v2_and_mountinfo_escapes() -> None:
 
 
 def test_physical_thread_observation_is_cross_platform_and_fail_closed() -> None:
+    """Verify physical thread observation is cross platform and fail closed."""
     source = (CPP / "internal/runtime/operation_task_arena.cc").read_text()
     assert "std::optional<std::size_t> ProcessPhysicalThreadCount" in source
     assert 'opendir("/proc/self/task")' in source
@@ -259,12 +277,13 @@ def test_physical_thread_observation_is_cross_platform_and_fail_closed() -> None
     assert "ProcessPhysicalThreadCount()" not in permit
     assert "TryAcquireProcessThreadPermitsUpTo" in permit
     assert "EffectiveProcessThreadCapacity performs the authoritative fail-closed" in permit
-    module = (CPP / "api/python_abi3/_core_abi3_module.cc").read_text()
-    assert '"process_physical_thread_count"' in module
+    catalog = (CPP / "internal/abi/python_abi3/method_catalog.inc").read_text()
+    assert "process_physical_thread_count," in catalog
 
 
 def test_thread_capacity_uses_live_memory_headroom_not_only_ceiling() -> None:
-    source = _source("core_impl/process_resources.py")
+    """Verify thread capacity uses live memory headroom not only ceiling."""
+    source = package_source_text("core_impl/process_resources.py")
     hard = source[source.index("def _thread_hard_capacity") : source.index("def _fd_hard_capacity")]
     assert "_effective_memory_headroom_bytes" in hard
     assert "pids.current" in source
@@ -274,6 +293,7 @@ def test_thread_capacity_uses_live_memory_headroom_not_only_ceiling() -> None:
 def test_default_thread_envelope_survives_reasonable_external_runtime_pools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify default thread envelope survives reasonable external runtime pools."""
     from schema_sanitizer.core_impl import process_resources
 
     monkeypatch.delenv("SCHEMA_SANITIZER_MAX_PROJECT_THREADS", raising=False)
@@ -288,8 +308,9 @@ def test_default_thread_envelope_survives_reasonable_external_runtime_pools(
 
 
 def test_terminal_thread_and_fd_debts_are_fixed_slot_banks() -> None:
-    thread = _source("core_impl/governed_thread.py")
-    process = _source("core_impl/process_resources.py")
+    """Verify terminal thread and FD debts are fixed slot banks."""
+    thread = package_source_text("core_impl/governed_thread.py")
+    process = package_source_text("core_impl/process_resources.py")
     assert "_RetirementDebtSlot() for _ in range(_MAX_RETIREMENT_DEBTS)" in thread
     reap = thread[
         thread.index("def reap_governed_thread_retirements") : thread.index(
@@ -308,6 +329,7 @@ def test_terminal_thread_and_fd_debts_are_fixed_slot_banks() -> None:
 
 
 def test_cpu_governor_rechecks_dynamic_capacity_even_for_single_arena() -> None:
+    """Verify CPU governor rechecks dynamic capacity even for single arena."""
     source = (CPP / "internal/runtime/process_cpu_governor.hh").read_text()
     acquire = source[source.index("AcquireTask(") : source.index("void ReleaseTask")]
     assert "arena_width" in acquire
@@ -317,6 +339,7 @@ def test_cpu_governor_rechecks_dynamic_capacity_even_for_single_arena() -> None:
 
 
 def test_allocation_registry_uses_one_process_global_slab_with_shrink_only_admission() -> None:
+    """Verify allocation registry uses one process global slab with shrink only admission."""
     source = (CPP / "internal/memory/memory_pool_registry.cc.inc").read_text()
     assert "struct GlobalRegistryBank" in source
     assert "std::make_unique<GlobalAllocationSlot[]>(capacity)" in source
@@ -370,7 +393,8 @@ def test_allocation_registry_uses_one_process_global_slab_with_shrink_only_admis
 
 
 def test_remote_sort_scratch_is_governed_before_sorting() -> None:
-    helper = _source("core_impl/governed_sort.py")
+    """Verify remote sort scratch is governed before sorting."""
+    helper = package_source_text("core_impl/governed_sort.py")
     reserve = helper.index("reserve_sort_scratch")
     sort = helper.index("values.sort", reserve)
     assert reserve < sort
@@ -381,12 +405,13 @@ def test_remote_sort_scratch_is_governed_before_sorting() -> None:
         "remote_impl/providers/gcs.py",
         "remote_impl/providers/azure.py",
     ):
-        source = _source(relative)
+        source = package_source_text(relative)
         assert ".sort(" not in source
         assert "governed_sort" in source
 
 
 def test_async_production_callers_supply_predictable_result_preflight_sizes() -> None:
+    """Verify async production callers supply predictable result preflight sizes."""
     expected = [
         "pipeline/source_discovery.py",
         "remote_impl/providers/s3.py",
@@ -394,14 +419,16 @@ def test_async_production_callers_supply_predictable_result_preflight_sizes() ->
         "remote_impl/providers/azure.py",
     ]
     for relative in expected:
-        assert "expected_retained_bytes=" in _source(relative), relative
+        assert "AsyncResultMemoryContract" in package_source_text(relative), relative
 
 
 def test_sources_keep_cmake43_and_compile() -> None:
+    """Verify sources keep cmake43 and compile."""
     assert (ROOT / "CMakeLists.txt").read_text().startswith("cmake_minimum_required(VERSION 4.3)")
 
 
 def test_all_native_thread_creation_paths_share_physical_thread_domain() -> None:
+    """Verify all native thread creation paths share physical thread domain."""
     workers = (CPP / "internal/runtime/ordered_executor_workers.cc.inc").read_text()
     assert "ProcessPhysicalThreadPermitLease permit(1U)" in workers
     assert "mark_process_physical_thread_running()" in workers
@@ -413,13 +440,15 @@ def test_all_native_thread_creation_paths_share_physical_thread_domain() -> None
 
 
 def test_thread_stack_reservations_consume_live_headroom_on_python_and_cpp() -> None:
-    process = _source("core_impl/process_resources.py")
+    """Verify thread stack reservations consume live headroom on Python and C++."""
+    process = package_source_text("core_impl/process_resources.py")
     hard = process[
         process.index("def _thread_hard_capacity") : process.index("def _fd_hard_capacity")
     ]
     assert "virtual_stack_reserved" in hard
     assert "governed_in_use" in hard
-    assert "_CONSERVATIVE_THREAD_STACK_BYTES" in hard
+    assert "stack_bytes = _thread_stack_reservation_bytes()" in hard
+    assert "_CONSERVATIVE_THREAD_STACK_BYTES" in process
 
     arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text()
     assert "ManagedThreadMemoryCapacity" in arena
@@ -431,6 +460,7 @@ def test_thread_stack_reservations_consume_live_headroom_on_python_and_cpp() -> 
 def test_python_and_cpp_share_one_physical_thread_permit_domain(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify Python and C++ share one physical thread permit domain."""
     from threading import Thread
 
     from schema_sanitizer.core_impl import governed_thread
@@ -439,36 +469,39 @@ def test_python_and_cpp_share_one_physical_thread_permit_domain(
 
     class _NativePhysicalThreadApi:
         def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+            """Validate and record acquisition of one physical-thread permit."""
             assert (desired, minimum) == (1, 1)
             events.append("acquire")
             return 1
 
         def process_physical_thread_permits_release(self, amount: int) -> None:
+            """Validate and record release of one physical-thread permit."""
             assert amount == 1
             events.append("release")
 
         def process_physical_thread_mark_running(self) -> None:
+            """Record that the physical thread entered its running state."""
             events.append("running")
 
         def process_physical_thread_mark_stopped(self) -> None:
+            """Record that the physical thread entered its stopped state."""
             events.append("stopped")
 
     native = _NativePhysicalThreadApi()
     monkeypatch.setattr(governed_thread, "_native_physical_thread_api", lambda: native)
     thread = Thread(target=lambda: events.append("target"))
     governed_thread.start_governed_thread(thread)
-    thread.join(timeout=2.0)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
     assert events == ["acquire", "running", "target", "stopped", "release"]
 
     cpp = (CPP / "internal/runtime/operation_task_arena.cc").read_text()
     assert "g_process_physical_thread_permits" in cpp
     assert "TryAcquireProcessPhysicalThreadPermitsUpTo" in cpp
-    module = (CPP / "api/python_abi3/_core_abi3_module.cc").read_text()
+    catalog = (CPP / "internal/abi/python_abi3/method_catalog.inc").read_text()
     for method in (
         "process_physical_thread_permits_acquire",
         "process_physical_thread_permits_release",
         "process_physical_thread_mark_running",
         "process_physical_thread_mark_stopped",
     ):
-        assert f'"{method}"' in module
+        assert f"{method}," in catalog

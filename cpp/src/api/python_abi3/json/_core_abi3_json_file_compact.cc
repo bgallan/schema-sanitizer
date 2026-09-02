@@ -1,6 +1,10 @@
 /*
- * Python ABI3 wrappers for local JSON-array file batching.
+ * Implements Python ABI3 wrappers for local JSON-array file batching.
+ *
+ * The routines preserve JSON value semantics while enforcing bounded native
+ * ownership and Python errors.
  */
+
 #include "api/python_abi3/json/_core_abi3_json_tools.hh"
 
 #include <memory>
@@ -10,7 +14,7 @@
 namespace core_abi3_internal {
 namespace {
 
-// Appends path context to JSON parser errors raised while processing a folder.
+/// Appends path context to JSON parser errors raised while processing a folder.
 std::string invalid_json_file_message(PyObject *path_obj,
                                       std::string_view detail) {
   std::string message = "Invalid JSON file";
@@ -31,7 +35,7 @@ std::string invalid_json_file_message(PyObject *path_obj,
   return message;
 }
 
-// Reads, validates, and appends one JSON-array document as JSON Lines.
+/// Reads, validates, and appends one JSON-array document as JSON Lines.
 bool append_array_file_jsonl(PyObject *path_obj, long long memory_limit_bytes,
                              std::string *raw, std::string *out) {
   if (!read_local_file_bytes(path_obj, memory_limit_bytes, raw)) {
@@ -50,6 +54,8 @@ bool append_array_file_jsonl(PyObject *path_obj, long long memory_limit_bytes,
 
 } // namespace
 
+/// Reads bounded JSON-array files and concatenates them as validated JSON Lines
+/// bytes.
 PyObject *py_json_array_files_to_jsonl_bytes(PyObject *, PyObject *args) {
   PyObject *paths_obj = nullptr;
   long long memory_limit_bytes = -1;

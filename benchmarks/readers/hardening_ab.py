@@ -1,20 +1,23 @@
 """Compare valid-reader throughput between two source trees without PyArrow.
 
-The harness deliberately uses public JSONL sinks for JSON, CSV, and XML and the
-bounded native Parquet preflight for a valid Parquet fixture.  Each implementation
-runs in a fresh subprocess so extension modules from the two trees never share a
-Python process.
+It generates identical public-API workloads and runs each source tree in a fresh
+child process so native extensions never mix.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPOSITORY_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPOSITORY_ROOT))
+
+from benchmarks.support.command import CAPTURE, DISCARD, run_command  # noqa: E402
 
 _WORKER = r"""
 import json
@@ -34,6 +37,7 @@ from schema_sanitizer.core_impl.native_runtime import native_core as core
 
 
 def timed(name, call):
+    '''Warm, measure, and summarize one isolated reader case.'''
     call(-1)  # warmup outside the sample set
     samples = []
     for ordinal in range(repeats):
@@ -51,7 +55,9 @@ def timed(name, call):
 
 
 def convert_case(name, source, input_format, **options):
+    '''Build and time one public JSONL conversion case.'''
     def run(ordinal):
+        '''Execute one conversion and verify its non-empty output.'''
         output = fixtures / f"{label}-{name}-{ordinal}.jsonl"
         try:
             output.unlink()
@@ -82,6 +88,7 @@ for multi in (False, True):
 
 
 def parquet_preflight(_ordinal):
+    '''Exercise native Parquet preflight and require a populated report.'''
     payload = core.parquet_stream_preflight_json(
         str(fixtures / "valid.parquet"), None, 256 << 20
     )
@@ -93,8 +100,27 @@ cases.append(timed("parquet_preflight", parquet_preflight))
 print(json.dumps({"label": label, "cases": cases}, sort_keys=True))
 """
 
+_PARQUET_FIXTURE_GENERATOR = r"""
+import sys
+from pathlib import Path
+
+candidate_root = Path(sys.argv[1])
+fixture_root = Path(sys.argv[2])
+sys.path.insert(0, str(candidate_root / "src"))
+
+import schema_sanitizer as ss
+
+ss.to_parquet(
+    fixture_root / "valid.jsonl",
+    fixture_root / "valid.parquet",
+    input_format="jsonl",
+    memory_limit_bytes=67108864,
+)
+"""
+
 
 def _alpha_suffix(index: int) -> str:
+    """Return a deterministic alphabetic suffix for generated fixture keys."""
     value = index
     chars: list[str] = []
     while True:
@@ -108,6 +134,7 @@ def _alpha_suffix(index: int) -> str:
 
 def _write_fixtures(root: Path, rows: int, width: int, candidate_root: Path) -> None:
     # Alpha-only names remain distinct under every supported default name policy.
+    """Generate deterministic source fixtures for every reader benchmark case."""
     keys = [f"field{_alpha_suffix(index)}" for index in range(width)]
     with (root / "valid.jsonl").open("w", encoding="utf-8", newline="\n") as stream:
         for row in range(rows):
@@ -132,34 +159,30 @@ def _write_fixtures(root: Path, rows: int, width: int, candidate_root: Path) -> 
             stream.write(f"<text>row-{row}-é</text></row>")
         stream.write("</rows>")
 
-    generator = (
-        "import sys; sys.path.insert(0, r'"
-        + str(candidate_root / "src").replace("'", "\\'")
-        + "'); from pathlib import Path; import schema_sanitizer as ss; "
-        "p=Path(r'" + str(root).replace("'", "\\'") + "'); "
-        "ss.to_parquet(p/'valid.jsonl', p/'valid.parquet', "
-        "input_format='jsonl', memory_limit_bytes=67108864)"
-    )
-    subprocess.run(
-        [sys.executable, "-c", generator],
+    run_command(
+        [sys.executable, "-c", _PARQUET_FIXTURE_GENERATOR, str(candidate_root), str(root)],
         check=True,
         cwd=root,
-        stdout=subprocess.DEVNULL,
+        stdout=DISCARD,
+        timeout=600,
     )
 
 
 def _run_tree(root: Path, fixtures: Path, repeats: int, label: str) -> dict[str, Any]:
-    completed = subprocess.run(
+    """Run the benchmark worker in one selected source tree and load its report."""
+    completed = run_command(
         [sys.executable, "-c", _WORKER, str(root), str(fixtures), str(repeats), label],
         check=True,
         cwd=fixtures,
         text=True,
-        stdout=subprocess.PIPE,
+        stdout=CAPTURE,
+        timeout=3_600,
     )
     return json.loads(completed.stdout)
 
 
 def _index(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Index benchmark records by their stable case name."""
     return {case["name"]: case for case in report["cases"]}
 
 
@@ -206,6 +229,7 @@ def compare(
 
 
 def main() -> None:
+    """Compare two source trees and write their isolated reader benchmark report."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline-root", type=Path, required=True)
     parser.add_argument("--candidate-root", type=Path, required=True)

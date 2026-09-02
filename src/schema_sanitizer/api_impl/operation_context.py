@@ -1,4 +1,8 @@
-"""Whole-operation concurrency policy and lazy remote-I/O ownership."""
+"""Whole-operation concurrency policy and lazy remote-I/O ownership.
+
+It derives worker, memory, and admission policy; lazily owns remote coordinators and
+sessions; and drains finalizers into resource diagnostics.
+"""
 
 from __future__ import annotations
 
@@ -59,6 +63,7 @@ _MAX_OPERATION_ID = (1 << 63) - 1
 
 
 def _next_operation_id() -> int:
+    """Return next operation id retained by this operation."""
     global _OPERATION_ID_SEQUENCE
     with _OPERATION_ID_LOCK:
         if _OPERATION_ID_SEQUENCE >= _MAX_OPERATION_ID:
@@ -84,7 +89,7 @@ class _Releasable(Protocol):
 
 
 def _run_operation_resource_finalizer(authority: RootedFinalizerAuthority) -> None:
-    """Close an abandoned resource domain without retaining its wrapper."""
+    """Close each rooted operation resource and clear its finalizer authority slot."""
     coordinator = cast(RemoteIoCoordinator | None, authority.arg0)
     if coordinator is not None:
         coordinator.close()
@@ -111,12 +116,14 @@ def _run_operation_resource_finalizer(authority: RootedFinalizerAuthority) -> No
             complete_operation(
                 str(operation_id), {"operation_id": str(operation_id), "state": "closed"}
             )
-        except Exception:
-            pass
+        # Finalizer diagnostics cannot block cleanup.
+        except Exception as ignored_error:
+            del ignored_error
         authority.arg5 = None
 
 
 def _run_operation_context_finalizer(authority: RootedFinalizerAuthority) -> None:
+    """Run operation context finalizer."""
     resources = cast(_Releasable | None, authority.arg0)
     if resources is not None:
         resources.release()
@@ -126,6 +133,7 @@ def _run_operation_context_finalizer(authority: RootedFinalizerAuthority) -> Non
 def _publish_operation_finalizer(
     escrow: ReservedFinalizerEscrow[object], ticket: int | None, owner: object
 ) -> None:
+    """Publish operation-context cleanup to its reserved finalizer slot."""
     global _OPERATION_FINALIZER_OVERFLOWS, _OPERATION_FINALIZER_OVERFLOWED
     if ticket is None:
         return
@@ -151,6 +159,7 @@ def drain_operation_finalizers() -> int:
     ):
 
         def process(ticket: int, owner: object, *, _method: str = method) -> None:
+            """Process one retained work item."""
             nonlocal drained
             if isinstance(owner, RootedFinalizerAuthority):
                 owner.ticket = ticket
@@ -509,8 +518,9 @@ class _OperationExecutionResources:
                     self.operation_id,
                     {"operation_id": self.operation_id, "pid": self.pid, "state": "closed"},
                 )
-            except Exception:
-                pass
+            # Finalizer diagnostics are best effort.
+            except Exception as ignored_error:
+                del ignored_error
 
     def __del__(self) -> None:
         """Arm the pre-rooted resource authority without blocking."""

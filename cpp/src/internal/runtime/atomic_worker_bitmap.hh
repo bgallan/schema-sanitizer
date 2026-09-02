@@ -1,4 +1,7 @@
-// Dynamically sized lock-free worker bitmap for wide task arenas.
+// Implements a dynamically sized atomic worker bitmap for wide task arenas.
+// It supports circular selection and intersection visits without
+// global locking.
+
 #pragma once
 
 #include <atomic>
@@ -14,6 +17,7 @@ namespace sanitize::internal {
 // has no 32-worker representation ceiling and degrades by N/64, not N.
 class AtomicWorkerBitmap final {
 public:
+  /// Allocates atomic words covering the requested worker-index range.
   explicit AtomicWorkerBitmap(std::size_t bit_count)
       : word_count_((bit_count + 63U) / 64U),
         summary_word_count_((word_count_ + 63U) / 64U),
@@ -28,9 +32,12 @@ public:
     Reset();
   }
 
+  /// Disables copying the atomic worker bitmap.
   AtomicWorkerBitmap(const AtomicWorkerBitmap &) = delete;
+  /// Disables copy assignment for the atomic worker bitmap.
   AtomicWorkerBitmap &operator=(const AtomicWorkerBitmap &) = delete;
 
+  /// Atomically marks a worker index present in the bitmap.
   void Set(std::size_t index,
            std::memory_order order = std::memory_order_release) noexcept {
     const auto word = index >> 6U;
@@ -38,6 +45,7 @@ public:
     mark_word_nonempty(word);
   }
 
+  /// Atomically removes a worker index from the bitmap.
   void Clear(std::size_t index,
              std::memory_order order = std::memory_order_release) noexcept {
     const auto word = index >> 6U;
@@ -47,14 +55,15 @@ public:
     }
   }
 
+  /// Tests whether a worker index is currently marked.
   [[nodiscard]] bool
   Test(std::size_t index,
        std::memory_order order = std::memory_order_acquire) const noexcept {
     return (words_[index >> 6U].load(order) & bit(index)) != 0U;
   }
 
-  // Atomically claims the first clear bit in [begin, end), searching from the
-  // normalized origin and wrapping once inside the lane.
+  /// Atomically claims the first clear bit in `[begin, end)`, searching
+  /// from the normalized origin and wrapping once inside the lane.
   [[nodiscard]] std::size_t TrySetFirstClear(std::size_t begin, std::size_t end,
                                              std::size_t origin) noexcept {
     if (begin >= end) {
@@ -70,7 +79,8 @@ public:
     return found == start ? end : found;
   }
 
-  // Returns the first bit which is set in this bitmap and clear in `excluded`.
+  /// Returns the first bit set here and clear in `excluded`, using circular
+  /// range order.
   [[nodiscard]] std::size_t FindSetNotIn(const AtomicWorkerBitmap &excluded,
                                          std::size_t begin, std::size_t end,
                                          std::size_t origin) const noexcept {
@@ -87,6 +97,8 @@ public:
     return found == start ? end : found;
   }
 
+  /// Visits marked indices shared with another bitmap in circular
+  /// range order.
   template <class Visitor>
   void VisitIntersection(const AtomicWorkerBitmap &other, std::size_t begin,
                          std::size_t end, std::size_t origin,
@@ -102,6 +114,7 @@ public:
     }
   }
 
+  /// Returns the number of currently marked worker indices.
   [[nodiscard]] std::size_t Count() const noexcept {
     std::size_t total = 0;
     for (std::size_t index = 0; index < word_count_; ++index) {
@@ -111,6 +124,7 @@ public:
     return total;
   }
 
+  /// Clears every worker bit without changing bitmap capacity.
   void Reset() noexcept {
     for (std::size_t index = 0; index < word_count_; ++index) {
       words_[index].store(0, std::memory_order_relaxed);
@@ -121,10 +135,12 @@ public:
   }
 
 private:
+  /// Publishes that the data word may contain at least one marked bit.
   void mark_word_nonempty(std::size_t word) noexcept {
     nonempty_words_[word >> 6U].fetch_or(bit(word), std::memory_order_release);
   }
 
+  /// Clears an empty word's summary bit without losing a concurrent set.
   void mark_word_empty(std::size_t word) noexcept {
     auto &summary = nonempty_words_[word >> 6U];
     summary.fetch_and(~bit(word), std::memory_order_acq_rel);
@@ -136,10 +152,12 @@ private:
     }
   }
 
+  /// Returns the single-bit mask for an index within its 64-bit word.
   [[nodiscard]] static constexpr std::uint64_t bit(std::size_t index) noexcept {
     return std::uint64_t{1} << (index & 63U);
   }
 
+  /// Masks the portion of one 64-bit word intersecting `[begin, end)`.
   [[nodiscard]] static constexpr std::uint64_t
   range_mask(std::size_t word, std::size_t begin, std::size_t end) noexcept {
     const auto word_begin = word << 6U;
@@ -155,6 +173,7 @@ private:
     return below_high & ~below_low;
   }
 
+  /// Atomically claims the first clear bit in a nonwrapping range.
   [[nodiscard]] std::size_t TrySetFirstClearRange(std::size_t begin,
                                                   std::size_t end) noexcept {
     if (begin >= end) {
@@ -183,6 +202,7 @@ private:
     return end;
   }
 
+  /// Finds the first marked bit absent from `excluded` in a nonwrapping range.
   [[nodiscard]] std::size_t
   FindSetNotInRange(const AtomicWorkerBitmap &excluded, std::size_t begin,
                     std::size_t end) const noexcept {
@@ -216,6 +236,7 @@ private:
     return end;
   }
 
+  /// Visits marked intersections in one nonwrapping worker-index range.
   template <class Visitor>
   void VisitIntersectionRange(const AtomicWorkerBitmap &other,
                               std::size_t begin, std::size_t end,

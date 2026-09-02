@@ -1,4 +1,8 @@
-"""Owned local staging for remote inputs, outputs, and object transfers."""
+"""Owned local staging for remote inputs, outputs, and object transfers.
+
+It owns temporary paths for remote inputs and outputs, coordinates single or multi
+transfers, and publishes only after complete success.
+"""
 
 from __future__ import annotations
 
@@ -25,10 +29,11 @@ from ..core_impl.uris import (
 )
 from ..sources.models import RemoteFile
 from . import routing, sync_backend
+from .async_bridge import run_sync
 from .directory_downloads import RemoteDirectoryDownloadSession, download_files_to_directory
 from .io_footprint import RemoteIoFootprint
 from .transfer_dispatch import download_single_file, upload_file
-from .transport import check_download_size, run_sync
+from .transport import check_download_size
 
 if TYPE_CHECKING:
     from ..api_impl.operation_context import OperationExecutionContext

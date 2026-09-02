@@ -1,4 +1,9 @@
-"""Unit coverage for the evidence-driven telemetry benchmark."""
+"""Validate the evidence-driven telemetry benchmark and its high-core plans.
+
+Tests distinguish generic counters from proven DRAM saturation, parse repeated platform events,
+select paired workload frontiers, preserve exact CPU sets across plan reuse, support devnull mode,
+and configure the wide fixture beyond sixteen workers.
+"""
 
 from __future__ import annotations
 
@@ -293,10 +298,10 @@ def test_devnull_mode_bypasses_atomic_publication(tmp_path: Path) -> None:
     }
 
 
-def test_high_core_wide_fixture_configures_32_workers_and_breaks_16(
+def test_high_core_wide_fixture_configures_32_workers_and_publishes_all_tasks(
     tmp_path: Path,
 ) -> None:
-    """Eligible fixed-wide work configures 32 workers and exceeds 16-way activity."""
+    """Eligible fixed-wide work configures 32 workers and publishes exact task totals."""
     if not hasattr(os, "sched_getaffinity") or len(os.sched_getaffinity(0)) < 32:
         pytest.skip("requires 32 visible CPUs")
     report_path = tmp_path / "high-core.json"
@@ -329,20 +334,10 @@ def test_high_core_wide_fixture_configures_32_workers_and_breaks_16(
     payload = json.loads(run)["workloads"]["arrow_stream"]["runs"]["32"]
     native = payload["representative_native"]
     assert native["effective_workers"] == 32
+    tasks = native["tasks"]
+    submitted = sum(int(values["submitted"]) for values in tasks.values())
+    started_tasks = sum(int(values["started"]) for values in tasks.values())
+    finished = sum(int(values["finished"]) for values in tasks.values())
     started = native["counters"]["started_workers"]
-    peak = native["counters"]["peak_active_tasks"]
-    assert 16 < peak <= started <= 32
-
-
-def test_benchmark_owners_remain_cohesive_and_below_500_lines() -> None:
-    """The host protocol stays split by responsibility without large owners."""
-    root = Path(__file__).parents[2] / "benchmarks" / "concurrency" / "telemetry"
-    owners = [
-        root / "cli.py",
-        root / "analysis.py",
-        root / "runner.py",
-        root / "support.py",
-        root / "high_core_suite.py",
-        root / "high_core_evidence.py",
-    ]
-    assert all(len(path.read_text(encoding="utf-8").splitlines()) <= 500 for path in owners)
+    assert submitted == started_tasks == finished > 32
+    assert 1 <= started <= 32

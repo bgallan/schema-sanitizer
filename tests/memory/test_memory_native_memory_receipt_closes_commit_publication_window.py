@@ -1,4 +1,7 @@
-"""Regression coverage for memory native memory receipt closes commit publication window."""
+"""Checks native memory receipts across release, external-runtime permits, governed
+native-thread startup, and retry resynchronization. Commit and publication form one
+receipt-owned transition, so later cleanup trusts native owner state rather than
+mirrored amounts."""
 
 from __future__ import annotations
 
@@ -6,36 +9,40 @@ from pathlib import Path
 
 
 def _root() -> Path:
+    """Return the repository root used by source-contract checks."""
     return Path(__file__).resolve().parents[2]
 
 
 def test_native_memory_receipt_closes_commit_publication_window() -> None:
+    """Verify native memory receipt closes commit publication window."""
     source = (_root() / "cpp/src/api/python_abi3/options/prepare.cc").read_text()
-    module = (_root() / "cpp/src/api/python_abi3/_core_abi3_module.cc").read_text()
+    catalog = (_root() / "cpp/src/internal/abi/python_abi3/method_catalog.inc").read_text()
     memory = (_root() / "src/schema_sanitizer/core_impl/memory_budget.py").read_text()
 
     assert "kOperationMemoryReservationCapsuleName" in source
     assert "reservation->bytes = bytes;" in source
     assert "reservation->bytes = requested;" in source
     assert "reservation->release();" in source
-    assert '"operation_memory_reservation_create"' in module
-    assert '"operation_memory_reservation_resize"' in module
+    assert "operation_memory_reservation_create," in catalog
+    assert "operation_memory_reservation_resize," in catalog
     assert "_prepare_python_lease" in memory
     assert "_commit_python_lease_reservation" in memory
     assert "entry.native_receipt = receipt" in memory
 
 
 def test_memory_release_uses_receipt_not_mirrored_amount() -> None:
+    """Verify memory release uses receipt not mirrored amount."""
     memory = (_root() / "src/schema_sanitizer/core_impl/memory_budget.py").read_text()
     start = memory.index("    def _release_python_lease_authority(")
     end = memory.index("    def _release_python_lease(", start)
     block = memory[start:end]
-    assert "operation_memory_reservation_release(receipt)" in block
+    assert "self._native_reservation_release(receipt)" in block
     assert "current.native_receipt = None" in block
     assert "if amount == 0:" in block
 
 
 def test_external_runtime_permits_have_native_raii_receipt() -> None:
+    """Verify external runtime permits have native RAII receipt."""
     header = (_root() / "cpp/src/internal/runtime/operation_task_arena.hh").read_text()
     probe = (_root() / "cpp/src/api/python_abi3/runtime/ordered_executor_probe.cc").read_text()
     resources = (_root() / "src/schema_sanitizer/core_impl/process_resources.py").read_text()
@@ -49,6 +56,7 @@ def test_external_runtime_permits_have_native_raii_receipt() -> None:
 
 
 def test_start_governed_native_thread_uses_raii_owner() -> None:
+    """Verify start governed native thread uses RAII owner."""
     arena = (_root() / "cpp/src/internal/runtime/operation_task_arena.cc").read_text()
     start = arena.index("[[nodiscard]] std::thread StartGovernedNativeThread")
     end = arena.index("bool TryAcquireReaperThreadPermit", start)
@@ -60,12 +68,14 @@ def test_start_governed_native_thread_uses_raii_owner() -> None:
 
 
 def test_external_retry_resynchronizes_from_native_owner() -> None:
+    """Verify external retry resynchronizes from native owner."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class Native:
         supports_exact_permit_lease = True
 
         def exact_permit_lease_amount(self, lease: object) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
             return int(getattr(lease, "amount"))
 
     class Lease:

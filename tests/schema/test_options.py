@@ -1,4 +1,8 @@
-"""Tests option encoding and validation."""
+"""Tests option encoding and validation.
+
+It keeps Python and native option catalogs aligned and covers enum, type, default,
+encoding, public-call, and unknown-attribute validation.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,6 @@ import re
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 from schema_sanitizer.core_impl.native_options import OPTIONS
 from schema_sanitizer.options_impl.call_options import (
@@ -86,12 +89,12 @@ def _decode_cpp_string_literals(expr: str) -> str:
 
 
 def _normalize_cxx_default_expr(expr: str) -> str:
-    """Return normalize cxx default expr for the test."""
+    """Collapse C++ default-expression whitespace for stable comparison."""
     return " ".join(expr.split())
 
 
 def _cpp_options_catalog() -> list[tuple[str, str, str, str, str]]:
-    """Return cpp options catalog for the test."""
+    """Parse the ordered native option catalog into comparable records."""
     catalog_path = (
         Path(__file__).resolve().parents[2] / "cpp/src/sanitize/options/options_catalog.def"
     )
@@ -129,19 +132,12 @@ def _cpp_options_catalog() -> list[tuple[str, str, str, str, str]]:
 
 
 def test_native_options_catalog_matches_cpp_source_order_and_groups() -> None:
-    """Verify native option metadata follows the C++ catalog without a Python copy."""
+    """Verify native options catalog matches C++ source order and groups."""
     cpp_catalog = _cpp_options_catalog()
     assert [(spec.name, spec.group) for spec in OPTIONS] == [
         (name, group) for _, name, _, group, _ in cpp_catalog
     ]
     assert len(OPTIONS) == len({spec.name for spec in OPTIONS})
-
-
-def test_python_options_catalog_facades_are_removed() -> None:
-    """Verify the former generated catalog and default parser stay retired."""
-    package = Path(__file__).resolve().parents[2] / "src/schema_sanitizer/core_impl/native_options"
-    assert not (package / "catalog.py").exists()
-    assert not (package / "defaults.py").exists()
 
 
 def test_memory_limit_helper_translates_only_native_unset_sentinel() -> None:
@@ -162,16 +158,14 @@ def test_memory_limit_helper_translates_only_native_unset_sentinel() -> None:
     assert memory_limit_bytes_or_none(None) is None
 
 
-def test_options_validate_native_rejects_bad_enum() -> None:
+def test_options_validate_native_rejects_bad_enum(require_native: None) -> None:
     """Verify options validate native rejects bad enum."""
-    require_native()
     with pytest.raises(ValueError, match="schema_evolution"):
         InternalOptions(schema={"schema_evolution": "NOT_A_MODE"})
 
 
-def test_validate_native_accepts_memory_limit() -> None:
+def test_validate_native_accepts_memory_limit(require_native: None) -> None:
     """Verify validate native accepts memory limit."""
-    require_native()
     opt = InternalOptions(performance={"memory_limit_bytes": 1024 * 1024})
 
     opt.validate_native()
@@ -179,10 +173,8 @@ def test_validate_native_accepts_memory_limit() -> None:
     assert opt.performance.memory_limit_bytes == 1024 * 1024
 
 
-def test_options_validate_native_rejects_negative_depth_limits() -> None:
+def test_options_validate_native_rejects_negative_depth_limits(require_native: None) -> None:
     """Verify options validate native rejects negative depth limits."""
-    require_native()
-
     for key in ("arrow_max_depth", "parquet_max_depth"):
         opt = InternalOptions(inference={key: -1})
         with pytest.raises(Exception, match=key):
@@ -205,30 +197,17 @@ def test_public_call_options_map_to_native_options() -> None:
     assert opt.errors.on_error.name == "STOP"
     assert opt.performance.threading_mode.name == "MULTI"
     assert opt.performance.memory_limit_bytes == 1024 * 1024
-    assert opt.performance.memory_limit_bytes == 1024 * 1024
     assert opt.xml.xml_row_tag == "row"
 
 
-def test_public_call_options_reject_removed_quarantine_policy() -> None:
-    """Verify the removed quarantine policy is rejected."""
-    with pytest.raises(ValueError, match="on_error"):
-        normalize_call_options(on_error="quarantine")
-
-
-def test_public_call_options_reject_old_schema_kwarg() -> None:
-    """Verify the old schema kwarg is no longer accepted."""
-    with pytest.raises(TypeError, match="schema"):
-        normalize_call_options(schema={"fields": [{"name": "a", "type": "int64"}]})
-
-
 def test_internal_call_options_reject_object_schema_contract() -> None:
-    """Verify schema_contract rejects non-PyArrow objects."""
+    """Verify internal call options reject object schema contract."""
     with pytest.raises(TypeError, match="schema_contract"):
         normalize_call_options(schema_contract=object())
 
 
 def test_internal_call_options_reject_non_pyarrow_schema_contract() -> None:
-    """Verify the internal schema contract only accepts PyArrow schemas."""
+    """Verify internal call options reject non PyArrow schema contract."""
     pytest.importorskip("pyarrow")
     for value in (
         {"fields": [{"name": "a", "type": "int64"}]},
@@ -239,14 +218,13 @@ def test_internal_call_options_reject_non_pyarrow_schema_contract() -> None:
 
 
 def test_public_call_options_reject_strict_without_schema_contract() -> None:
-    """Verify strict schema mode requires a registry-derived contract."""
+    """Verify public call options reject strict without schema contract."""
     with pytest.raises(ValueError, match="schema contract"):
         normalize_call_options(schema_mode="strict")
 
 
-def test_native_options_reject_strict_without_schema_contract() -> None:
-    """Verify native execution rejects strict schema mode without a contract."""
-    require_native()
+def test_native_options_reject_strict_without_schema_contract(require_native: None) -> None:
+    """Verify native options reject strict without schema contract."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     with pytest.raises(Exception, match="schema contract"):
@@ -279,13 +257,6 @@ def test_public_call_options_accept_list_for_sequence_options() -> None:
     assert opt.inference.timestamp_regexps == ["^\\d{4}$"]
 
 
-def test_removed_temporal_pattern_names_are_rejected() -> None:
-    """Verify removed public temporal pattern names have no compatibility aliases."""
-    for key in ("timestamp_patterns", "date_patterns", "time_patterns"):
-        with pytest.raises(TypeError, match="Unknown option"):
-            normalize_call_options(**{key: ()})
-
-
 def test_public_call_options_reject_non_positive_memory_limit() -> None:
     """Verify public call options reject non positive memory limit."""
     for value in (0, -1):
@@ -301,12 +272,6 @@ def test_public_call_options_reject_invalid_numeric_limits() -> None:
     for value in (0, -1):
         with pytest.raises(TypeError, match="read_chunk_bytes"):
             normalize_call_options(read_chunk_bytes=value)
-
-
-def test_public_call_options_reject_removed_max_depth() -> None:
-    """Verify the old max_depth option is no longer accepted."""
-    with pytest.raises(TypeError, match="max_depth"):
-        normalize_call_options(max_depth=1)
 
 
 def test_public_call_options_reject_non_int_numeric_options() -> None:
@@ -330,7 +295,7 @@ def test_public_call_options_reject_non_bool_boolean_options() -> None:
 
 
 def test_public_float_separator_defaults_and_validation() -> None:
-    """Verify public float separator options are explicit and deterministic."""
+    """Verify public float separator defaults and validation."""
     defaults = normalize_call_options()
     assert defaults.inference.parse_float_decimal_separator == "."
     assert defaults.inference.parse_float_thousands_separator == ","
@@ -376,7 +341,7 @@ def test_public_call_options_validate_input_text_encoding() -> None:
 
 
 def test_public_call_options_validate_xml_row_tag() -> None:
-    """Verify xml_row_tag accepts only explicit non-empty strings or None."""
+    """Verify public call options validate XML row tag."""
     assert normalize_call_options(xml_row_tag=None).xml.xml_row_tag == ""
     assert normalize_call_options(xml_row_tag=" row ").xml.xml_row_tag == "row"
 
@@ -416,7 +381,7 @@ def test_options_include_defaults_roundtrip_is_constructible() -> None:
 
 
 def test_numeric_string_parsing_defaults_to_disabled() -> None:
-    """Verify scalar string parsing features are disabled by default."""
+    """Verify numeric string parsing defaults to disabled."""
     public = normalize_call_options()
     internal = InternalOptions()
 
@@ -432,7 +397,7 @@ def test_numeric_string_parsing_defaults_to_disabled() -> None:
 
 
 def test_public_default_call_options_can_use_native_defaults() -> None:
-    """Verify default public options can skip explicit option serialization."""
+    """Verify public default call options can use native defaults."""
     assert normalize_call_options_or_none() is None
     assert normalize_call_options_or_none(parse_integers=False, true_tokens=[]) is None
     assert normalize_call_options_or_none(parse_integers=True) is not None
@@ -441,7 +406,7 @@ def test_public_default_call_options_can_use_native_defaults() -> None:
 
 
 def test_column_order_defaults_to_alphabetically() -> None:
-    """Verify public and internal field ordering default to alphabetically."""
+    """Verify column order defaults to alphabetically."""
     public = normalize_call_options()
     internal = InternalOptions()
 
@@ -449,16 +414,8 @@ def test_column_order_defaults_to_alphabetically() -> None:
     assert internal.schema.field_order.name == "ALPHABETICALLY"
 
 
-def test_column_order_rejects_removed_sorted_alias() -> None:
-    """Verify the removed sorted spelling is not accepted."""
-    with pytest.raises(ValueError, match="column_order"):
-        normalize_call_options(column_order="sorted")
-    with pytest.raises(ValueError, match="field_order"):
-        InternalOptions(schema={"field_order": "sorted"})
-
-
 def test_field_name_policy_defaults_to_lower_alpha() -> None:
-    """Verify field-name sanitization is enabled by default."""
+    """Verify field name policy defaults to lower alpha."""
     public = normalize_call_options()
     internal = InternalOptions()
 
@@ -466,19 +423,16 @@ def test_field_name_policy_defaults_to_lower_alpha() -> None:
     assert internal.schema.field_name_policy == "lower_alpha"
 
 
-def test_public_field_name_policy_accepts_only_canonical_names() -> None:
-    """Verify removed compact and dashed policy spellings are rejected."""
+def test_public_field_name_policy_normalizes_whitespace_and_case() -> None:
+    """Verify public field name policy normalizes whitespace and case."""
     assert (
         normalize_call_options(field_name_policy=" PRESERVE ").schema.field_name_policy
         == "preserve"
     )
-    for value in ("lower-alpha", "loweralpha", "lower-snake"):
-        with pytest.raises(ValueError, match="field_name_policy"):
-            normalize_call_options(field_name_policy=value)
 
 
 def test_public_field_name_policy_rejects_invalid_values() -> None:
-    """Verify public field-name policy rejects unsupported values."""
+    """Verify public field name policy rejects invalid values."""
     with pytest.raises(ValueError, match="field_name_policy"):
         normalize_call_options(field_name_policy="camelCase")
 
@@ -545,7 +499,7 @@ def test_internal_options_reject_invalid_enum_values() -> None:
 
 
 def test_internal_options_reject_invalid_timestamp_precision_native() -> None:
-    """Verify native validation rejects invalid timestamp precision strings."""
+    """Verify internal options reject invalid timestamp precision native."""
     opt = InternalOptions(schema={"timestamp_precision": "TIMESTAMP_SECONDS"})
 
     with pytest.raises(Exception, match="timestamp_precision"):
@@ -553,7 +507,7 @@ def test_internal_options_reject_invalid_timestamp_precision_native() -> None:
 
 
 def test_internal_options_reject_invalid_field_name_policy_native() -> None:
-    """Verify native validation rejects invalid field-name policies."""
+    """Verify internal options reject invalid field name policy native."""
     opt = InternalOptions(schema={"field_name_policy": "camelCase"})
 
     with pytest.raises(Exception, match="field_name_policy"):

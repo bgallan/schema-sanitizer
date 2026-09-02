@@ -1,17 +1,26 @@
-"""Regression coverage for concurrency cancellation and resource lifecycle."""
+"""Exercise cancellation and resource ownership across local and remote concurrency services.
+
+The tests connect writer reservations, nested deadlines, governor queues, cross-process memory,
+provider throttling, diagnostics, fork safety, staged paths, janitor cleanup, and retry teardown.
+They verify that interruption preserves progress and that ownership ends only after real cleanup.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import multiprocessing
 import os
 import threading
-import uuid
 from pathlib import Path
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_process_or_fail,
+    join_thread_or_fail,
+)
 
 from schema_sanitizer.core_impl.cancellation import (
     OperationCancellationToken,
@@ -28,6 +37,8 @@ from schema_sanitizer.core_impl.operation_diagnostics import (
     register_operation,
 )
 from schema_sanitizer.core_impl.process_resources import _Governor
+
+_DIAGNOSTIC_OPERATION_IDS = itertools.count()
 from schema_sanitizer.errors import (
     SchemaSanitizerCancelledError,
     SchemaSanitizerResourceError,
@@ -81,19 +92,19 @@ class _StorageReservationSpy:
     """Record disk-admission calls made by a streamed writer."""
 
     def __init__(self) -> None:
-        """Initialize this helper."""
+        """Initialize the storage reservation spy test double."""
         self.events: list[tuple[str, int]] = []
 
     def reset_after_truncate(self) -> None:
-        """Implement the internal reset_after_truncate helper."""
+        """Reset the storage reservation after output truncation."""
         self.events.append(("reset", 0))
 
     def before_write(self, chunk_bytes: int) -> None:
-        """Implement the internal before_write helper."""
+        """Record the byte reservation requested before a streamed write."""
         self.events.append(("reserve", chunk_bytes))
 
     def finalize(self, actual_size_bytes: int) -> None:
-        """Implement the internal finalize helper."""
+        """Record the final on-disk size reported by the writer."""
         self.events.append(("finalize", actual_size_bytes))
 
 
@@ -199,14 +210,14 @@ def test_cancelled_governor_ticket_does_not_block_followers(
     monkeypatch.setattr(governor._condition, "wait", observe_wait)  # noqa: SLF001
 
     def timeout_waiter() -> None:
-        """Provide a deterministic test or worker helper."""
+        """Attempt the permit acquisition expected to time out."""
         try:
             governor.acquire(timeout_seconds=0.05)
         except SchemaSanitizerResourceError:
             timed_out.set()
 
     def follower() -> None:
-        """Provide a deterministic test or worker helper."""
+        """Acquire and release the permit after the cancelled waiter."""
         lease = governor.acquire(timeout_seconds=SCHEDULER_TIMEOUT_SECONDS)
         follower_acquired.set()
         lease.release()
@@ -219,8 +230,8 @@ def test_cancelled_governor_ticket_does_not_block_followers(
     assert timed_out.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
     holder.release()
     assert follower_acquired.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
-    first.join(timeout=SCHEDULER_TIMEOUT_SECONDS)
-    second.join(timeout=SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(first)
+    join_thread_or_fail(second)
     assert governor.snapshot().in_use == 0
 
 
@@ -240,7 +251,9 @@ def test_cross_process_memory_rejects_combined_overcommit(
     child.start()
     child_connection.close()
     try:
-        assert parent_connection.poll(30), "child reservation handshake timed out"
+        assert parent_connection.poll(SCHEDULER_TIMEOUT_SECONDS), (
+            "child reservation handshake timed out"
+        )
         assert parent_connection.recv() == ("reserved", 70)
         with pytest.raises(SchemaSanitizerResourceError, match="cross-process"):
             CrossProcessMemoryLease(100, 40)
@@ -251,10 +264,7 @@ def test_cross_process_memory_rejects_combined_overcommit(
         except (BrokenPipeError, EOFError, OSError):
             pass
         parent_connection.close()
-        child.join(timeout=30)
-        if child.is_alive():  # pragma: no cover - emergency anti-hang cleanup
-            child.terminate()
-            child.join(timeout=30)
+        join_process_or_fail(child)
     assert child.exitcode == 0
     assert cross_process_memory_reserved_bytes() == 0
 
@@ -272,7 +282,7 @@ def test_cross_process_memory_reclaims_dead_owner(
             {
                 "version": 1,
                 "leases": {
-                    "999999:dead:x": {
+                    "999999:dead": {
                         "pid": 999999,
                         "start": "dead",
                         "reserved": 90,
@@ -323,13 +333,13 @@ def test_provider_throttle_reduces_window_and_opens_bounded_circuit(
 
 def test_operation_diagnostics_separate_live_and_completed_operations() -> None:
     """Concurrent callers can query a bounded operation-specific diagnostic record."""
-    operation_id = f"test-{uuid.uuid4().hex}"
+    operation_id = f"test-operation-diagnostics-{next(_DIAGNOSTIC_OPERATION_IDS)}"
 
     class Owner:
         """Expose a bound-method snapshot without global retention."""
 
         def snapshot(self) -> dict[str, object]:
-            """Return one live operation payload."""
+            """Return a snapshot of the state recorded by the test double."""
             return {"operation_id": operation_id, "state": "running", "workers": 2}
 
     owner = Owner()
@@ -355,7 +365,7 @@ def test_initialized_runtime_fails_fast_after_fork() -> None:
     child = context.Process(target=_fork_safety_child, args=(result,))
     child.start()
     message = result.get(timeout=SCHEDULER_TIMEOUT_SECONDS)
-    child.join(timeout=SCHEDULER_TIMEOUT_SECONDS)
+    join_process_or_fail(child)
     assert child.exitcode == 0
     assert "spawn" in message
     assert "forkserver" in message
@@ -399,28 +409,29 @@ def test_staged_path_retains_lease_when_cleanup_fails(
         """Track whether capacity was returned prematurely."""
 
         def __init__(self) -> None:
-            """Initialize this helper."""
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
-            """Implement the internal release helper."""
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     lease = Lease()
     captured: dict[str, object] = {}
 
     def fail_delete(_path: Path) -> None:
-        """Provide a deterministic test or worker helper."""
+        """Raise the cleanup failure injected before staged lease release."""
         raise OSError("busy")
 
-    def capture(path: Path, *, is_dir: bool, lease: object, expected_identity: object) -> None:
-        """Provide a deterministic test or worker helper."""
+    def capture(path: Path, *, is_dir: bool, lease: object, expected_identity: object) -> bool:
+        """Capture the staged path retained after cleanup failure."""
         captured.update(
             path=path,
             is_dir=is_dir,
             lease=lease,
             expected_identity=expected_identity,
         )
+        return True
 
     monkeypatch.setattr(staging_paths.shutil, "rmtree", fail_delete)
     monkeypatch.setattr(staging_paths, "quarantine_temporary_artifact", capture)
@@ -451,17 +462,17 @@ def test_temporary_janitor_releases_only_after_actual_deletion(tmp_path: Path) -
         """Count exact lease releases."""
 
         def __init__(self) -> None:
-            """Initialize this helper."""
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
-            """Implement the internal release helper."""
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     lease = Lease()
     janitor = _TemporaryArtifactJanitor()
     janitor._scanned = True  # avoid unrelated global quarantine leftovers
-    janitor._ensure_thread_locked = lambda: None  # type: ignore[method-assign]
+    janitor._ensure_worker = lambda: None  # type: ignore[method-assign]
     outcomes = iter((False, True))
 
     def delete_owned(path, _is_dir, identity):

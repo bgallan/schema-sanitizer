@@ -1,3 +1,9 @@
+// Dispatches value, level, and dictionary decoders for each supported Parquet
+// page encoding. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
+
+/// Reports whether the page's Parquet physical type has a diagnostic value
+/// decoder.
 bool page_values_physical_type_supported(const ColumnChunkInfo &column) {
   if (!column.has_physical_type) {
     return false;
@@ -16,6 +22,7 @@ bool page_values_physical_type_supported(const ColumnChunkInfo &column) {
   }
 }
 
+/// Dispatches the selected encoding to decode one data page's value section.
 sanitize::Status decode_page_values(std::string_view payload,
                                     const ColumnChunkInfo &column,
                                     PageHeaderInfo *page,
@@ -50,6 +57,7 @@ sanitize::Status decode_page_values(std::string_view payload,
   return {};
 }
 
+/// Decodes a data page's repetition and definition streams before its values.
 sanitize::Status decode_page_levels(std::string_view payload,
                                     const ColumnChunkInfo &column,
                                     PageHeaderInfo *page,
@@ -111,6 +119,8 @@ sanitize::Status decode_page_levels(std::string_view payload,
   return {};
 }
 
+/// Decodes dictionary-page values into reusable byte-array or fixed-width
+/// state.
 sanitize::Status decode_dictionary_page_values(std::string_view payload,
                                                const ColumnChunkInfo &column,
                                                PageHeaderInfo *page,
@@ -157,6 +167,7 @@ sanitize::Status decode_dictionary_page_values(std::string_view payload,
   return {};
 }
 
+/// Dispatches a verified payload to dictionary- or data-page decoding.
 sanitize::Status decode_verified_page_payload(std::string_view payload,
                                               const ColumnChunkInfo &column,
                                               PageHeaderInfo *page,

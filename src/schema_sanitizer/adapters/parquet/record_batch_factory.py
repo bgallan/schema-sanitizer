@@ -1,4 +1,8 @@
-"""Reusable Parquet Arrow C Stream factory and PyArrow fallback."""
+"""Reusable Parquet Arrow C Stream factory and PyArrow fallback.
+
+It stages inputs when necessary, preflights native reading, constructs replay-safe Arrow
+factories, and owns every reader, dataset, and keepalive lease.
+"""
 
 from __future__ import annotations
 
@@ -154,6 +158,7 @@ class _StagedParquetArtifact:
     def __init__(
         self, data: bytes | bytearray | memoryview, *, memory_limit_bytes: int | None
     ) -> None:
+        """Reserve storage and create the staged Parquet file from the supplied buffer."""
         self._pid = os.getpid()
         self.path: str | None = None
         self._pool: TemporaryStoragePermitPool | None = None
@@ -171,6 +176,7 @@ class _StagedParquetArtifact:
         path_box: list[str] = []
 
         def create() -> int:
+            """Create and publish the staged Parquet temporary file descriptor."""
             fd, path = tempfile.mkstemp(prefix="schema-sanitizer-parquet-", suffix=".parquet")
             path_box.append(path)
             return fd
@@ -196,6 +202,7 @@ class _StagedParquetArtifact:
             raise
 
     def close(self) -> None:
+        """Delete the staged file, release its storage authority, and disarm finalization."""
         if os.getpid() != self._pid:
             return
         path = self.path
@@ -226,6 +233,7 @@ class _StagedParquetArtifact:
             self._finalizer_capsule = None
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
@@ -249,6 +257,7 @@ class _StagedParquetArtifact:
 def _stage_parquet_buffer_artifact(
     data: bytes | bytearray | memoryview, *, memory_limit_bytes: int | None
 ) -> _StagedParquetArtifact:
+    """Create a governed temporary Parquet artifact from buffered bytes."""
     return _StagedParquetArtifact(data, memory_limit_bytes=memory_limit_bytes)
 
 
@@ -257,6 +266,7 @@ def stage_parquet_buffer(data: bytes | bytearray | memoryview) -> str:
     path_box: list[str] = []
 
     def create() -> int:
+        """Create and publish the temporary file descriptor used for staged bytes."""
         fd, path = tempfile.mkstemp(prefix="schema-sanitizer-parquet-", suffix=".parquet")
         path_box.append(path)
         return fd
@@ -348,6 +358,7 @@ def prepare_parquet_factory_source(
 
 
 def _cleanup_parquet_stream_owner_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Cleanup parquet stream owner capsule."""
     resources = cast(list[Any] | None, capsule.arg0)
     if resources is None:
         return
@@ -363,6 +374,7 @@ class _ParquetStreamKeepaliveOwner:
     __slots__ = ("resources", "_finalizer_ticket", "_finalizer_capsule", "_pid", "__weakref__")
 
     def __init__(self) -> None:
+        """Prearm finalization and root an empty list of stream-owned resources."""
         self._pid = os.getpid()
         self.resources: list[Any] = []
         self._finalizer_capsule: PreparedFinalizerCleanup | None = reserve_finalizer_cleanup(
@@ -373,11 +385,13 @@ class _ParquetStreamKeepaliveOwner:
         self._finalizer_capsule.arg0 = self.resources
 
     def add(self, resource: Any | None) -> Any | None:
+        """Add one value to the bounded collection."""
         if resource is not None:
             self.resources.append(resource)
         return resource
 
     def close(self) -> None:
+        """Close retained stream resources retryably, then disarm finalization."""
         _close_sequence_retryably(self.resources)
         if self.resources:
             raise RuntimeError("Parquet stream keepalive cleanup remains retryable")
@@ -389,6 +403,7 @@ class _ParquetStreamKeepaliveOwner:
             self._finalizer_capsule = None
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
@@ -415,6 +430,7 @@ class _OwnedParquetBatchIterator:
         registry: list[Any],
         registration: Any,
     ) -> None:
+        """Bind the batch iterator to its keepalive owner and root registration."""
         self._iterator = iterator
         self._owner: _ParquetStreamKeepaliveOwner | None = owner
         self._registry = registry
@@ -422,9 +438,11 @@ class _OwnedParquetBatchIterator:
         self._closed = False
 
     def __iter__(self) -> "_OwnedParquetBatchIterator":
+        """Iterate over the retained values."""
         return self
 
     def __next__(self) -> Any:
+        """Return the next retained value."""
         if self._closed:
             raise StopIteration
         try:
@@ -440,6 +458,7 @@ class _OwnedParquetBatchIterator:
             raise
 
     def close(self) -> None:
+        """Close the keepalive owner and remove this iterator from its registry."""
         if self._closed:
             return
         owner = self._owner
@@ -453,6 +472,7 @@ class _OwnedParquetBatchIterator:
     def __del__(self) -> None:
         # Dropping the owner triggers its prearmed safe-point finalizer; never
         # perform potentially-blocking runtime teardown on the GC thread.
+        """Schedule best-effort cleanup during garbage collection."""
         self._owner = None
 
 
@@ -466,6 +486,7 @@ class _DatasetLifetimeCleanupState:
 
 
 def _cleanup_dataset_lifetime_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Cleanup dataset lifetime capsule."""
     state = capsule.arg0
     if not isinstance(state, _DatasetLifetimeCleanupState):
         return
@@ -487,6 +508,7 @@ def _cleanup_dataset_lifetime_capsule(capsule: PreparedFinalizerCleanup) -> None
 
 
 def _cleanup_dataset_lifetime_lease_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Cleanup dataset lifetime lease capsule."""
     owner = cast(_DatasetLifetimeOwner | None, capsule.arg0)
     if owner is not None:
         owner.release()
@@ -511,6 +533,7 @@ class _DatasetLifetimeOwner:
     )
 
     def __init__(self, dataset: Any, fd_capability: Any, staged_artifact: Any | None) -> None:
+        """Co-own the dataset, descriptor capability, and staged artifact under one reference count."""
         self._pid = os.getpid()
         self._lock = Lock()
         self._dataset = dataset
@@ -529,17 +552,20 @@ class _DatasetLifetimeOwner:
         self._finalizer_capsule.arg0 = self._cleanup_state
 
     def _ensure_owner_process(self) -> None:
+        """Reject dataset reuse from a different process."""
         if os.getpid() != self._pid:
             ensure_runtime_fork_safe()
             raise RuntimeError("PyArrow dataset lifetime owner belongs to a different process")
 
     @property
     def dataset(self) -> Any:
+        """Return the PyArrow dataset retained by this lifetime owner."""
         self._ensure_owner_process()
         with self._lock:
             return self._dataset
 
     def acquire(self) -> "_DatasetLifetimeLease":
+        """Acquire governed capacity through this dataset lifetime owner."""
         self._ensure_owner_process()
         with self._lock:
             if self._closed or self._dataset is None:
@@ -552,6 +578,7 @@ class _DatasetLifetimeOwner:
             raise
 
     def release(self) -> None:
+        """Drop one reference and retire final dataset, descriptor, and staging ownership in order."""
         self._ensure_owner_process()
         with self._lock:
             if self._closed:
@@ -610,6 +637,7 @@ class _DatasetLifetimeOwner:
     close = release
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
@@ -631,6 +659,7 @@ class _DatasetLifetimeLease:
     __slots__ = ("_owner", "_lock", "_finalizer_ticket", "_finalizer_capsule", "_pid")
 
     def __init__(self, owner: _DatasetLifetimeOwner) -> None:
+        """Retain one finalizer-backed reference to the dataset lifetime owner."""
         self._pid = os.getpid()
         self._owner: _DatasetLifetimeOwner | None = owner
         self._lock = Lock()
@@ -641,6 +670,7 @@ class _DatasetLifetimeLease:
         self._finalizer_capsule.arg0 = owner
 
     def close(self) -> None:
+        """Release the retained dataset reference and disarm this lease finalizer."""
         if os.getpid() != self._pid:
             ensure_runtime_fork_safe()
             raise RuntimeError("PyArrow dataset lifetime lease belongs to a different process")
@@ -658,6 +688,7 @@ class _DatasetLifetimeLease:
                 self._finalizer_capsule = None
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
@@ -674,26 +705,14 @@ class _DatasetLifetimeLease:
 
 def close_factory(factory: Any) -> None:
     """Close factory-owned resources without stealing live stream ownership."""
-    if os.getpid() != getattr(factory, "_pid", os.getpid()):
+    if os.getpid() != factory._pid:
         return
     _close_and_clear_attrs(factory, "_pending_parquet_file", "_pending_opened_file")
-
-    # Stream registrations are weak references only.  Historical focused tests
-    # may still place concrete cleanup resources in this field; retain their
-    # retry semantics while never closing a live stream-scoped owner.
-    original_keepalive = getattr(factory, "_keepalive", ())
-    remaining: list[Any] = []
-    for resource in list(original_keepalive):
-        if isinstance(resource, weakref.ReferenceType):
-            continue
-        if not _close_suppressing_errors(resource):
-            remaining.append(resource)
-    factory._keepalive = remaining if isinstance(original_keepalive, list) else tuple(remaining)
+    factory._keepalive.clear()
 
     # Drop the factory's dataset reference before returning its external FD
     # admission or staged-storage credits. Active streams hold independent refs.
-    if hasattr(factory, "_dataset"):
-        factory._dataset = None
+    factory._dataset = None
     _close_and_clear_attrs(factory, "_dataset_owner")
     _close_and_clear_attrs(factory, "_dataset_fd_capability")
     _close_and_clear_attrs(factory, "_staged_artifact")
@@ -786,7 +805,7 @@ def _external_runtime_threads(factory: Any) -> Any:
         except BaseException:
             desired = max(2, min(32, os.cpu_count() or 2))
     return acquire_external_runtime_threads(
-        desired, allow_parallel=factory._use_threads, runtime=getattr(factory, "_pa", None)
+        desired, allow_parallel=factory._use_threads, runtime=factory._pa
     )
 
 
@@ -809,26 +828,17 @@ def _compact_factory_stream_keepalive(keepalive: list[Any]) -> None:
 
 
 def _factory_stream_keepalive(factory: Any) -> list[Any]:
-    """Return/create the per-stream owner list, compacting abandoned tombstones."""
-    keepalive = getattr(factory, "_keepalive", None)
-    if isinstance(keepalive, list):
-        _compact_factory_stream_keepalive(keepalive)
-        return keepalive
-    converted = list(keepalive or ())
-    _compact_factory_stream_keepalive(converted)
-    factory._keepalive = converted
-    return converted
+    """Return the per-stream owner list after compacting abandoned tombstones."""
+    keepalive = factory._keepalive
+    _compact_factory_stream_keepalive(keepalive)
+    return keepalive
 
 
 def _constrain_factory_pyarrow_pool(factory: Any, runtime_lease: Any) -> None:
-    """Cap real PyArrow pools while remaining compatible with focused doubles."""
-    pa = getattr(factory, "_pa", None)
-    workers = getattr(runtime_lease, "workers", None)
-    if pa is not None and isinstance(workers, int) and workers > 1:
-        configured = constrain_external_runtime_worker_pool(pa, workers)
-        shrink = getattr(runtime_lease, "shrink_to", None)
-        if callable(shrink):
-            shrink(configured)
+    """Cap the PyArrow pool to the admitted external-runtime workers."""
+    if runtime_lease.workers > 1:
+        configured = constrain_external_runtime_worker_pool(factory._pa, runtime_lease.workers)
+        runtime_lease.shrink_to(configured)
 
 
 def pyarrow_fallback_arrow_stream(
@@ -862,13 +872,12 @@ def pyarrow_fallback_arrow_stream(
         try:
             if runtime_lease.parallel:
                 _constrain_factory_pyarrow_pool(factory, runtime_lease)
-            dataset_owner = getattr(factory, "_dataset_owner", None)
-            if dataset_owner is not None:
-                dataset_lifetime = dataset_owner.acquire()
-                owner.add(dataset_lifetime)
-                dataset = dataset_owner.dataset
-            else:
-                dataset = factory._dataset
+            dataset_owner = factory._dataset_owner
+            if dataset_owner is None:
+                raise RuntimeError("PyArrow dataset source has no lifetime owner")
+            dataset_lifetime = dataset_owner.acquire()
+            owner.add(dataset_lifetime)
+            dataset = dataset_owner.dataset
             scanner = dataset.scanner(
                 columns=None if factory._columns is None else list(factory._columns),
                 filter=factory._filters,
@@ -878,21 +887,11 @@ def pyarrow_fallback_arrow_stream(
             owner.add(scanner)
             reader = scanner.to_reader()
             owner.add(reader)
-            if not hasattr(reader, "__iter__"):  # focused legacy test double only
-                registry[-1] = owner
-                stream = reader.__arrow_c_stream__()
-            else:
-                owned_batches = _OwnedParquetBatchIterator(
-                    iter(reader), owner, registry, registration
-                )
-                exported_reader = record_batch_reader_from_iterable(
-                    factory._pa, factory.schema, owned_batches
-                )
-                if exported_reader is None:  # focused legacy test double only
-                    registry[-1] = owner
-                    stream = reader.__arrow_c_stream__()
-                else:
-                    stream = exported_reader.__arrow_c_stream__()
+            owned_batches = _OwnedParquetBatchIterator(iter(reader), owner, registry, registration)
+            exported_reader = record_batch_reader_from_iterable(
+                factory._pa, factory.schema, owned_batches
+            )
+            stream = exported_reader.__arrow_c_stream__()
         except BaseException as exc:
             try:
                 owner.close()
@@ -913,7 +912,7 @@ def pyarrow_fallback_arrow_stream(
             record_parquet_fallback_success(fallback_route)
             return stream
 
-    dataset_error = getattr(factory, "_dataset_error", None)
+    dataset_error = factory._dataset_error
     if dataset_error is not None:
         dataset_route = "pyarrow_dataset_scanner"
         record_parquet_fallback_attempt(dataset_route)
@@ -949,11 +948,7 @@ def pyarrow_fallback_arrow_stream(
         )
         owned_batches = _OwnedParquetBatchIterator(iter(batches), owner, registry, registration)
         reader = record_batch_reader_from_iterable(factory._pa, factory.schema, owned_batches)
-        if reader is None:  # focused legacy test double only
-            registry[-1] = owner
-            stream = object()
-        else:
-            stream = reader.__arrow_c_stream__()
+        stream = reader.__arrow_c_stream__()
     except BaseException as exc:
         try:
             owner.close()

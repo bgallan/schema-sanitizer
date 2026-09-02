@@ -1,20 +1,33 @@
 // Batches task telemetry without sharing completion cache lines between
-// workers.
+// workers. Each worker publishes accumulated queue and run measurements in
+// coarse updates.
+
 class TaskTelemetryBatch final {
 public:
+  /// Selects a flush threshold for one worker's local
+  /// telemetry accumulator.
   TaskTelemetryBatch(PerformanceTelemetry *telemetry, std::size_t worker_index,
                      std::size_t worker_count) noexcept
       : telemetry_(telemetry), worker_index_(worker_index),
         flush_tasks_(worker_count > 8U ? 32U : 8U) {}
+  /// Flushes pending worker-local task measurements before destruction.
   ~TaskTelemetryBatch() { Flush(); }
 
+  /// Reserves publication ownership before a worker begins one task.
+  [[nodiscard]] bool Begin() noexcept {
+    return telemetry_ && telemetry_->BeginWorkerTaskPublication();
+  }
+
+  /// Accumulates an admitted task's queue and run measurements in worker-local
+  /// counters.
   void Record(TaskTelemetryKind kind, std::int64_t queue_wait_ns,
-              std::int64_t run_ns) noexcept {
-    if (!telemetry_) {
+              std::int64_t run_ns, bool publication_admitted) noexcept {
+    if (!telemetry_ || !publication_admitted) {
       return;
     }
     const auto index = static_cast<std::size_t>(kind);
     if (index >= totals_.size()) {
+      telemetry_->CompleteWorkerTaskPublications(1U);
       return;
     }
     const auto queue_wait = std::max<std::int64_t>(0, queue_wait_ns);
@@ -30,10 +43,13 @@ public:
     }
   }
 
+  /// Publishes accumulated task measurements to the shared
+  /// telemetry collector.
   void Flush() noexcept {
     if (!telemetry_ || pending_ == 0) {
       return;
     }
+    const auto published_tasks = pending_;
     for (std::size_t index = 0; index < totals_.size(); ++index) {
       auto &total = totals_[index];
       if (total.count == 0) {
@@ -46,6 +62,10 @@ public:
       total = {};
     }
     pending_ = 0;
+    // Publish every shard snapshot before releasing the matching admission.
+    // The last release completes a pending Finish() request, so a report can
+    // never become final while a worker still owns an unpublished batch.
+    telemetry_->CompleteWorkerTaskPublications(published_tasks);
   }
 
 private:

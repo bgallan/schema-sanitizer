@@ -1,4 +1,8 @@
-"""Direct Parquet encoding and remote-URI runtime tests."""
+"""Direct Parquet encoding and remote-URI runtime tests.
+
+It validates supported page encodings, file and remote URI routing, staging
+requirements, and direct directory materialization.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,7 @@ from pathlib import Path
 import pytest
 from _support.parquet_runtime import pa, pq, sample_table
 from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
-from conftest import read_test_parquet, require_native
+from conftest import read_test_parquet
 
 import schema_sanitizer as ss
 
@@ -16,11 +20,11 @@ import schema_sanitizer as ss
 @_requires_pyarrow
 def test_native_parquet_footer_info_decodes_plain_value_counts_with_nulls(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify native PLAIN value validation counts only non-null values."""
+    """Verify native Parquet footer info decodes plain value counts with nulls."""
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
 
-    require_native()
     src = tmp_path / "source.parquet"
     out = tmp_path / "out.parquet"
     pq.write_table(
@@ -83,8 +87,9 @@ def test_native_parquet_footer_info_decodes_plain_value_counts_with_nulls(
 @_requires_pyarrow
 def test_native_parquet_footer_info_decodes_delta_binary_packed_int_values(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify native footer parsing validates DELTA_BINARY_PACKED integer pages."""
+    """Verify native Parquet footer info decodes delta binary packed int values."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -93,7 +98,6 @@ def test_native_parquet_footer_info_decodes_delta_binary_packed_int_values(
         last_parquet_stream_factory_route,
     )
 
-    require_native()
     src = tmp_path / "source.parquet"
     out = tmp_path / "out.parquet"
     pq.write_table(pa.table({"n": list(range(50)), "s": ["same"] * 50}), src)
@@ -129,11 +133,11 @@ def test_native_parquet_footer_info_decodes_delta_binary_packed_int_values(
 @_requires_pyarrow
 def test_native_parquet_footer_info_decodes_rle_dictionary_string_pages(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify native footer parsing validates dictionary pages and indices."""
+    """Verify native Parquet footer info decodes rle dictionary string pages."""
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
 
-    require_native()
     src = tmp_path / "source.parquet"
     out = tmp_path / "out.parquet"
     pq.write_table(pa.table({"s": ["same"] * 500}), src)
@@ -174,8 +178,9 @@ def test_native_parquet_footer_info_decodes_rle_dictionary_string_pages(
 @_requires_pyarrow
 def test_native_parquet_footer_info_decodes_delta_length_byte_array_pages(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify native footer parsing validates DELTA_LENGTH_BYTE_ARRAY pages."""
+    """Verify native Parquet footer info decodes delta length byte array pages."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -184,7 +189,6 @@ def test_native_parquet_footer_info_decodes_delta_length_byte_array_pages(
         last_parquet_stream_factory_route,
     )
 
-    require_native()
     src = tmp_path / "source.parquet"
     out = tmp_path / "out.parquet"
     values = [f"x{value:04d}" for value in range(500)]
@@ -223,8 +227,9 @@ def test_native_parquet_footer_info_decodes_delta_length_byte_array_pages(
 @_requires_pyarrow
 def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """Verify native footer parsing validates BYTE_STREAM_SPLIT float pages."""
+    """Verify native Parquet footer info decodes byte stream split float pages."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -233,7 +238,6 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
         last_parquet_stream_factory_route,
     )
 
-    require_native()
     src = tmp_path / "source.parquet"
     out = tmp_path / "out.parquet"
     values = [float(value) for value in range(1000)]
@@ -277,14 +281,12 @@ def test_native_parquet_footer_info_decodes_byte_stream_split_float_pages(
 
 
 @_requires_pyarrow
-def test_read_parquet_file_uri_materializes_table(tmp_path: Path) -> None:
-    """Verify read parquet accepts file URIs."""
+def test_read_parquet_file_uri_materializes_table(tmp_path: Path, require_native: None) -> None:
+    """Verify read Parquet file URI materializes table."""
     from schema_sanitizer.adapters.parquet.telemetry import (
         last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
     )
-
-    require_native()
 
     path = tmp_path / "data.parquet"
     pq.write_table(sample_table(pa), path)
@@ -300,14 +302,12 @@ def test_read_parquet_file_uri_materializes_table(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_native_parquet_file_uri_uses_native_route(tmp_path: Path) -> None:
-    """Verify local file URIs share the native path-backed Parquet reader."""
+def test_native_parquet_file_uri_uses_native_route(tmp_path: Path, require_native: None) -> None:
+    """Verify native Parquet file URI uses native route."""
     from schema_sanitizer.adapters.parquet.telemetry import (
         last_parquet_native_reader_diagnostics,
         last_parquet_stream_factory_route,
     )
-
-    require_native()
 
     src = tmp_path / "src.parquet"
     out = tmp_path / "out.parquet"
@@ -326,7 +326,7 @@ def test_native_parquet_file_uri_uses_native_route(tmp_path: Path) -> None:
 
 @_requires_pyarrow
 def test_remote_parquet_uri_requires_staging() -> None:
-    """Verify remote Parquet URIs are not treated as local direct sources."""
+    """Verify remote Parquet URI requires staging."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -340,10 +340,8 @@ def test_remote_parquet_uri_requires_staging() -> None:
 
 
 @_requires_pyarrow
-def test_parquet_file_uri_converter_writes_jsonl(tmp_path: Path) -> None:
-    """Verify converters accept parquet file URIs."""
-    require_native()
-
+def test_parquet_file_uri_converter_writes_jsonl(tmp_path: Path, require_native: None) -> None:
+    """Verify Parquet file URI converter writes JSONL."""
     path = tmp_path / "data.parquet"
     out = tmp_path / "out.jsonl"
     pq.write_table(sample_table(pa), path)
@@ -360,9 +358,10 @@ def test_parquet_file_uri_converter_writes_jsonl(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_flat_parquet_converter_uses_direct_arrow_path(tmp_path: Path) -> None:
-    """Verify flat Parquet file conversion bypasses the JSONL bridge."""
-    require_native()
+def test_flat_parquet_converter_uses_direct_arrow_path(
+    tmp_path: Path, require_native: None
+) -> None:
+    """Verify flat Parquet converter uses direct arrow path."""
     path = tmp_path / "data.parquet"
     out = tmp_path / "out.parquet"
     pq.write_table(sample_table(pa), path)
@@ -379,9 +378,8 @@ def test_flat_parquet_converter_uses_direct_arrow_path(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_flat_read_parquet_uses_direct_arrow_path(tmp_path: Path) -> None:
-    """Verify flat Parquet reads bypass the JSONL bridge."""
-    require_native()
+def test_flat_read_parquet_uses_direct_arrow_path(tmp_path: Path, require_native: None) -> None:
+    """Verify flat read Parquet uses direct arrow path."""
     path = tmp_path / "data.parquet"
     pq.write_table(sample_table(pa), path)
 
@@ -391,13 +389,14 @@ def test_flat_read_parquet_uses_direct_arrow_path(tmp_path: Path) -> None:
 
 
 @_requires_pyarrow
-def test_parquet_directory_read_uses_direct_arrow_path(tmp_path: Path) -> None:
-    """Verify Parquet directory reads bypass the JSONL bridge when schemas match."""
+def test_parquet_directory_read_uses_direct_arrow_path(
+    tmp_path: Path, require_native: None
+) -> None:
+    """Verify Parquet directory read uses direct arrow path."""
     from schema_sanitizer.adapters.parquet.telemetry import (
         last_parquet_stream_factory_route,
     )
 
-    require_native()
     folder = tmp_path / "parquet"
     folder.mkdir()
     pq.write_table(pa.table({"id": [1, 2]}), folder / "a.parquet")

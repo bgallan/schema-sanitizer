@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
-"""Run short and sustained concurrency telemetry on one reviewed host plan."""
+"""Run short and sustained concurrency telemetry on one reviewed host plan.
+
+It validates a reviewed host plan, resumes compatible profiles, and records short and
+sustained runs with provenance.
+"""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,6 +23,7 @@ from benchmarks.concurrency.telemetry.high_core_suite import (  # noqa: E402
     recommend_suite_frontier,
     suite_markdown,
 )
+from benchmarks.support.command import CAPTURE, CommandError, run_command  # noqa: E402
 
 _DEFAULT_PERF_EVENTS = (
     "task-clock,cycles,instructions,cache-references,cache-misses,"
@@ -28,6 +32,7 @@ _DEFAULT_PERF_EVENTS = (
 
 
 def _parser() -> argparse.ArgumentParser:
+    """Build the command-line argument parser."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--workers", default="1,2,4,8,16")
     parser.add_argument("--columns", type=int, default=128)
@@ -57,6 +62,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Validate profile selections, worker counts, durations, and output paths."""
     if (
         args.columns < 2
         or args.memory_mib <= 0
@@ -73,6 +79,7 @@ def _validate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None
 
 
 def _selected_profiles(raw: str) -> tuple[str, ...]:
+    """Resolve the ordered benchmark profiles requested by the operator."""
     values = tuple(dict.fromkeys(item.strip() for item in raw.split(",") if item.strip()))
     if not values or set(values) - {"short", "sustained"}:
         raise ValueError("profiles must contain short, sustained, or both")
@@ -110,6 +117,7 @@ def _source_fingerprint() -> str:
 
 
 def _plan_fingerprint(plan: dict[str, Any], args: argparse.Namespace) -> str:
+    """Hash the canonical host plan for resume compatibility checks."""
     payload = {
         "cpu_sets": plan.get("cpu_sets", {}),
         "workers": args.workers,
@@ -138,10 +146,12 @@ def _plan_fingerprint(plan: dict[str, Any], args: argparse.Namespace) -> str:
 
 
 def _profile_meta_path(output: Path) -> Path:
+    """Return the metadata path associated with one benchmark profile."""
     return output.with_suffix(".meta.json")
 
 
 def _resume_profile(output: Path, *, fingerprint: str, command: list[str]) -> dict[str, Any] | None:
+    """Load a completed compatible profile when a run can be resumed."""
     meta_path = _profile_meta_path(output)
     if not output.exists() or not meta_path.exists():
         return None
@@ -152,6 +162,7 @@ def _resume_profile(output: Path, *, fingerprint: str, command: list[str]) -> di
 
 
 def _write_profile_meta(output: Path, *, fingerprint: str, command: list[str]) -> None:
+    """Persist canonical profile metadata for later resume validation."""
     _profile_meta_path(output).write_text(
         json.dumps(
             {"plan_fingerprint": fingerprint, "command": command},
@@ -164,6 +175,7 @@ def _write_profile_meta(output: Path, *, fingerprint: str, command: list[str]) -
 
 
 def _base_command(args: argparse.Namespace) -> list[str]:
+    """Build the common child-process command for telemetry collection."""
     command = [
         sys.executable,
         "-m",
@@ -201,12 +213,14 @@ def _base_command(args: argparse.Namespace) -> list[str]:
 
 
 def _run_json(command: list[str], *, output: Path | None = None) -> dict[str, Any]:
-    completed = subprocess.run(
+    """Run an isolated command and decode its JSON standard output."""
+    completed = run_command(
         command,
         check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=CAPTURE,
+        stderr=CAPTURE,
         text=True,
+        timeout=14_400,
     )
     if completed.returncode != 0:
         detail = completed.stderr.strip() or completed.stdout.strip()
@@ -217,6 +231,7 @@ def _run_json(command: list[str], *, output: Path | None = None) -> dict[str, An
 
 
 def _plan(args: argparse.Namespace, directory: Path) -> tuple[dict[str, Any], Path, list[str]]:
+    """Build the normalized host and workload plan recorded with the evidence."""
     plan_path = directory / "host-plan.json"
     command = [
         *_base_command(args),
@@ -240,6 +255,7 @@ def _profile_command(
     directory: Path,
     dram_path: Path | None,
 ) -> tuple[list[str], Path, Path]:
+    """Build the child command for one short or sustained profile."""
     output = directory / f"{name}.json"
     summary = directory / f"{name}.md"
     command = [
@@ -261,6 +277,7 @@ def _profile_command(
 def _profile_plan(
     *, name: str, rows: int, command: list[str], output: Path, summary: Path
 ) -> dict[str, Any]:
+    """Describe one profile and its expected evidence artifacts."""
     return {
         "name": name,
         "rows": rows,
@@ -271,6 +288,7 @@ def _profile_plan(
 
 
 def _execute(args: argparse.Namespace) -> dict[str, Any]:
+    """Run a child benchmark command and decode its JSON report."""
     directory = args.output_dir.resolve()
     directory.mkdir(parents=True, exist_ok=True)
     plan, plan_path, plan_command = _plan(args, directory)
@@ -341,12 +359,13 @@ def _execute(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main() -> None:
+    """Validate the host plan, collect selected profiles, and write their evidence."""
     parser = _parser()
     args = parser.parse_args()
     _validate(parser, args)
     try:
         report = _execute(args)
-    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+    except (OSError, RuntimeError, ValueError, CommandError) as error:
         parser.error(str(error))
     print(json.dumps(report, indent=2, sort_keys=True))
 

@@ -1,12 +1,14 @@
-// Validates serialized options and returns prepared native state.
+// Validates serialized options and returns prepared native state. The boundary
+// converts Python inputs into validated native policy and memory-budget state.
 
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_state.hh"
 #include "internal/memory/memory_pool.hh"
 #include "internal/runtime/process_identity.hh"
 #include "sanitize/options/options.hh"
+#include "sanitize/options/options_io.hh"
 
 #include <atomic>
 #include <cstdint>
@@ -29,6 +31,8 @@ using OperationMemoryLedgerPtr =
 
 std::atomic<std::uint64_t> g_next_operation_memory_reservation_id{1U};
 
+/// Allocates a process-unique operation memory reservation id for capsule
+/// ownership checks.
 [[nodiscard]] std::uint64_t
 allocate_operation_memory_reservation_id() noexcept {
   auto current =
@@ -52,11 +56,15 @@ struct OperationMemoryReservation final {
   std::uint64_t generation = 1U;
   sanitize::internal::RuntimeProcessId owner_process = 0U;
 
+  /// Verifies that a Python capsule receipt belongs to the current
+  /// operating-system process.
   [[nodiscard]] bool owner_process_matches() const noexcept {
     return sanitize::internal::runtime_owner_process() &&
            owner_process == sanitize::internal::current_runtime_process_id();
   }
 
+  /// Returns the guarded memory reservation to its operation ledger exactly
+  /// once.
   void release() noexcept {
     const auto amount = std::exchange(bytes, 0);
     if (amount > 0 && ledger) {
@@ -72,6 +80,8 @@ struct AtomicEpochCounter final {
 constexpr const char *kAtomicEpochCounterCapsuleName =
     "schema_sanitizer.atomic_epoch_counter";
 
+/// Finalizes and deletes atomic epoch counter capsule owned by a Python
+/// capsule.
 void destroy_atomic_epoch_counter_capsule(PyObject *capsule) {
   auto *counter = static_cast<AtomicEpochCounter *>(
       PyCapsule_GetPointer(capsule, kAtomicEpochCounterCapsuleName));
@@ -82,6 +92,8 @@ void destroy_atomic_epoch_counter_capsule(PyObject *capsule) {
   delete counter;
 }
 
+/// Recovers the effective atomic epoch counter and rejects incompatible Python
+/// state.
 bool resolve_atomic_epoch_counter(PyObject *capsule, AtomicEpochCounter **out) {
   if (!out) {
     PyErr_SetString(PyExc_RuntimeError, "atomic epoch output is null");
@@ -99,6 +111,8 @@ bool resolve_atomic_epoch_counter(PyObject *capsule, AtomicEpochCounter **out) {
   return true;
 }
 
+/// Finalizes and deletes operation memory ledger capsule owned by a Python
+/// capsule.
 void destroy_operation_memory_ledger_capsule(PyObject *capsule) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -112,6 +126,8 @@ void destroy_operation_memory_ledger_capsule(PyObject *capsule) {
   delete holder;
 }
 
+/// Recovers the effective operation memory ledger and rejects incompatible
+/// Python state.
 bool resolve_operation_memory_ledger(PyObject *capsule,
                                      OperationMemoryLedgerPtr *out) {
   if (!out) {
@@ -131,6 +147,8 @@ bool resolve_operation_memory_ledger(PyObject *capsule,
   return true;
 }
 
+/// Wraps operation memory ledger for Python while retaining every native
+/// dependency it references.
 PyObject *wrap_operation_memory_ledger(OperationMemoryLedgerPtr ledger) {
   auto *holder = new (std::nothrow) OperationMemoryLedgerPtr(std::move(ledger));
   if (!holder) {
@@ -145,6 +163,8 @@ PyObject *wrap_operation_memory_ledger(OperationMemoryLedgerPtr ledger) {
   return capsule;
 }
 
+/// Finalizes and deletes the operation memory reservation owned by a Python
+/// capsule.
 void destroy_operation_memory_reservation_capsule(PyObject *capsule) {
   auto *reservation = static_cast<OperationMemoryReservation *>(
       PyCapsule_GetPointer(capsule, kOperationMemoryReservationCapsuleName));
@@ -158,6 +178,8 @@ void destroy_operation_memory_reservation_capsule(PyObject *capsule) {
   delete reservation;
 }
 
+/// Recovers the effective operation memory reservation and rejects incompatible
+/// Python state.
 bool resolve_operation_memory_reservation(PyObject *capsule,
                                           OperationMemoryReservation **out) {
   if (!out) {
@@ -180,6 +202,8 @@ bool resolve_operation_memory_reservation(PyObject *capsule,
 
 } // namespace
 
+/// Deserializes and validates option bytes, returning an owning
+/// prepared-options capsule.
 PyObject *py_options_prepare_bytes(PyObject *, PyObject *args) {
   PyObject *bytes_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:options_prepare_bytes", &bytes_obj)) {
@@ -193,19 +217,33 @@ PyObject *py_options_prepare_bytes(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  schema_sanitizer_prepared_options *out = nullptr;
-  char *error = nullptr;
-  const int status = schema_sanitizer_options_prepare_bytes(
-      data, static_cast<std::size_t>(size), &out, &error);
+  sanitize::Result<sanitize::PreparedOptionsPtr> prepared =
+      default_prepared_options();
+  if (size != 0) {
+    auto options = sanitize::deserialize_options(std::string_view(
+        reinterpret_cast<const char *>(data), static_cast<std::size_t>(size)));
+    if (!options.ok()) {
+      Py_DECREF(view_owner);
+      raise_status_error(options.status());
+      return nullptr;
+    }
+    prepared = sanitize::prepare_options(std::move(options).ValueOrDie());
+  }
   Py_DECREF(view_owner);
-
-  if (status != SCHEMA_SANITIZER_STATUS_OK) {
-    raise_status_error(status, error);
+  if (!prepared.ok()) {
+    raise_status_error(prepared.status());
+    return nullptr;
+  }
+  auto *out = new (std::nothrow)
+      NativePreparedOptions{.prepared = std::move(prepared).ValueOrDie()};
+  if (!out) {
+    PyErr_NoMemory();
     return nullptr;
   }
   return wrap_prepared_options_capsule(out);
 }
 
+/// Clones prepared options with a new operation detection timestamp.
 PyObject *py_options_with_detected_at(PyObject *, PyObject *args) {
   PyObject *prepared_obj = nullptr;
   const char *detected_at = nullptr;
@@ -220,8 +258,8 @@ PyObject *py_options_with_detected_at(PyObject *, PyObject *args) {
   }
   auto cloned = std::make_shared<sanitize::PreparedOptions>(*prepared);
   cloned->operation_detected_at = detected_at ? detected_at : "";
-  auto *out = new (std::nothrow)
-      schema_sanitizer_prepared_options{.prepared = std::move(cloned)};
+  auto *out =
+      new (std::nothrow) NativePreparedOptions{.prepared = std::move(cloned)};
   if (!out) {
     PyErr_NoMemory();
     return nullptr;
@@ -229,6 +267,7 @@ PyObject *py_options_with_detected_at(PyObject *, PyObject *args) {
   return wrap_prepared_options_capsule(out);
 }
 
+/// Creates a bounded operation-memory ledger and returns its owning capsule.
 PyObject *py_operation_memory_ledger_create(PyObject *, PyObject *args) {
   long long limit_bytes = 0;
   if (!PyArg_ParseTuple(args, "L:operation_memory_ledger_create",
@@ -244,6 +283,7 @@ PyObject *py_operation_memory_ledger_create(PyObject *, PyObject *args) {
       sanitize::internal::make_operation_memory_ledger(limit_bytes));
 }
 
+/// Charges a ledger and returns a generation-tracked reservation capsule.
 PyObject *py_operation_memory_reservation_create(PyObject *, PyObject *args) {
   if (!sanitize::internal::runtime_owner_process()) {
     PyErr_SetString(
@@ -298,6 +338,8 @@ PyObject *py_operation_memory_reservation_create(PyObject *, PyObject *args) {
   return result;
 }
 
+/// Resizes a reservation after an optional generation check and returns its new
+/// state.
 PyObject *py_operation_memory_reservation_resize(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   long long requested = 0;
@@ -370,6 +412,8 @@ PyObject *py_operation_memory_reservation_resize(PyObject *, PyObject *args) {
   return out;
 }
 
+/// Releases a guarded reservation and returns its next generation with zero
+/// bytes.
 PyObject *py_operation_memory_reservation_release(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   unsigned long long expected_generation = 0U;
@@ -417,6 +461,7 @@ PyObject *py_operation_memory_reservation_release(PyObject *, PyObject *args) {
   return out;
 }
 
+/// Returns a reservation identifier, generation, and charged byte count.
 PyObject *py_operation_memory_reservation_metadata(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   if (!PyArg_ParseTuple(args, "O:operation_memory_reservation_metadata",
@@ -446,6 +491,7 @@ PyObject *py_operation_memory_reservation_metadata(PyObject *, PyObject *args) {
   return out;
 }
 
+/// Returns the bytes currently charged by an operation-memory reservation.
 PyObject *py_operation_memory_reservation_bytes(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   if (!PyArg_ParseTuple(args, "O:operation_memory_reservation_bytes",
@@ -465,6 +511,7 @@ PyObject *py_operation_memory_reservation_bytes(PyObject *, PyObject *args) {
   return PyLong_FromLongLong(static_cast<long long>(reservation->bytes));
 }
 
+/// Charges bytes to an operation-memory ledger under the supplied stage name.
 PyObject *py_operation_memory_ledger_reserve(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   long long bytes = 0;
@@ -485,6 +532,7 @@ PyObject *py_operation_memory_ledger_reserve(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+/// Charges bytes transactionally and returns the ledger limit, usage, and peak.
 PyObject *py_operation_memory_ledger_reserve_snapshot(PyObject *,
                                                       PyObject *args) {
   PyObject *capsule = nullptr;
@@ -516,6 +564,7 @@ PyObject *py_operation_memory_ledger_reserve_snapshot(PyObject *,
   return result;
 }
 
+/// Releases a byte charge from an operation-memory ledger.
 PyObject *py_operation_memory_ledger_release(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   long long bytes = 0;
@@ -531,6 +580,7 @@ PyObject *py_operation_memory_ledger_release(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+/// Returns an operation-memory ledger limit, current usage, and peak usage.
 PyObject *py_operation_memory_ledger_snapshot(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   if (!PyArg_ParseTuple(args, "O:operation_memory_ledger_snapshot", &capsule)) {
@@ -545,6 +595,7 @@ PyObject *py_operation_memory_ledger_snapshot(PyObject *, PyObject *args) {
                        static_cast<long long>(ledger->peak_bytes_reserved()));
 }
 
+/// Returns over-release event and byte counts for an operation-memory ledger.
 PyObject *py_operation_memory_ledger_diagnostics(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   if (!PyArg_ParseTuple(args, "O:operation_memory_ledger_diagnostics",
@@ -560,6 +611,7 @@ PyObject *py_operation_memory_ledger_diagnostics(PyObject *, PyObject *args) {
                        static_cast<long long>(ledger->over_release_bytes()));
 }
 
+/// Clones prepared options with detection time and an operation-memory ledger.
 PyObject *py_options_with_operation_context(PyObject *, PyObject *args) {
   PyObject *prepared_obj = nullptr;
   const char *detected_at = nullptr;
@@ -579,8 +631,8 @@ PyObject *py_options_with_operation_context(PyObject *, PyObject *args) {
   auto cloned = std::make_shared<sanitize::PreparedOptions>(*prepared);
   cloned->operation_detected_at = detected_at ? detected_at : "";
   cloned->operation_memory_ledger = std::static_pointer_cast<void>(ledger);
-  auto *out = new (std::nothrow)
-      schema_sanitizer_prepared_options{.prepared = std::move(cloned)};
+  auto *out =
+      new (std::nothrow) NativePreparedOptions{.prepared = std::move(cloned)};
   if (!out) {
     PyErr_NoMemory();
     return nullptr;
@@ -588,6 +640,7 @@ PyObject *py_options_with_operation_context(PyObject *, PyObject *args) {
   return wrap_prepared_options_capsule(out);
 }
 
+/// Creates an atomic epoch counter initialized to zero and returns its capsule.
 PyObject *py_atomic_epoch_create(PyObject *, PyObject *) {
   auto *counter = new (std::nothrow) AtomicEpochCounter();
   if (!counter) {
@@ -602,6 +655,7 @@ PyObject *py_atomic_epoch_create(PyObject *, PyObject *) {
   return capsule;
 }
 
+/// Atomically increments an epoch counter unless it has reached saturation.
 PyObject *py_atomic_epoch_increment(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   if (!PyArg_ParseTuple(args, "O:atomic_epoch_increment", &capsule)) {
@@ -624,6 +678,56 @@ PyObject *py_atomic_epoch_increment(PyObject *, PyObject *args) {
   }
 }
 
+/// Atomically increments an epoch and commits one preallocated byte marker.
+PyObject *py_atomic_epoch_increment_marked(PyObject *, PyObject *args) {
+  PyObject *capsule = nullptr;
+  PyObject *markers = nullptr;
+  Py_ssize_t index = 0;
+  if (!PyArg_ParseTuple(args, "OOn:atomic_epoch_increment_marked", &capsule,
+                        &markers, &index)) {
+    return nullptr;
+  }
+  AtomicEpochCounter *counter = nullptr;
+  if (!resolve_atomic_epoch_counter(capsule, &counter)) {
+    return nullptr;
+  }
+  if (!PyByteArray_Check(markers)) {
+    PyErr_SetString(PyExc_TypeError,
+                    "atomic epoch commit markers must be bytearray");
+    return nullptr;
+  }
+  const Py_ssize_t size = PyByteArray_Size(markers);
+  if (index < 0 || index >= size) {
+    PyErr_SetString(PyExc_ValueError,
+                    "atomic epoch commit marker index is invalid");
+    return nullptr;
+  }
+  auto *data = reinterpret_cast<unsigned char *>(PyByteArray_AsString(markers));
+  if (!data) {
+    return nullptr;
+  }
+  constexpr unsigned char kPending = 1U;
+  constexpr unsigned char kRecorded = 2U;
+  if (data[index] == kRecorded) {
+    Py_RETURN_TRUE;
+  }
+  if (data[index] != kPending) {
+    Py_RETURN_FALSE;
+  }
+  std::uint64_t current = counter->value.load(std::memory_order_relaxed);
+  while (current != UINT64_MAX &&
+         !counter->value.compare_exchange_weak(current, current + 1U,
+                                               std::memory_order_acq_rel,
+                                               std::memory_order_relaxed)) {
+  }
+  // Python signals are observed only after this extension call returns. The
+  // counter publication and byte transition therefore form one retry-visible
+  // commit even if control flow is interrupted at the call boundary.
+  data[index] = kRecorded;
+  Py_RETURN_TRUE;
+}
+
+/// Atomically decrements an epoch counter unless it is already zero.
 PyObject *py_atomic_epoch_decrement(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   if (!PyArg_ParseTuple(args, "O:atomic_epoch_decrement", &capsule)) {
@@ -646,6 +750,7 @@ PyObject *py_atomic_epoch_decrement(PyObject *, PyObject *args) {
   }
 }
 
+/// Reads an atomic epoch counter with acquire ordering.
 PyObject *py_atomic_epoch_value(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   if (!PyArg_ParseTuple(args, "O:atomic_epoch_value", &capsule)) {
@@ -659,6 +764,7 @@ PyObject *py_atomic_epoch_value(PyObject *, PyObject *args) {
       counter->value.load(std::memory_order_acquire));
 }
 
+/// Writes an atomic epoch value into a bytearray as eight little-endian bytes.
 PyObject *py_atomic_epoch_write_le(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   PyObject *target = nullptr;
@@ -691,6 +797,8 @@ PyObject *py_atomic_epoch_write_le(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+/// Writes grouped activity counters and reports whether active lanes are
+/// quiescent.
 PyObject *py_atomic_epoch_write_activity(PyObject *, PyObject *args) {
   PyObject *capsules = nullptr;
   PyObject *target = nullptr;
@@ -737,16 +845,24 @@ PyObject *py_atomic_epoch_write_activity(PyObject *, PyObject *args) {
   Py_RETURN_FALSE;
 }
 
-PyObject *py_atomic_epoch_reset(PyObject *, PyObject *args) {
+/// Stores one exact epoch value with release ordering.
+PyObject *py_atomic_epoch_set_exact(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
-  if (!PyArg_ParseTuple(args, "O:atomic_epoch_reset", &capsule)) {
+  PyObject *value_object = nullptr;
+  if (!PyArg_ParseTuple(args, "OO:atomic_epoch_set_exact", &capsule,
+                        &value_object)) {
     return nullptr;
   }
   AtomicEpochCounter *counter = nullptr;
   if (!resolve_atomic_epoch_counter(capsule, &counter)) {
     return nullptr;
   }
-  counter->value.store(0, std::memory_order_release);
+  const unsigned long long value = PyLong_AsUnsignedLongLong(value_object);
+  if (PyErr_Occurred()) {
+    return nullptr;
+  }
+  counter->value.store(static_cast<std::uint64_t>(value),
+                       std::memory_order_release);
   Py_RETURN_NONE;
 }
 

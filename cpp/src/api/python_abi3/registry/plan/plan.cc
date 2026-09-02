@@ -1,4 +1,6 @@
-// Native registry plan construction and Python capsule ownership.
+// Implements native registry plan construction and Python capsule ownership.
+// The routines preserve source order and Arrow ownership while applying
+// compiled registry plans.
 
 #include "api/python_abi3/registry/plan/plan.hh"
 
@@ -7,7 +9,6 @@
 #include <utility>
 
 #include "internal/abi/python_abi3/capsules.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
 #include "internal/planning/plan_compile.hh"
 #include "internal/planning/schema_evolution.hh"
 #include "internal/runtime/process_identity.hh"
@@ -23,6 +24,7 @@ struct NativeRegistryStateCapsule {
   std::shared_ptr<const NativeRegistryPlan> plan;
 };
 
+/// Deletes the native payload owned by the corresponding Python capsule.
 void native_registry_state_capsule_destructor(PyObject *capsule) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -36,6 +38,8 @@ void native_registry_state_capsule_destructor(PyObject *capsule) {
   delete state;
 }
 
+/// Extends the logical schema with generated source file while preserving field
+/// order.
 sanitize::LogicalSchema
 schema_with_generated_source_file(const sanitize::LogicalSchema &schema) {
   sanitize::LogicalSchema out = schema;
@@ -63,6 +67,8 @@ schema_with_generated_source_file(const sanitize::LogicalSchema &schema) {
 
 } // namespace
 
+/// Compiles the merged logical schema and retains registry payloads in shared
+/// state.
 sanitize::Result<std::shared_ptr<NativeRegistryPlan>>
 make_native_registry_plan(sanitize::SchemaRegistryMergeResult merged) {
   SAN_ASSIGN_OR_RAISE(auto compiled, sanitize::compile_plan(merged.schema));
@@ -75,6 +81,8 @@ make_native_registry_plan(sanitize::SchemaRegistryMergeResult merged) {
   return out;
 }
 
+/// Clones a native registry plan after adding the generated `source_file`
+/// field.
 sanitize::Result<std::shared_ptr<NativeRegistryPlan>>
 make_native_registry_plan_with_generated_source_file(
     const NativeRegistryPlan &base) {
@@ -86,6 +94,7 @@ make_native_registry_plan_with_generated_source_file(
   return make_native_registry_plan(std::move(merged));
 }
 
+/// Parses registry JSON and compiles the resulting native registry plan.
 sanitize::Result<std::shared_ptr<NativeRegistryPlan>>
 make_native_registry_plan_from_json(
     const sanitize::PreparedOptionsPtr &prepared,
@@ -118,6 +127,8 @@ make_native_registry_plan_from_json(
   return make_native_registry_plan(std::move(merged));
 }
 
+/// Wraps native registry state for Python while retaining every native
+/// dependency it references.
 PyObject *
 wrap_native_registry_state(std::shared_ptr<const NativeRegistryPlan> plan) {
   if (!plan) {
@@ -139,6 +150,7 @@ wrap_native_registry_state(std::shared_ptr<const NativeRegistryPlan> plan) {
   return capsule;
 }
 
+/// Retrieves the immutable registry plan stored in an optional Python capsule.
 std::shared_ptr<const NativeRegistryPlan>
 native_registry_state_from_py(PyObject *obj) {
   if (!obj || obj == Py_None) {
@@ -157,6 +169,8 @@ native_registry_state_from_py(PyObject *obj) {
   return state->plan;
 }
 
+/// Builds a native registry plan from serialized Python arguments and returns
+/// its capsule.
 PyObject *py_registry_state_from_json(PyObject *, PyObject *args) {
   PyObject *prepared_obj = Py_None;
   const char *registry_json = nullptr;

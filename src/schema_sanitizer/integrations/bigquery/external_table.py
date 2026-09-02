@@ -1,4 +1,8 @@
-"""BigQuery external-table configuration, DDL, and namespace helpers."""
+"""BigQuery external-table configuration, DDL, and namespace helpers.
+
+It validates table, URI, schema, and Hive partition settings and renders the complete
+CREATE OR REPLACE EXTERNAL TABLE statement.
+"""
 
 from __future__ import annotations
 

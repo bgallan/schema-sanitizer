@@ -1,4 +1,6 @@
 // Reconciles inferred schemas with contracts and applies recursive field order.
+// Strict and additive evolution share deterministic nested merging before the
+// selected contract-first or alphabetical ordering policy is applied.
 
 #include "internal/planning/schema_evolution.hh"
 
@@ -16,6 +18,7 @@ namespace sanitize::internal {
 namespace {
 using FieldMap = BorrowedStringLookupMap<const sanitize::LogicalField *>;
 
+/// Indexes fields by borrowed name for deterministic schema reconciliation.
 FieldMap build_field_map(const std::vector<sanitize::LogicalField> &fields) {
   FieldMap out;
   out.reserve(fields.size());
@@ -25,6 +28,7 @@ FieldMap build_field_map(const std::vector<sanitize::LogicalField> &fields) {
   return out;
 }
 
+/// Rejects inferred top-level fields absent from a nonempty strict contract.
 sanitize::Status
 check_strict_compatible(const sanitize::LogicalSchema &base,
                         const sanitize::LogicalSchema &inferred) {
@@ -42,10 +46,13 @@ check_strict_compatible(const sanitize::LogicalSchema &base,
   return sanitize::Status::OK();
 }
 
+/// Recursively merges compatible struct and list types under additive
+/// evolution.
 sanitize::LogicalType
 merge_type_additive(const sanitize::LogicalType &base,
                     const sanitize::LogicalType &inferred);
 
+/// Merges one field while preserving the contract's identity and metadata.
 sanitize::LogicalField
 merge_field_additive(const sanitize::LogicalField &base,
                      const sanitize::LogicalField &inferred) {
@@ -57,6 +64,7 @@ merge_field_additive(const sanitize::LogicalField &base,
   return out;
 }
 
+/// Merges matching fields and appends newly inferred fields in source order.
 std::vector<sanitize::LogicalField> merge_fields_additive(
     const std::vector<sanitize::LogicalField> &base_fields,
     const std::vector<sanitize::LogicalField> &inferred_fields) {
@@ -80,6 +88,8 @@ std::vector<sanitize::LogicalField> merge_fields_additive(
   return out;
 }
 
+/// Recursively merges compatible containers and otherwise retains the base
+/// type.
 sanitize::LogicalType
 merge_type_additive(const sanitize::LogicalType &base,
                     const sanitize::LogicalType &inferred) {
@@ -100,6 +110,7 @@ merge_type_additive(const sanitize::LogicalType &base,
   return base;
 }
 
+/// Applies additive field merging to a logical schema contract.
 sanitize::LogicalSchema
 merge_schema_additive(const sanitize::LogicalSchema &base,
                       const sanitize::LogicalSchema &inferred) {
@@ -111,10 +122,12 @@ merge_schema_additive(const sanitize::LogicalSchema &base,
   return out;
 }
 
+/// Recursively reorders one logical type against its optional contract type.
 sanitize::LogicalType reorder_type(const sanitize::LogicalType &current,
                                    const sanitize::LogicalType *base,
                                    FieldOrderPolicy order);
 
+/// Copies one field and recursively applies the requested nested order.
 sanitize::LogicalField reorder_field(const sanitize::LogicalField &field,
                                      const sanitize::LogicalType *base,
                                      FieldOrderPolicy order) {
@@ -126,6 +139,7 @@ sanitize::LogicalField reorder_field(const sanitize::LogicalField &field,
   return out;
 }
 
+/// Returns field names in deterministic lexical order.
 std::vector<std::string_view>
 sorted_field_names(const std::vector<sanitize::LogicalField> &fields) {
   std::vector<std::string_view> names;
@@ -137,6 +151,7 @@ sorted_field_names(const std::vector<sanitize::LogicalField> &fields) {
   return names;
 }
 
+/// Finds a field's logical type or returns null when no usable type exists.
 const sanitize::LogicalType *
 field_type_or_none(const FieldMap &fields, std::string_view name) noexcept {
   const auto found = fields.find(name);
@@ -146,6 +161,7 @@ field_type_or_none(const FieldMap &fields, std::string_view name) noexcept {
   return found->second->type.get();
 }
 
+/// Appends current fields in contract order and marks every emitted name.
 void append_base_ordered_fields(std::vector<sanitize::LogicalField> *out,
                                 const FieldMap &current_by_name,
                                 const sanitize::LogicalType &base_struct,
@@ -163,6 +179,7 @@ void append_base_ordered_fields(std::vector<sanitize::LogicalField> *out,
   }
 }
 
+/// Appends fields absent from the contract in deterministic lexical order.
 void append_unused_sorted_fields(
     std::vector<sanitize::LogicalField> *out,
     const std::vector<sanitize::LogicalField> &current_fields,
@@ -181,6 +198,8 @@ void append_unused_sorted_fields(
   }
 }
 
+/// Appends all current fields lexically while retaining matching nested
+/// contracts.
 void append_sorted_fields(
     std::vector<sanitize::LogicalField> *out,
     const std::vector<sanitize::LogicalField> &current_fields,
@@ -193,6 +212,7 @@ void append_sorted_fields(
   }
 }
 
+/// Reorders one struct's fields according to the configured policy.
 std::vector<sanitize::LogicalField>
 reorder_struct_fields(const std::vector<sanitize::LogicalField> &current_fields,
                       const sanitize::LogicalType *base_struct,
@@ -227,6 +247,7 @@ reorder_struct_fields(const std::vector<sanitize::LogicalField> &current_fields,
   return out;
 }
 
+/// Recursively reorders struct fields and list elements against a base type.
 sanitize::LogicalType reorder_type(const sanitize::LogicalType &current,
                                    const sanitize::LogicalType *base,
                                    FieldOrderPolicy order) {

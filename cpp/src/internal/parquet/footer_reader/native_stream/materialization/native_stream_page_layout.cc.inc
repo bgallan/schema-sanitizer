@@ -1,3 +1,9 @@
+// Selects verified page payloads and maps recursive nodes to decoded column
+// buffers. This fragment is included by the consolidated footer reader inside
+// its private implementation namespace.
+
+/// Returns the verified page payload selected for recursive Arrow
+/// materialization.
 sanitize::Status materialization_payload(std::ifstream &file,
                                          const ColumnChunkInfo &column,
                                          const PageHeaderInfo &page,
@@ -65,6 +71,7 @@ sanitize::Status materialization_payload(std::ifstream &file,
       "native Parquet reader: unsupported compression");
 }
 
+/// Builds a row-domain struct validity bitmap from decoded definition levels.
 sanitize::Result<std::int64_t> materialize_row_struct_validity_from_levels(
     const ColumnChunkInfo &column, std::int64_t row_count,
     std::int16_t defined_level, std::vector<std::uint8_t> *validity) {
@@ -127,6 +134,8 @@ sanitize::Result<std::int64_t> materialize_row_struct_validity_from_levels(
   return null_count;
 }
 
+/// Checks whether two repeated leaves describe identical row and element
+/// boundaries.
 bool repeated_level_layouts_match(const RepeatedLevelLayoutInfo &left,
                                   const RepeatedLevelLayoutInfo &right) {
   return left.decoded == right.decoded && left.row_count == right.row_count &&
@@ -136,9 +145,13 @@ bool repeated_level_layouts_match(const RepeatedLevelLayoutInfo &left,
          left.validity_bitmap == right.validity_bitmap;
 }
 
+/// Returns the repeated-level layout index owned by a recursive list or map
+/// node.
 sanitize::Result<std::size_t> native_recursive_repeated_layout_index_for_node(
     const NativeRecursiveMaterializationTree &tree, std::size_t node_index);
 
+/// Summarizes decoded row, element, and value counts for one repeated-level
+/// layout.
 sanitize::Result<const RepeatedLevelLayoutInfo *>
 decoded_repeated_level_layout_info(const ColumnChunkInfo &column,
                                    std::size_t layout_index) {
@@ -172,6 +185,8 @@ sanitize::Result<std::size_t> native_recursive_repeated_layout_index_for_node(
   return node.repeated_layout_index.value();
 }
 
+/// Returns the row-group column selected to provide one recursive node's level
+/// layout.
 sanitize::Result<const ColumnChunkInfo *>
 native_recursive_layout_column_for_node(
     const RowGroupInfo &row_group,
@@ -190,6 +205,8 @@ native_recursive_layout_column_for_node(
   return &row_group.columns[column_index.value()];
 }
 
+/// Selects recursive repeated layout column for node deterministically from
+/// supported layout and resource candidates.
 sanitize::Result<const ColumnChunkInfo *>
 select_recursive_repeated_layout_column_for_node(
     const RowGroupInfo &row_group,
@@ -209,6 +226,8 @@ select_recursive_repeated_layout_column_for_node(
                                                  repeated_node_index);
 }
 
+/// Verifies that every leaf below a repeated node has an identical decoded
+/// level layout.
 sanitize::Status validate_native_recursive_repeated_node_layouts(
     const RowGroupInfo &row_group,
     const NativeRecursiveMaterializationTree &tree) {
@@ -265,6 +284,8 @@ sanitize::Status validate_native_recursive_repeated_node_layouts(
   return {};
 }
 
+/// Validates repeated-node layouts for every recursive output field in a row
+/// group.
 sanitize::Status validate_native_recursive_row_group_output_layout(
     const RowGroupInfo &row_group,
     const std::vector<NativeParquetOutputField> &layout) {

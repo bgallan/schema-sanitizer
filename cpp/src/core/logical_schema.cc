@@ -1,4 +1,6 @@
 // Implements logical schema construction, traversal, and copying helpers.
+// It owns deep-copy semantics for recursive types and computes the nesting
+// depths used by Arrow and Parquet contract enforcement.
 
 #include "sanitize/core/logical_schema.hh"
 
@@ -11,10 +13,10 @@ namespace sanitize {
 
 namespace {
 
-// Deep-copies a logical type tree.
+/// Deep-copies a logical type tree.
 static std::unique_ptr<LogicalType> clone_type(const LogicalType &t);
 
-// Deep-copies one logical field and its type.
+/// Deep-copies one logical field and its type.
 static LogicalField clone_field(const LogicalField &f) {
   LogicalField out;
   out.name = f.name;
@@ -37,7 +39,7 @@ static std::unique_ptr<LogicalType> clone_type(const LogicalType &t) {
   return out;
 }
 
-// Computes Arrow container depth for a logical type tree.
+/// Computes Arrow container depth for a logical type tree.
 static int arrow_depth_type(const LogicalType &t) {
   switch (t.kind) {
   case LogicalKind::kStruct: {
@@ -55,7 +57,7 @@ static int arrow_depth_type(const LogicalType &t) {
   }
 }
 
-// Computes Parquet/BigQuery RECORD depth for a logical type tree.
+/// Computes Parquet/BigQuery RECORD depth for a logical type tree.
 static int parquet_depth_type(const LogicalType &t) {
   switch (t.kind) {
   case LogicalKind::kStruct: {

@@ -20,18 +20,20 @@ class JsonValueSpanScanner;
 
 class JsonStreamingScanner {
 public:
-  // Creates a JsonStreamingScanner.
+  /// Configures bounded JSON scanning for a value, array, stream, or JSON Lines
+  /// source.
   JsonStreamingScanner(ChunkSourcePtr src, int64_t chunk_bytes,
                        bool require_top_level_array = false,
                        bool line_delimited = false);
 
-  // Rewinds the scanner and its chunk source.
+  /// Rewinds the scanner and its chunk source.
   sanitize::Status Reset();
-  // Returns the next value.
+  /// Returns the next complete JSON value slice, or an empty slice at end of
+  /// input.
   sanitize::Result<TextSlice> next_value(BumpArena *arena);
-  // Returns whether input processing is complete.
+  /// Returns whether input processing is complete.
   [[nodiscard]] bool done() const noexcept;
-  // Enables lightweight structural framing when workers own validation.
+  /// Enables lightweight structural framing when workers own validation.
   void set_worker_authoritative_framing(bool enabled) noexcept {
     worker_authoritative_framing_ = enabled;
   }
@@ -39,31 +41,31 @@ public:
 private:
   enum class State : uint8_t { kInit = 0, kArray = 1, kStream = 2, kDone = 3 };
 
-  // Returns the best known absolute end-of-input offset.
+  /// Returns the best known absolute end-of-input offset.
   [[nodiscard]] std::size_t eof_offset() const noexcept;
-  // Ensures a current chunk is available or EOF has been reached.
+  /// Ensures a current chunk is available or EOF has been reached.
   sanitize::Status ensure_chunk();
-  // Refills the input buffer.
+  /// Refills the input buffer.
   sanitize::Status refill();
-  // Skips JSON whitespace and reports whether a value byte remains.
+  /// Skips JSON whitespace and reports whether a value byte remains.
   sanitize::Result<bool> skip_ws();
-  // Skips whitespace before a value and updates EOF state.
+  /// Skips whitespace before a value and updates EOF state.
   sanitize::Result<bool> skip_ws_before_value();
-  // Initializes scanner mode after seeing the first non-whitespace byte.
+  /// Initializes scanner mode after seeing the first non-whitespace byte.
   sanitize::Status enter_initial_mode();
-  // Returns the next whitespace-delimited stream value.
+  /// Returns the next whitespace-delimited stream value.
   sanitize::Result<TextSlice> next_stream_value(BumpArena *arena);
-  // Returns the next input byte without consuming it.
+  /// Returns the next input byte without consuming it.
   [[nodiscard]] char peek() const noexcept;
-  // Consumes the next input byte.
+  /// Consumes the next input byte.
   void consume() noexcept;
-  // Scans one complete JSON value from the current position.
+  /// Scans one complete JSON value from the current position.
   sanitize::Result<TextSlice> scan_value(BumpArena *arena);
-  // Scans one complete JSON Lines record from the current position.
+  /// Scans one complete JSON Lines record from the current position.
   sanitize::Result<TextSlice> scan_line_value(BumpArena *arena);
-  // Returns the next array value.
+  /// Returns the next array value.
   sanitize::Result<TextSlice> next_array_value(BumpArena *arena);
-  // Consumes and validates the tail after a top-level array closes.
+  /// Consumes and validates the tail after a top-level array closes.
   sanitize::Status finish_array();
 
   // Allows the chunk-crossing value scanner to operate on private stream state.

@@ -1,5 +1,7 @@
 // Defines immutable top-level JSON field spans handed from validation to
 // workers.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #pragma once
 
@@ -29,6 +31,7 @@ struct JsonValidatedRowTokens {
   std::uint32_t field_count = 0;
 };
 
+/// Returns the immutable validated field-token span attached to a source row.
 [[nodiscard]] inline const JsonValidatedRowTokens *
 json_validated_row_tokens(const sanitize::RowRef &row) noexcept {
   constexpr auto token_flag =
@@ -39,6 +42,8 @@ json_validated_row_tokens(const sanitize::RowRef &row) noexcept {
   return static_cast<const JsonValidatedRowTokens *>(row.direct_ctx);
 }
 
+/// Reports whether validated field tokens already follow compiled plan column
+/// order.
 [[nodiscard]] inline bool json_validated_row_tokens_are_plan_ordered(
     const sanitize::RowRef &row) noexcept {
   constexpr auto ordered_flag =

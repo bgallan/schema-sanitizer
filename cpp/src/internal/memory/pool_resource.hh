@@ -1,4 +1,6 @@
-// Declares std::pmr resource adapters for native memory pools.
+// Declares the std::pmr adapter for native memory pools. Constructors
+// control pool lifetime and optional exact-block recycling for
+// container metadata.
 
 #pragma once
 
@@ -14,24 +16,29 @@ namespace sanitize::internal {
 // alignment.
 class PoolResource final : public std::pmr::memory_resource {
 public:
-  // Creates a PoolResource.
+  /// Adapts a raw pool handle without extending its lifetime or
+  /// recycling blocks.
   explicit PoolResource(void *pool_handle = nullptr);
+  /// Keeps the supplied pool alive and disables exact-block recycling.
   explicit PoolResource(std::shared_ptr<void> pool_keepalive);
+  /// Keeps the supplied pool alive and optionally recycles exact-size blocks.
   PoolResource(std::shared_ptr<void> pool_keepalive, bool recycle_exact_blocks);
+  /// Configures pool lifetime and a bounded exact-block recycling cache.
   PoolResource(std::shared_ptr<void> pool_keepalive, bool recycle_exact_blocks,
                std::size_t max_cached_bytes);
+  /// Flushes cached blocks before releasing the backing pool lifetime.
   ~PoolResource() override;
 
-  // Returns the opaque pool handle used by this resource.
+  /// Returns the opaque pool handle used by this resource.
   [[nodiscard]] void *pool() const noexcept { return pool_handle_; }
 
 protected:
-  // Allocates a block through the underlying MemoryPool.
+  /// Allocates through the backing pool or its bounded exact-size cache.
   void *do_allocate(std::size_t bytes, std::size_t alignment) override;
-  // Returns a block to the underlying MemoryPool.
+  /// Caches an eligible block or returns it directly to the backing pool.
   void do_deallocate(void *p, std::size_t bytes,
                      std::size_t alignment) noexcept override;
-  // Compares resources by their underlying pool handle.
+  /// Compares uncached resources by their underlying pool handle.
   [[nodiscard]] bool
   do_is_equal(const std::pmr::memory_resource &other) const noexcept override;
 

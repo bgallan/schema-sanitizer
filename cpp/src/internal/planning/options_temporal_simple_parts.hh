@@ -1,4 +1,6 @@
 // Declares cursor helpers for simple temporal regex fast paths.
+// The helpers normalize private planning state without leaking wire or layout
+// details into public APIs.
 
 #pragma once
 

@@ -1,4 +1,9 @@
-"""Regression coverage for strictly allowlisted repository environment access."""
+"""Audit reviewed runtime and CI environment access plus direct frontend scratch.
+
+Chunk and source owners are deduplicated independently, while CSV or JSON scratch
+retires after every attempt without invalidating decoded values. Environment reads
+remain confined to explicitly reviewed resource, test-integrity, and CI boundaries.
+"""
 
 from __future__ import annotations
 
@@ -10,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
-    """Only documented resource owners and the release preflight may read the environment."""
+    """Only reviewed resource, test-integrity, and CI helpers may read the environment."""
     forbidden = (
         "os." + "getenv",
         "os." + "environ",
@@ -30,6 +35,7 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
     )
     ignored = {
         ".git",
+        ".work",
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",
@@ -58,9 +64,14 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
             yaml_env_blocks.append(path.relative_to(ROOT).as_posix())
     allowed_environment_files = {
         ".github/actions/build-platform-wheel/action.yml",
+        ".github/actions/quality-validation/action.yml",
+        ".github/actions/restore-pip-cache/action.yml",
         "cpp/src/internal/runtime/operation_task_arena.cc",
+        "meta/ci/release/abi_public_smoke.py",
         "meta/ci/release/check_distribution_contents.py",
         "meta/ci/release/check_github_release_state.py",
+        "meta/ci/quality/run_pre_commit_tool.py",
+        "meta/ci/sanitizers/run_with_watchdog.py",
         "src/schema_sanitizer/core_impl/allocator_control.py",
         "src/schema_sanitizer/core_impl/cross_process_memory.py",
         "src/schema_sanitizer/core_impl/cross_process_storage.py",
@@ -68,6 +79,8 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         "src/schema_sanitizer/core_impl/process_resources.py",
         "src/schema_sanitizer/core_impl/safety_margins.py",
         "src/schema_sanitizer/core_impl/temporary_janitor.py",
+        "tests/_support/ci_integrity.py",
+        "tests/conftest.py",
         "tests/concurrency/test_concurrency_cross_process_telemetry_tuning.py",
         "tests/concurrency/test_concurrency_cancellation_and_resource_lifecycle.py",
         "tests/examples/test_example_entrypoints.py",
@@ -78,9 +91,10 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
         "tests/memory/test_memory_reserved_finalizer_processed_owner_cannot_stick_claimed_on_recycle_failure.py",
         "tests/memory/test_memory_resident_zero_is_authoritative_on_public_acquire.py",
         "tests/memory/test_memory_process_resource_governor_repairs_from_exact_leases_and_quarantines.py",
+        "tests/quality/test_ci_helper_layout.py",
         "tests/quality/test_ci_workflow_topology.py",
+        "tests/quality/test_dependency_audit_inputs.py",
         "tests/quality/test_distribution_archive_cleanliness.py",
-        "tests/quality/test_layout_build_source_limits.py",
         "cpp/tests/ordered_executor_tsan.cc",
     }
     assert set(offenders) <= allowed_environment_files
@@ -106,13 +120,48 @@ def test_repository_environment_configuration_is_strictly_allowlisted() -> None:
     }
     configured_names = {f"SCHEMA_SANITIZER_{name}" for name in configured_names}
     assert configured_names == allowed_names
+    cache_action = (ROOT / ".github/actions/restore-pip-cache/action.yml").read_text(
+        encoding="utf-8"
+    )
+    environment_lookup = "os." + 'environ["'
+    assert {
+        token.split('"', 1)[0]
+        for token in cache_action.split(environment_lookup)[1:]
+        if '"' in token
+    } == {
+        "CACHE_DIRECTORY",
+        "CACHE_DEPENDENCY_PATHS",
+        "CACHE_OWNER",
+        "CACHE_PYTHON_VERSION",
+        "CACHE_RESTORE_OUTCOME",
+        "CACHE_RUNNER_ARCHITECTURE",
+        "CACHE_RUNNER_SYSTEM",
+        "GITHUB_ENV",
+        "GITHUB_OUTPUT",
+        "GITHUB_WORKSPACE",
+    }
+    quality_action = (ROOT / ".github/actions/quality-validation/action.yml").read_text(
+        encoding="utf-8"
+    )
+    assert {
+        token.split('"', 1)[0]
+        for token in quality_action.split(environment_lookup)[1:]
+        if '"' in token
+    } == set()
     # YAML environment mappings are limited to composite-action input isolation,
-    # the final validation result handoff, and the untrusted-input-safe release
-    # preflight boundary. Keeping the expected file set exact detects expansion.
+    # exact dependency constraints, the final validation result handoff, and the
+    # untrusted-input-safe release preflight boundary. Keeping the expected file
+    # set exact detects expansion.
     assert sorted(yaml_env_blocks) == [
         ".github/actions/build-platform-wheel/action.yml",
+        ".github/actions/native-llvm-coverage/action.yml",
         ".github/actions/platform-sanitizer/action.yml",
+        ".github/actions/quality-validation/action.yml",
+        ".github/actions/restore-pip-cache/action.yml",
+        ".github/actions/restore-release-distributions/action.yml",
+        ".github/actions/source-distribution/action.yml",
         ".github/actions/test-platform-wheel/action.yml",
+        ".github/actions/thread-sanitizer/action.yml",
         ".github/workflows/ci.yml",
         ".github/workflows/publish.yml",
     ]
@@ -143,12 +192,13 @@ def test_direct_row_scratch_is_retired_after_every_attempt() -> None:
     assert "JsonDirectScratchReset scratch_reset(doc);" in text
 
 
-def test_direct_csv_scratch_cleanup_preserves_decoded_values(tmp_path: Path) -> None:
+def test_direct_csv_scratch_cleanup_preserves_decoded_values(
+    tmp_path: Path, require_native: None
+) -> None:
     """Quoted CSV values are copied into builders before row scratch is retired."""
     pa = pytest.importorskip("pyarrow")
-    from conftest import read_test_csv, require_native
+    from conftest import read_test_csv
 
-    require_native()
     path = tmp_path / "direct.csv"
     path.write_bytes(b'payload\n"alpha""beta"\n"line one\r\nline two"\n')
     result = read_test_csv(
@@ -161,12 +211,13 @@ def test_direct_csv_scratch_cleanup_preserves_decoded_values(tmp_path: Path) -> 
     ]
 
 
-def test_direct_json_scratch_cleanup_preserves_decoded_values(tmp_path: Path) -> None:
+def test_direct_json_scratch_cleanup_preserves_decoded_values(
+    tmp_path: Path, require_native: None
+) -> None:
     """Escaped JSON strings remain valid after the on-demand arena is released."""
     pa = pytest.importorskip("pyarrow")
-    from conftest import read_test_jsonl, require_native
+    from conftest import read_test_jsonl
 
-    require_native()
     path = tmp_path / "direct.jsonl"
     path.write_text(
         '{"payload":"alpha\\nbeta"}\n{"payload":"snowman \\u2603"}\n',

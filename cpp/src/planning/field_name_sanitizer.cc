@@ -1,4 +1,6 @@
-// Implements output and logical-schema field-name sanitization.
+// Implements output and recursive logical-schema field-name sanitization.
+// Policy-specific normalization, deterministic collision suffixes, reserved
+// metadata names, and nested type traversal share one canonical path.
 
 #include "internal/planning/field_name_sanitizer.hh"
 
@@ -30,6 +32,7 @@ constexpr std::string_view kSanitizedFlattenedSuffix = "flattened";
 constexpr std::string_view kPolicyPreserve = "preserve";
 constexpr std::string_view kPolicyLowerSnake = "lower_snake";
 
+/// Converts an ASCII letter to lowercase and rejects other bytes.
 char lower_alpha(unsigned char c) noexcept {
   if (c >= 'A' && c <= 'Z')
     return static_cast<char>(c + ('a' - 'A'));
@@ -38,6 +41,7 @@ char lower_alpha(unsigned char c) noexcept {
   return '\0';
 }
 
+/// Converts one byte to its lowercase-snake representation.
 char lower_snake(unsigned char c) noexcept {
   if (c >= 'A' && c <= 'Z')
     return static_cast<char>(c + ('a' - 'A'));
@@ -46,15 +50,18 @@ char lower_snake(unsigned char c) noexcept {
   return '_';
 }
 
+/// Returns whether prepared options retain source field names unchanged.
 bool prepared_uses_preserve_policy(
     const sanitize::PreparedOptions &opts) noexcept {
   return uses_preserve_policy(opts.spec.field_name_policy);
 }
 
+/// Sanitizes every nested field name within one logical type.
 sanitize::LogicalType
 sanitize_logical_type_names(const sanitize::LogicalType &type,
                             const sanitize::PreparedOptions &opts);
 
+/// Sanitizes sibling names and recursively rebuilds their logical fields.
 std::vector<sanitize::LogicalField>
 sanitize_logical_fields(const std::vector<sanitize::LogicalField> &fields,
                         const sanitize::PreparedOptions &opts) {
@@ -81,6 +88,7 @@ sanitize_logical_fields(const std::vector<sanitize::LogicalField> &fields,
   return out;
 }
 
+/// Rebuilds a logical type with sanitized names at every struct boundary.
 sanitize::LogicalType
 sanitize_logical_type_names(const sanitize::LogicalType &type,
                             const sanitize::PreparedOptions &opts) {

@@ -1,3 +1,8 @@
+// Serializes native-reader page plans and repeated-level diagnostics as compact
+// JSON. This fragment is included by the consolidated footer reader inside its
+// private implementation namespace.
+
+/// Serializes signed 32-bit values as a JSON array.
 void append_int_array(std::string &out,
                       const std::vector<std::int32_t> &items) {
   out.push_back('[');
@@ -10,6 +15,7 @@ void append_int_array(std::string &out,
   out.push_back(']');
 }
 
+/// Serializes signed 16-bit values as a JSON array.
 void append_int16_array(std::string &out,
                         const std::vector<std::int16_t> &items) {
   out.push_back('[');
@@ -22,6 +28,7 @@ void append_int16_array(std::string &out,
   out.push_back(']');
 }
 
+/// Serializes rows of signed 16-bit values as nested JSON arrays.
 void append_int16_matrix(std::string &out,
                          const std::vector<std::vector<std::int16_t>> &items) {
   out.push_back('[');
@@ -34,6 +41,7 @@ void append_int16_matrix(std::string &out,
   out.push_back(']');
 }
 
+/// Serializes signed 64-bit values as a JSON array.
 void append_int64_array(std::string &out,
                         const std::vector<std::int64_t> &items) {
   out.push_back('[');
@@ -46,6 +54,7 @@ void append_int64_array(std::string &out,
   out.push_back(']');
 }
 
+/// Serializes Boolean values as a JSON array.
 void append_bool_array(std::string &out, const std::vector<bool> &items) {
   out.push_back('[');
   for (std::size_t i = 0; i < items.size(); ++i) {
@@ -57,6 +66,7 @@ void append_bool_array(std::string &out, const std::vector<bool> &items) {
   out.push_back(']');
 }
 
+/// Serializes escaped strings as a JSON array.
 void append_string_array(std::string &out,
                          const std::vector<std::string> &items) {
   out.push_back('[');
@@ -69,6 +79,7 @@ void append_string_array(std::string &out,
   out.push_back(']');
 }
 
+/// Serializes rows of escaped strings as nested JSON arrays.
 void append_string_matrix(std::string &out,
                           const std::vector<std::vector<std::string>> &items) {
   out.push_back('[');
@@ -81,6 +92,8 @@ void append_string_matrix(std::string &out,
   out.push_back(']');
 }
 
+/// Serializes repeated-level counts, offsets, and validity previews for
+/// diagnostics.
 void append_repeated_level_layout_infos(
     std::string &out, const std::vector<RepeatedLevelLayoutInfo> &layouts) {
   out.push_back('[');
@@ -112,6 +125,7 @@ void append_repeated_level_layout_infos(
   out.push_back(']');
 }
 
+/// Serializes byte strings as a JSON array of hexadecimal text.
 void append_hex_string_array(std::string &out,
                              const std::vector<std::string> &items) {
   out.push_back('[');
@@ -124,6 +138,7 @@ void append_hex_string_array(std::string &out,
   out.push_back(']');
 }
 
+/// Serializes offset-index page locations for diagnostics.
 void append_page_locations(std::string &out,
                            const std::vector<PageLocationInfo> &locations) {
   out.push_back('[');
@@ -144,6 +159,8 @@ void append_page_locations(std::string &out,
   out.push_back(']');
 }
 
+/// Serializes native page-span offsets, row ranges, and materialized buffer
+/// sizes.
 void append_native_read_page_spans(
     std::string &out, const std::vector<NativeReadPageSpanInfo> &spans) {
   out.push_back('[');

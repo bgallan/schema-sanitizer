@@ -1,4 +1,8 @@
-"""Strict same-thread remote backend used by threading_mode='single'."""
+"""Strict same-thread remote backend used by threading_mode='single'.
+
+It dispatches provider work on the caller thread, reuses compatible blocking contexts,
+and owns staging, listing, metadata, download, and upload cleanup.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +29,7 @@ from ..core_impl.temporary_storage import (
 from ..core_impl.uris import RemoteProvider, normalize_extensions, remote_provider
 from ..input_impl.directory_inputs import DirectoryDiscovery
 from ..sources.models import RemoteFile
-from .providers import azure_sync, gcs_sync, s3_sync
+from .providers import azure_sync, gcs, gcs_sync, s3_sync
 from .sync_http import (
     download_http_file,
     http_file_metadata,
@@ -92,7 +96,7 @@ class SyncDirectoryDownloadSession:
                 stack.enter_context(azure_sync.open_service(ref)),
             )
         elif provider == "gcs":
-            self._context = SyncDownloadContext(provider, headers=gcs_sync.request_headers())
+            self._context = SyncDownloadContext(provider, headers=gcs.request_headers())
         else:
             self._context = SyncDownloadContext(provider)
         return self

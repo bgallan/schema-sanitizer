@@ -1,4 +1,7 @@
-"""Regression coverage for memory json scanners share a finite nesting budget."""
+"""Applies a shared finite nesting ceiling to Python and native JSON scanners, compaction,
+configured inference depth, schema-decision caches, and CSV projection. Excessive depth
+fails without stack exhaustion or unbounded key retention, while documents below the
+ceiling still round-trip."""
 
 from __future__ import annotations
 
@@ -6,7 +9,6 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -30,9 +32,9 @@ def test_json_scanners_share_a_finite_nesting_budget() -> None:
 
 def test_native_json_rejects_excessive_nesting_without_stack_exhaustion(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """A hostile nested row fails normally instead of exhausting the C++ stack."""
-    require_native()
     import schema_sanitizer as ss
 
     source = tmp_path / "too-deep.jsonl"
@@ -47,9 +49,8 @@ def test_native_json_rejects_excessive_nesting_without_stack_exhaustion(
         ss.to_jsonl(source, output, input_format="jsonl", memory_limit_bytes=1 << 20)
 
 
-def test_native_json_compactor_rejects_excessive_nesting() -> None:
+def test_native_json_compactor_rejects_excessive_nesting(require_native: None) -> None:
     """The on-demand parser applies the same depth ceiling as streaming input."""
-    require_native()
     from schema_sanitizer.core_impl.native_runtime import native_core
 
     depth = 513
@@ -59,9 +60,8 @@ def test_native_json_compactor_rejects_excessive_nesting() -> None:
         native_core.json_compact_bytes(payload)
 
 
-def test_nested_json_below_safety_limit_still_round_trips() -> None:
+def test_nested_json_below_safety_limit_still_round_trips(require_native: None) -> None:
     """Ordinary deep JSON remains accepted after adding the safety ceiling."""
-    require_native()
     from schema_sanitizer.core_impl.native_runtime import native_core
 
     value: object = 1
@@ -96,11 +96,11 @@ def test_schema_decision_cache_bounds_retained_key_bytes() -> None:
         """Helper class used by this regression."""
 
         def __init__(self, text: str) -> None:
-            """Helper used by this regression."""
+            """Initialize the fake schema test double."""
             self.text = text
 
         def to_string(self, **_kwargs: object) -> str:
-            """Helper used by this regression."""
+            """Render the fake schema through its string conversion path."""
             return self.text
 
     cache = SchemaDecisionCache(max_size=8, max_key_bytes=16)
@@ -126,9 +126,10 @@ def test_configured_inference_depth_has_a_defensive_ceiling() -> None:
 
 
 @pytest.mark.parametrize("option_name", ["arrow_max_depth", "parquet_max_depth"])
-def test_native_rejects_configured_depth_above_ceiling(tmp_path: Path, option_name: str) -> None:
+def test_native_rejects_configured_depth_above_ceiling(
+    tmp_path: Path, option_name: str, require_native: None
+) -> None:
     """Depth options above the parser ceiling fail before recursive traversal."""
-    require_native()
     import schema_sanitizer as ss
 
     source = tmp_path / "row.jsonl"

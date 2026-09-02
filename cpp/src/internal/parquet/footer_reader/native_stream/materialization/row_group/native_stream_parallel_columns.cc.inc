@@ -1,7 +1,7 @@
-// Implements bounded parallel native Parquet column materialization.
-// Shared scratch estimation saturates before
-// std::numeric_limits<std::int64_t>::max() - value; on overflow, estimate =
-// std::numeric_limits<std::int64_t>::max().
+// Balances native columns across workers and materializes them with a shared
+// scratch allowance. Scratch estimates saturate at the signed 64-bit maximum
+// instead of overflowing. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
 
 struct NativeParquetDecodedColumn {
   std::size_t index = 0;
@@ -18,6 +18,8 @@ struct NativeParquetDecodedColumnRange {
   std::vector<NativeParquetDecodedColumn> columns;
 };
 
+/// Rebinds native Parquet child array so ownership follows the committed parent
+/// Arrow array.
 void rebind_native_parquet_child_array(NativeParquetChildArray *child) {
   if (child) {
     child->array.buffers = child->buffers.data();
@@ -63,6 +65,8 @@ std::size_t native_parquet_column_worker_count(
   return workers < 2 ? 1 : workers;
 }
 
+/// Lazily opens and rewinds a worker's independently admitted Parquet input
+/// stream.
 sanitize::Status
 ensure_native_parquet_worker_file(NativeParquetColumnWorkerState *worker_state,
                                   const std::string &path) {
@@ -91,6 +95,8 @@ ensure_native_parquet_worker_file(NativeParquetColumnWorkerState *worker_state,
   return {};
 }
 
+/// Reports whether a flat column has fixed-cost native decoding and no repeated
+/// layout.
 bool native_parquet_fixed_cost_column(const ColumnChunkInfo &column) noexcept {
   if (!column.repeated_level_layouts.empty()) {
     return false;
@@ -111,6 +117,8 @@ bool native_parquet_fixed_cost_column(const ColumnChunkInfo &column) noexcept {
   return false;
 }
 
+/// Reports whether fixed-cost columns can share one balanced parallel decode
+/// task.
 bool native_parquet_grouped_column_decode_eligible(
     const RowGroupInfo &row_group, std::size_t worker_count) noexcept {
   if (worker_count < 2 || row_group.columns.size() < worker_count * 4) {
@@ -120,6 +128,7 @@ bool native_parquet_grouped_column_decode_eligible(
                              native_parquet_fixed_cost_column);
 }
 
+/// Estimates fixed-column decode work from page bytes and selected value width.
 long double native_parquet_fixed_column_work_weight(
     const ColumnChunkInfo &column, const NativeFlatRowWindow &window) noexcept {
   long double weight = 1.0L;
@@ -150,6 +159,8 @@ long double native_parquet_fixed_column_work_weight(
   return weight;
 }
 
+/// Partitions contiguous columns into approximately equal fixed-cost work
+/// ranges.
 std::vector<NativeParquetColumnRange>
 native_parquet_balanced_column_ranges(const RowGroupInfo &row_group,
                                       const NativeFlatRowWindow &window,
@@ -203,6 +214,8 @@ native_parquet_balanced_column_ranges(const RowGroupInfo &row_group,
   return ranges;
 }
 
+/// Commits native Parquet decoded column only after preparation succeeds,
+/// preserving physical output order.
 sanitize::Status
 commit_native_parquet_decoded_column(NativeParquetDecodedColumn decoded,
                                      NativeParquetStreamState *stream,
@@ -216,6 +229,7 @@ commit_native_parquet_decoded_column(NativeParquetDecodedColumn decoded,
   return enforce_native_array_retained_budget(*state, stream->max_buffer_bytes);
 }
 
+/// Decodes individual columns concurrently and commits them in physical order.
 sanitize::Status materialize_native_row_group_columns_individual(
     NativeParquetStreamState *stream, const RowGroupInfo &row_group,
     const NativeFlatRowWindow &window, std::size_t worker_count,
@@ -299,6 +313,8 @@ sanitize::Status materialize_native_row_group_columns_individual(
   return {};
 }
 
+/// Decodes balanced column ranges concurrently and commits each range in
+/// physical order.
 sanitize::Status materialize_native_row_group_columns_grouped(
     NativeParquetStreamState *stream, const RowGroupInfo &row_group,
     const NativeFlatRowWindow &window, std::size_t worker_count,
@@ -400,6 +416,8 @@ sanitize::Status materialize_native_row_group_columns_grouped(
   return {};
 }
 
+/// Admits worker file descriptors and dispatches the selected parallel column
+/// strategy.
 sanitize::Status materialize_native_row_group_columns_parallel(
     ArrowArrayStream *owner_stream, NativeParquetStreamState *stream,
     const RowGroupInfo &row_group, const NativeFlatRowWindow &window,

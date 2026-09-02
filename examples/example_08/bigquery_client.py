@@ -1,4 +1,8 @@
-"""BigQuery Hive external-table adapter for example 08."""
+"""BigQuery Hive external-table adapter for example 08.
+
+It adapts ADBC connections to schema lookup and atomic external-table replacement
+operations used by the workflow.
+"""
 
 from __future__ import annotations
 

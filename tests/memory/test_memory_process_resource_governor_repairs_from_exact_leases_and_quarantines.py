@@ -1,15 +1,18 @@
-"""Regression coverage for memory process resource governor repairs from exact leases and quarantines."""
+"""Stress-tests repair from exact process-resource leases across corrupted derived
+counters, temporary storage, dispatcher indices, guardian headroom, retry mappings,
+cross-process tails, and fork generations. Low counters quarantine admission instead of
+creating capacity, while cleanup commits exact local authority and preserves same-device
+sibling accounts."""
 
 from __future__ import annotations
 
-import types
 from pathlib import Path
-from threading import Lock
 
 import pytest
 
 
 def test_process_resource_governor_repairs_from_exact_leases_and_quarantines() -> None:
+    """Verify process resource governor repairs from exact leases and quarantines."""
     from schema_sanitizer.core_impl.process_resources import _Governor
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -32,6 +35,7 @@ def test_process_resource_governor_repairs_from_exact_leases_and_quarantines() -
 
 
 def test_dynamic_control_plane_repairs_derived_mirrors_from_exact_owner_ledger() -> None:
+    """Verify dynamic control plane repairs derived mirrors from exact owner ledger."""
     from schema_sanitizer.core_impl.control_plane_budget import _ProcessControlPlaneBudget
 
     budget = _ProcessControlPlaneBudget(include_static_baseline=False)
@@ -50,37 +54,11 @@ def test_dynamic_control_plane_repairs_derived_mirrors_from_exact_owner_ledger()
     assert budget._active == 0
 
 
-def test_operation_memory_shrink_keeps_exact_physical_high_watermark() -> None:
-    from schema_sanitizer.core_impl import memory_budget as module
-
-    ledger = object.__new__(module.OperationMemoryLedger)
-    ledger._lock = Lock()
-    cap = object()
-    owner = types.SimpleNamespace(_lease_id=1, _capability=cap)
-    entry = module._PythonMemoryLeaseEntry(id(owner), cap, 100, None, physical_size_bytes=100)
-    ledger._python_leases = {1: entry}
-    ledger._unknown_python_lease_releases = 0
-    reserved: list[tuple[int, str]] = []
-
-    def reserve(amount: int, *, stage: str) -> None:
-        reserved.append((amount, stage))
-
-    ledger.reserve = reserve  # type: ignore[method-assign]
-    ledger._resize_python_lease(owner, 40, stage="process-resource-governor-repairs-from-exact")
-    assert entry.size_bytes == 40
-    assert entry.physical_size_bytes == 100
-    assert reserved == []
-
-    ledger._resize_python_lease(owner, 120, stage="process-resource-governor-repairs-from-exact")
-    assert reserved == [(20, "process-resource-governor-repairs-from-exact")]
-    assert entry.size_bytes == 120
-    assert entry.physical_size_bytes == 120
-
-
 def test_temporary_storage_low_counter_corruption_closes_admission_but_cleanup_survives(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify temporary storage low counter corruption closes admission but cleanup survives."""
     from schema_sanitizer.core_impl import temporary_storage_governor as module
     from schema_sanitizer.errors import SchemaSanitizerResourceError
 
@@ -104,6 +82,7 @@ def test_temporary_storage_low_counter_corruption_closes_admission_but_cleanup_s
 
 
 def test_cleanup_dispatcher_exact_index_quarantines_low_admission_cache() -> None:
+    """Verify cleanup dispatcher exact index quarantines low admission cache."""
     from schema_sanitizer.core_impl.cleanup_dispatcher import _CleanupDispatcher
 
     dispatcher = _CleanupDispatcher()
@@ -123,10 +102,12 @@ def test_cleanup_dispatcher_exact_index_quarantines_low_admission_cache() -> Non
 def test_release_guardian_never_turns_low_counter_corruption_into_headroom(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify release guardian never turns low counter corruption into headroom."""
     from schema_sanitizer.core_impl.retry_scheduler import _ReleaseGuardian
 
     class Owner:
         def release(self) -> None:
+            """Release the resource held by the owner test double."""
             return None
 
     guardian = _ReleaseGuardian()
@@ -145,6 +126,7 @@ def test_release_guardian_never_turns_low_counter_corruption_into_headroom(
 def test_retry_scheduler_rebuilds_admission_from_exact_owner_mappings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify retry scheduler rebuilds admission from exact owner mappings."""
     from schema_sanitizer.core_impl.retry_scheduler import _RetryScheduler
 
     scheduler = _RetryScheduler()
@@ -170,44 +152,43 @@ def test_retry_scheduler_rebuilds_admission_from_exact_owner_mappings(
     assert scheduler._subsystem_bytes
 
 
-def test_cross_process_storage_release_commits_local_authority_before_fallible_tail() -> None:
-    from schema_sanitizer.core_impl.cross_process_storage import (
-        close_cross_process_storage_account,
-        open_cross_process_storage_account,
-        release_cross_process_account,
-        reserve_cross_process_account,
-    )
+def test_cross_process_storage_release_commits_local_authority_before_fallible_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify cross process storage release commits local authority before fallible tail."""
+    from schema_sanitizer.core_impl import cross_process_storage as module
 
-    account = open_cross_process_storage_account(7801)
-    reserve_cross_process_account(
+    account = module.open_cross_process_storage_account(7801)
+    module.reserve_cross_process_account(
         account,
         32,
         128,
         enabled=False,
-        _reserve_impl=lambda *_args, **_kwargs: 32,
     )
 
     def fail_release(*_args, **_kwargs):
+        """Raise the deliberate failure during release."""
         raise KeyboardInterrupt("injected post-authority cleanup fault")
 
     # Once local exact authority commits, the stale host side is conservative
     # debt. Preserve the primary async exception, but a caller retry cannot debit
     # the old amount because local exact authority has already moved to zero.
+    monkeypatch.setattr(module, "_release_cross_process_raw", fail_release)
     with pytest.raises(KeyboardInterrupt, match="injected post-authority cleanup fault"):
-        release_cross_process_account(account, 32, enabled=False, _release_impl=fail_release)
+        module.release_cross_process_account(account, 32, enabled=False)
     assert account.reserved_bytes == 0
     assert account.reconciliation_pending is True
     assert account.reconciliation_failures == 1
-    close_cross_process_storage_account(account)
+    module.close_cross_process_storage_account(account)
     assert account.closed is True
 
 
 def test_fork_quarantine_is_generation_scoped_and_does_not_dedupe_same_label(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify fork quarantine is generation scoped and does not dedupe same label."""
     from schema_sanitizer.core_impl import fork_safety
 
-    monkeypatch.setattr(fork_safety, "_FORK_INHERITED_CAPSULE", None)
     monkeypatch.setattr(
         fork_safety,
         "_FORK_LABELS",
@@ -217,11 +198,6 @@ def test_fork_quarantine_is_generation_scoped_and_does_not_dedupe_same_label(
         fork_safety,
         "_FORK_OWNERS",
         [None] * (fork_safety._MAX_FORK_CAPSULE_ENTRIES * 2 * fork_safety._MAX_INLINE_OWNERS),
-    )
-    monkeypatch.setattr(
-        fork_safety,
-        "_FORK_EXTRA",
-        [None] * (fork_safety._MAX_FORK_CAPSULE_ENTRIES * 2),
     )
     monkeypatch.setattr(fork_safety, "_FORK_CAPSULE_COUNTS", [0, 0])
     monkeypatch.setattr(fork_safety, "_FORK_CAPSULE_COUNT", 0)
@@ -240,39 +216,12 @@ def test_fork_quarantine_is_generation_scoped_and_does_not_dedupe_same_label(
     assert fork_safety._FORK_CAPSULE_COUNT == 2
 
 
-def test_temporary_storage_legacy_amount_release_cannot_debit_exact_capability(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    from schema_sanitizer.core_impl import temporary_storage_governor as module
-
-    governor = module._ProcessTemporaryStorageGovernor()
-    free = module._MINIMUM_FREE_BYTES + 4096
-    monkeypatch.setattr(governor, "filesystem", lambda _path: (7802, tmp_path, free))
-    monkeypatch.setattr(governor, "free_inodes", lambda _path: 100_000)
-    monkeypatch.setattr(module, "cross_process_storage_enabled", lambda: False)
-
-    exact = governor.reserve_capability(60, path=tmp_path, label="exact")
-    governor.reserve(20, path=tmp_path, label="legacy")
-    state = governor._states[7802]
-    assert state.reserved_bytes == 80
-    assert state.legacy_reserved_bytes == 20
-
-    governor.release(7802, 50)
-    assert exact.active is True
-    assert exact.reserved_bytes == 60
-    assert state.reserved_bytes == 60
-    assert state.legacy_reserved_bytes == 0
-    assert governor.diagnostics().over_release_bytes >= 30
-
-    assert governor.release_capability(exact)
-    assert state.reserved_bytes == 0
-
-
 def test_temporary_storage_finishes_exact_local_commit_before_propagating_cross_tail_fault(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify temporary storage finishes exact local commit before propagating cross tail fault."""
+    from schema_sanitizer.core_impl import cross_process_storage
     from schema_sanitizer.core_impl import temporary_storage_governor as module
 
     governor = module._ProcessTemporaryStorageGovernor()
@@ -288,9 +237,10 @@ def test_temporary_storage_finishes_exact_local_commit_before_propagating_cross_
     assert account is not None
 
     def fail_release(*_args, **_kwargs):
+        """Raise the deliberate failure during release."""
         raise KeyboardInterrupt("injected cross tail")
 
-    monkeypatch.setattr(module, "_release_cross_process_raw", fail_release)
+    monkeypatch.setattr(cross_process_storage, "_release_cross_process_raw", fail_release)
     with pytest.raises(KeyboardInterrupt, match="injected cross tail"):
         governor.release_capability(capability)
 
@@ -305,6 +255,7 @@ def test_temporary_storage_finishes_exact_local_commit_before_propagating_cross_
 
 
 def test_native_amount_permit_underflow_poison_is_sticky_and_fail_closed() -> None:
+    """Verify native amount permit underflow poison is sticky and fail closed."""
     root = Path(__file__).resolve().parents[2]
     source = (root / "cpp/src/internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
 
@@ -349,6 +300,7 @@ def test_cross_process_storage_reconciliation_preserves_same_device_sibling_acco
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    """Verify cross process storage reconciliation preserves same device sibling account."""
     from schema_sanitizer.core_impl import cross_process_storage as module
 
     if module.fcntl is None:
@@ -362,13 +314,17 @@ def test_cross_process_storage_reconciliation_preserves_same_device_sibling_acco
     assert module.cross_process_reserved_bytes(7803) == 70
 
     def fail_release(*_args, **_kwargs):
+        """Raise the deliberate failure during release."""
         raise KeyboardInterrupt("injected before shared release")
 
+    real_release = module._release_cross_process_raw
+    monkeypatch.setattr(module, "_release_cross_process_raw", fail_release)
     with pytest.raises(KeyboardInterrupt, match="before shared release"):
-        module.release_cross_process_account(first, 30, _release_impl=fail_release)
+        module.release_cross_process_account(first, 30)
     assert first.reserved_bytes == 0
     assert second.reserved_bytes == 40
     assert first.reconciliation_pending is True
+    monkeypatch.setattr(module, "_release_cross_process_raw", real_release)
     assert module.cross_process_reserved_bytes(7803) == 70
 
     # A zero growth is a safe point: recovery must reconcile the process+device

@@ -1,4 +1,7 @@
-// Logical schema section codec used by options and Python ABI3 wire I/O.
+// Declares the logical schema section codec used by options and Python ABI3
+// wire I/O. The helpers normalize private planning state without leaking wire
+// or layout details into public APIs.
+
 #pragma once
 
 #include <cstddef>
@@ -17,11 +20,11 @@ inline constexpr std::uint32_t kMaxLogicalSchemaDepth = 512;
 inline constexpr std::size_t kMaxLogicalSchemaPayloadBytes =
     64U * 1024U * 1024U;
 
-// Encodes one logical schema to the compact portable wire representation.
+/// Encodes one logical schema to the compact portable wire representation.
 sanitize::Result<std::string>
 serialize_logical_schema_bytes(const sanitize::LogicalSchema &schema);
 
-// Decodes the logical schema section from portable options bytes.
+/// Decodes the logical schema section from portable options bytes.
 sanitize::Result<sanitize::LogicalSchema>
 deserialize_logical_schema_bytes(std::string_view in);
 

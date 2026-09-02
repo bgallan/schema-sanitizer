@@ -1,4 +1,6 @@
 // Declares shared recursive statistics scanning helpers.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #pragma once
 
@@ -12,8 +14,8 @@
 
 namespace sanitize::internal::statistics_scan_detail {
 
-// Recursively updates scalar statistics and reports whether the value supplied
-// evidence.
+/// Recursively updates scalar statistics and reports whether the value supplied
+/// evidence.
 sanitize::Status update_stats_value(InferenceContext *ctx, StatsNode *stats,
                                     const ValueView &value,
                                     const PreparedOptions &opts,

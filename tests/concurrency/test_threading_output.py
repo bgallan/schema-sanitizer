@@ -1,8 +1,11 @@
-"""Production contracts for ordered multi-threaded text output."""
+"""Exercise ordered multi-worker JSONL and CSV text output.
+
+Output must remain byte-identical, isolate oversized rows, avoid files or threads for invalid and
+single-worker paths, promote after a small first batch, and reuse escaped member-name prefixes.
+"""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -158,17 +161,16 @@ def test_invalid_output_threading_mode_does_not_create_file(
     assert not path.exists()
 
 
-@pytest.mark.skipif(not Path("/proc/self/task").is_dir(), reason="Linux /proc required")
-def test_single_text_output_creates_no_host_thread(tmp_path: Path) -> None:
-    """The single output route stays inline relative to the process baseline."""
+def test_single_text_output_leaves_native_thread_ledger_empty(tmp_path: Path) -> None:
+    """The single output route retires every native arena and worker permit."""
+    from schema_sanitizer.core_impl.runtime_diagnostics import _native_arena_snapshot
+
     batch = pa.record_batch(
         {
             "ordinal": pa.array(range(20_000)),
             "text": pa.array([f"value-{index}" for index in range(20_000)]),
         }
     )
-    baseline = len(os.listdir("/proc/self/task"))
-
     write_jsonl_stream(
         _reader([batch]),
         tmp_path / "single.jsonl",
@@ -177,7 +179,10 @@ def test_single_text_output_creates_no_host_thread(tmp_path: Path) -> None:
         threading_mode="single",
     )
 
-    assert len(os.listdir("/proc/self/task")) == baseline
+    snapshot = _native_arena_snapshot()
+    assert snapshot["live_arenas"] == 0
+    assert snapshot["detached_workers"] == 0
+    assert snapshot["native_physical_threads"] == 0
 
 
 @pytest.mark.parametrize(

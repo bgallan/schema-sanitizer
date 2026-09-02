@@ -1,4 +1,8 @@
-"""Result normalization shared by the split public input-mode tests."""
+"""Normalize results shared by public input-mode tests.
+
+The helpers remove generated metadata columns while retaining the analytical rows needed for
+cross-mode comparisons.
+"""
 
 from __future__ import annotations
 

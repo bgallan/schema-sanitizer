@@ -1,4 +1,6 @@
-// Internal contracts for Arrow C schema node parsing.
+// Declares the internal contracts for Arrow C schema node parsing. These
+// routines keep Arrow schema interpretation and buffer ownership explicit at
+// the ABI boundary.
 
 #pragma once
 

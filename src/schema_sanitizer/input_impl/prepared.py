@@ -1,4 +1,8 @@
-"""Prepared-input value objects shared by API and pipeline layers."""
+"""Represent prepared inputs shared by API and pipeline layers.
+
+Public payloads and native directory manifests carry closeable keepalives that transfer or release
+staged resources in acquisition-safe order.
+"""
 
 from __future__ import annotations
 

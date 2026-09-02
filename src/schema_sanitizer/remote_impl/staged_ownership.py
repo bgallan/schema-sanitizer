@@ -1,4 +1,8 @@
-"""Retryable ownership transfer for asynchronously staged remote results."""
+"""Retryable ownership transfer for asynchronously staged remote results.
+
+StagedResultOwnership serializes publish, consume, and abandon transitions so failed cleanup
+retains one authoritative owner.
+"""
 
 from __future__ import annotations
 
@@ -30,8 +34,6 @@ class StagedResultOwnership:
         self._finalizer_capsule: PreparedFinalizerCleanup | None = capsule
         self._pid = os.getpid()
         self._condition = threading.Condition()
-        # Compatibility alias retained for older fault-injection tests.
-        self._lock = self._condition
         self._staged: Any | None = None
         self._abandoned = False
         self._cleanup_inflight = False
@@ -40,7 +42,7 @@ class StagedResultOwnership:
 
     def _assert_owner_process(self) -> None:
         """Reject inherited direct use before touching the parent lock."""
-        if os.getpid() != getattr(self, "_pid", os.getpid()):
+        if os.getpid() != self._pid:
             raise RuntimeError("staged-result ownership cannot be reused after fork")
 
     def _wait_for_cleanup_locked(self) -> None:

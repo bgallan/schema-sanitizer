@@ -4,28 +4,91 @@ description: Build, inspect, rebuild, install, and upload the source distributio
 runs:
   using: composite
   steps:
+    - name: Prepare source-build tools and the offline virtualenv seed
+      env:
+        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_SEED_SHA256: 71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e  # pragma: allowlist secret
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- .work/virtualenv-seed
+        mkdir -p .work/virtualenv-seed
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --packages build twine packaging virtualenv scikit-build-core cmake ninja
+        python -m pip check
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --download .work/virtualenv-seed --packages pip
+        python - "${PIP_SEED_SHA256}" <<'PY'
+        import hashlib
+        import sys
+        from pathlib import Path
+        root = Path(".work/virtualenv-seed")
+        entries = sorted(root.iterdir())
+        expected_name = "pip-26.2.1-py3-none-any.whl"
+        if len(entries) != 1 or entries[0].name != expected_name:
+            raise SystemExit(
+                f"Expected only {expected_name} in {root}, got {[entry.name for entry in entries]}"
+            )
+        wheel = entries[0]
+        if wheel.is_symlink() or not wheel.is_file():
+            raise SystemExit(f"pip seed is not a regular file: {wheel}")
+        actual = hashlib.sha256(wheel.read_bytes()).hexdigest()
+        if actual != sys.argv[1]:
+            raise SystemExit(f"pip seed SHA-256 mismatch: expected {sys.argv[1]}, got {actual}")
+        PY
     - name: Validate version and build the source distribution
+      env:
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: |
         set -euo pipefail
+        rm -rf -- dist downstream-wheel .work/build .work/sdist-reproducibility
+        mkdir -p dist .work/sdist-reproducibility/first .work/sdist-reproducibility/second
         SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
         [[ "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]
         export SOURCE_DATE_EPOCH
         python meta/ci/release/validate_release_version.py
-        python -m pip install pip==26.1.2 build==1.5.0 twine==7.0.0 packaging==26.3
-        python -m build --sdist --outdir dist
+        python -m build --no-isolation --sdist --outdir .work/sdist-reproducibility/first
+        rm -rf -- .work/build
+        python -m build --no-isolation --sdist --outdir .work/sdist-reproducibility/second
+        shopt -s nullglob
+        first=(.work/sdist-reproducibility/first/*.tar.gz)
+        second=(.work/sdist-reproducibility/second/*.tar.gz)
+        if (( ${#first[@]} != 1 || ${#second[@]} != 1 )); then
+          echo "Expected exactly one source archive from each reproducibility build" >&2
+          exit 1
+        fi
+        if [[ "${first[0]##*/}" != "${second[0]##*/}" ]]; then
+          echo "Source reproducibility builds produced different archive names" >&2
+          exit 1
+        fi
+        cmp -- "${first[0]}" "${second[0]}"
+        cp -- "${first[0]}" dist/
         python -m twine check dist/*.tar.gz
-        python meta/ci/release/check_distribution_contents.py dist/*.tar.gz
+        git ls-files -z > .work/sdist-source-manifest
+        python meta/ci/release/check_distribution_contents.py \
+          --source-manifest .work/sdist-source-manifest dist/*.tar.gz
     - name: Rebuild and test as an isolated downstream consumer
       shell: bash
       run: |
         set -euo pipefail
         mkdir -p downstream-wheel
-        python -m pip wheel --no-deps --wheel-dir downstream-wheel dist/*.tar.gz
-        python meta/ci/release/check_distribution_contents.py downstream-wheel/*.whl
-        WHEEL=$(find downstream-wheel -name '*.whl' -print -quit)
-        python meta/ci/release/check_downstream_install.py "${WHEEL}" \
-          --work-root "${{ runner.temp }}/downstream-checks"
+        env \
+          PIP_CONSTRAINT="${GITHUB_WORKSPACE}/meta/ci/requirements/build-tools.txt" \
+          python -m pip wheel --no-build-isolation --no-cache-dir --no-deps \
+            --wheel-dir downstream-wheel dist/*.tar.gz
+        shopt -s nullglob
+        wheels=(downstream-wheel/*.whl)
+        if (( ${#wheels[@]} != 1 )); then
+          echo "Expected exactly one downstream wheel, found ${#wheels[@]}" >&2
+          exit 1
+        fi
+        python meta/ci/release/check_distribution_contents.py "${wheels[0]}"
+        meta/ci/release/check_downstream_install.sh "${wheels[0]}"
     - name: Upload the validated source distribution
       id: upload-source-distribution
       continue-on-error: true
@@ -36,6 +99,7 @@ runs:
         if-no-files-found: error
         retention-days: 7
         compression-level: 0
+        overwrite: true
     - name: Retry the source-distribution upload after a transport failure
       if: ${{ always() && steps.upload-source-distribution.outcome == 'failure' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1

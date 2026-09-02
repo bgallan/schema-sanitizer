@@ -1,4 +1,8 @@
-"""Orthogonal transport/lifetime route profiles for concurrency certification."""
+"""Classify transport and lifetime routes for concurrency certification.
+
+Prepared inputs and outputs are reduced to route profiles, then mapped to the shared mechanisms
+whose evidence is required for each combination.
+"""
 
 from __future__ import annotations
 

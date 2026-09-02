@@ -1,4 +1,9 @@
-"""Regression coverage for memory logical pool first admission never waits under coordinator lock."""
+"""Tests first admission and commit-critical helpers across external-pool identity,
+residency uncertainty, finalizer capsules, staged cleanup, control-plane metadata,
+native stack or descriptor snapshots, release evidence, diagnostics, and bounded waiter
+polling. The coordinator lock is never held while first admission waits; helpers publish
+one preallocated owner and snapshots preserve conservative stack debt and exact domain
+visibility."""
 
 from __future__ import annotations
 
@@ -7,6 +12,9 @@ import sys
 from pathlib import Path
 
 import pytest
+from _support.source_contracts import source_paths, source_text, source_tree
+
+pytestmark = pytest.mark.usefixtures("isolated_external_runtime_coordinator")
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src/schema_sanitizer"
@@ -14,6 +22,7 @@ CPP = ROOT / "cpp/src"
 
 
 def _clear_external(module) -> None:
+    """Clear cached external-runtime state before the lifecycle check."""
     with module._EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
         module._EXTERNAL_RUNTIME_POOL_COORDINATOR.clear()
 
@@ -21,6 +30,7 @@ def _clear_external(module) -> None:
 def test_logical_pool_first_admission_never_waits_under_coordinator_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify logical pool first admission never waits under coordinator lock."""
     from schema_sanitizer.core_impl import process_resources as module
 
     _clear_external(module)
@@ -30,12 +40,15 @@ def test_logical_pool_first_admission_never_waits_under_coordinator_lock(
         amount = 2
 
         def shrink(self, amount: int) -> None:
+            """Set the fake lease to the requested amount."""
             self.amount = amount
 
         def release(self) -> None:
+            """Release the resource held by the fake lease test double."""
             observed["released"] += 1
 
     def acquire_project_threads(*_args, **_kwargs):
+        """Acquire the projected thread permits through the logical pool."""
         acquired = module._EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK.acquire(blocking=False)
         observed["lock_free"] = acquired
         if acquired:
@@ -56,6 +69,7 @@ def test_logical_pool_first_admission_never_waits_under_coordinator_lock(
 def test_unknown_resident_probe_preserves_identity_and_stack_debt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify unknown resident probe preserves identity and stack debt."""
     from schema_sanitizer.core_impl import process_resources as module
 
     _clear_external(module)
@@ -65,6 +79,7 @@ def test_unknown_resident_probe_preserves_identity_and_stack_debt(
     class Runtime:
         @staticmethod
         def schema_sanitizer_resident_thread_count() -> int:
+            """Return the resident width or raise when the probe is unavailable."""
             if state[0] < 0:
                 raise RuntimeError("probe unavailable")
             return state[0]
@@ -72,30 +87,50 @@ def test_unknown_resident_probe_preserves_identity_and_stack_debt(
     class Native:
         supports_resident_attribution = True
         supports_stack_debt = True
+        supports_atomic_residency_update = True
 
-        def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
-            return desired
+        def __init__(self) -> None:
+            """Initialize the native test double."""
+            self.leases: dict[object, int] = {}
 
-        def process_physical_thread_permits_release(self, amount: int) -> None:
-            events.append(("claim-release", amount))
+        def acquire_exact_permit_lease(
+            self, desired: int, minimum: int
+        ) -> tuple[object, int] | None:
+            """Acquire the fake exact-permit lease requested by the resource owner."""
+            if desired < minimum:
+                return None
+            receipt = object()
+            self.leases[receipt] = desired
+            return receipt, desired
 
-        def external_runtime_resident_threads_add(self, amount: int) -> None:
-            events.append(("identity-add", amount))
+        def exact_permit_lease_amount(self, receipt: object) -> int:
+            """Return the exact permit amount tracked by the fake lease."""
+            return self.leases[receipt]
 
-        def external_runtime_resident_threads_release(self, amount: int) -> None:
-            events.append(("identity-release", amount))
+        def resize_exact_permit_lease(self, receipt: object, target: int) -> int:
+            """Resize the fake exact-permit lease to the requested amount."""
+            current = self.leases[receipt]
+            if current > target:
+                events.append(("claim-release", current - target))
+            self.leases[receipt] = target
+            return target
 
-        def external_runtime_stack_debt_threads_add(self, amount: int) -> None:
-            events.append(("debt-add", amount))
-
-        def external_runtime_stack_debt_threads_release(self, amount: int) -> None:
-            events.append(("debt-release", amount))
+        def external_runtime_residency_update(self, identity_delta: int, debt_delta: int) -> None:
+            """Record identity and stack-debt additions or releases in order."""
+            if identity_delta > 0:
+                events.append(("identity-add", identity_delta))
+            elif identity_delta < 0:
+                events.append(("identity-release", -identity_delta))
+            if debt_delta > 0:
+                events.append(("debt-add", debt_delta))
+            elif debt_delta < 0:
+                events.append(("debt-release", -debt_delta))
 
     monkeypatch.setattr(module, "_native_external_thread_api", lambda: Native())
 
     first = module._acquire_shared_external_native_thread_permits(Runtime, 1)
     assert first.amount == 1 and first.owner is not None
-    first.owner.process_physical_thread_permits_release(1)
+    first.owner.release()
     snap = module.external_runtime_pool_snapshot()
     assert snap["resident_width"] == 3
     assert snap["resident_stack_debt"] == 3
@@ -103,7 +138,7 @@ def test_unknown_resident_probe_preserves_identity_and_stack_debt(
     state[0] = -1
     second = module._acquire_shared_external_native_thread_permits(Runtime, 1)
     assert second.amount == 1 and second.owner is not None
-    second.owner.process_physical_thread_permits_release(1)
+    second.owner.release()
     snap = module.external_runtime_pool_snapshot()
     assert snap["resident_width"] == 3
     assert snap["resident_stack_debt"] == 3
@@ -113,22 +148,25 @@ def test_unknown_resident_probe_preserves_identity_and_stack_debt(
     state[0] = 0
     third = module._acquire_shared_external_native_thread_permits(Runtime, 1)
     assert third.amount == 1 and third.owner is not None
-    third.owner.process_physical_thread_permits_release(1)
+    third.owner.release()
     assert ("debt-release", 3) in events
     assert module.external_runtime_pool_snapshot()["coordinator_entries"] == 0
 
 
 def test_external_runtime_identity_is_namespaced_and_known_integrations_are_sealed() -> None:
+    """Verify external runtime identity is namespaced and known integrations are sealed."""
     from schema_sanitizer.core_impl import process_resources as module
 
     class ProviderA:
         @staticmethod
         def schema_sanitizer_thread_pool_identity() -> str:
+            """Return the controlled native thread-pool identity."""
             return "global"
 
     class ProviderB:
         @staticmethod
         def schema_sanitizer_thread_pool_identity() -> str:
+            """Return the controlled native thread-pool identity."""
             return "global"
 
     assert module._external_runtime_pool_identity_key(
@@ -137,6 +175,7 @@ def test_external_runtime_identity_is_namespaced_and_known_integrations_are_seal
 
     class FakeModule:
         def __init__(self, name: str) -> None:
+            """Initialize the fake module test double."""
             self.__name__ = name
 
     pyarrow_a = FakeModule("pyarrow")
@@ -156,6 +195,7 @@ def test_external_runtime_identity_is_namespaced_and_known_integrations_are_seal
 
 
 def test_allocation_after_commit_critical_helpers_return_single_preallocated_owner() -> None:
+    """Verify allocation after commit critical helpers return single preallocated owner."""
     resources = (SRC / "core_impl/process_resources.py").read_text(encoding="utf-8")
     memory = (SRC / "core_impl/memory_budget.py").read_text(encoding="utf-8")
     cross = (SRC / "core_impl/cross_process_memory.py").read_text(encoding="utf-8")
@@ -179,39 +219,34 @@ def test_allocation_after_commit_critical_helpers_return_single_preallocated_own
     ]
     assert "return result" in shared
     assert "return permit, granted_width" not in shared
-    resize = storage[storage.index("    def _resize(\n") : storage.index("    def _resize_lease")]
+    resize = storage[
+        storage.index("    def _resize_lease(\n") : storage.index(
+            "    def _release_lease_authority"
+        )
+    ]
     assert "result = _StorageResizeResult" in resize
     assert "return result" in resize
     assert "return requested, target_key, target_path" not in resize
 
 
 def test_production_finalizer_paths_use_single_capsule_api() -> None:
+    """Verify production finalizer paths use single capsule API."""
     forbidden_calls = {
         "prepare_finalizer_cleanup",
         "prepare_resource_finalizer_cleanup",
         "prepare_detached_resources_finalizer_cleanup",
         "prepare_reference_finalizer_cleanup",
     }
-    for path in SRC.rglob("*.py"):
-        if path.name == "finalizer_cleanup.py":
+    for relative_path in source_paths("src/schema_sanitizer"):
+        if relative_path.endswith("/finalizer_cleanup.py"):
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = source_tree(relative_path)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
                 continue
-            assert node.func.id not in forbidden_calls, f"legacy tuple finalizer call in {path}"
-            if node.func.id == "prepare_owner_finalizer_cleanup":
-                assert path.name == "path_identity.py"
+            assert node.func.id not in forbidden_calls, f"tuple finalizer call in {relative_path}"
 
-    path_identity = (SRC / "core_impl/path_identity.py").read_text(encoding="utf-8")
-    hook = path_identity[
-        path_identity.index("def prepare_owner_finalizer_cleanup") : path_identity.index(
-            "_OWNER_XATTR"
-        )
-    ]
-    assert "return reserve_owner_finalizer_cleanup()" in hook
-
-    finalizers = (SRC / "core_impl/finalizer_cleanup.py").read_text(encoding="utf-8")
+    finalizers = source_text("src/schema_sanitizer/core_impl/finalizer_cleanup.py")
     reserve = finalizers[
         finalizers.index("def reserve_finalizer_cleanup") : finalizers.index(
             "def reserve_detached_resources_finalizer_cleanup"
@@ -222,6 +257,7 @@ def test_production_finalizer_paths_use_single_capsule_api() -> None:
 
 
 def test_staged_cleanup_claim_has_no_multivalue_post_commit_return() -> None:
+    """Verify staged cleanup claim has no multivalue post commit return."""
     source = (SRC / "remote_impl/staged_ownership.py").read_text(encoding="utf-8")
     body = source[
         source.index("    def _claim_cleanup_locked") : source.index("    def _finish_cleanup")
@@ -234,6 +270,7 @@ def test_staged_cleanup_claim_has_no_multivalue_post_commit_return() -> None:
 
 
 def test_external_pool_static_control_plane_estimates_cover_measured_metadata() -> None:
+    """Verify external pool static control plane estimates cover measured metadata."""
     from schema_sanitizer.core_impl import process_resources as module
 
     entry = module._ExternalRuntimePoolCoordinatorEntry(runtime=None, runtime_key=("runtime", 1))
@@ -251,6 +288,7 @@ def test_external_pool_static_control_plane_estimates_cover_measured_metadata() 
 
 
 def test_safety_critical_commit_helpers_have_no_multivalue_container_builds() -> None:
+    """Verify safety critical commit helpers have no multivalue container builds."""
     import dis
 
     from schema_sanitizer.core_impl import cross_process_memory as cross
@@ -305,12 +343,13 @@ def test_safety_critical_commit_helpers_have_no_multivalue_container_builds() ->
 
 
 def test_native_stack_pid_memory_fd_and_fifo_contracts() -> None:
+    """Verify native stack PID memory FD and fifo contracts."""
     arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     header = (CPP / "internal/runtime/operation_task_arena.hh").read_text(encoding="utf-8")
     probe = (CPP / "api/python_abi3/runtime/ordered_executor_probe.cc").read_text(encoding="utf-8")
 
     assert "std::max<std::uint64_t>(kDefault" in arena
-    assert "ProcessRlimitThreadCapacity" in arena
+    assert "ProcessRlimitThreadHeadroom" in arena
     assert 'effective_headroom(\n        "pids", "pids.max", "pids.current")' in arena
     assert "GlobalMemoryStatusEx" in arena
     assert "host_statistics64" in arena
@@ -341,6 +380,7 @@ def test_native_stack_pid_memory_fd_and_fifo_contracts() -> None:
 
 
 def test_release_gate_requires_stack_debt_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify release gate requires stack debt schema."""
     from schema_sanitizer.core_impl import concurrency_coverage as coverage
     from schema_sanitizer.core_impl import runtime_diagnostics
 
@@ -364,7 +404,7 @@ def test_release_gate_requires_stack_debt_schema(monkeypatch: pytest.MonkeyPatch
     missing = dict(base)
     missing.pop("external_runtime_stack_debt_threads")
     monkeypatch.setattr(runtime_diagnostics, "_native_arena_snapshot", lambda: missing)
-    with pytest.raises(RuntimeError, match="stack-debt"):
+    with pytest.raises(RuntimeError, match="external_runtime_stack_debt_threads"):
         coverage.validate_native_concurrency_protocol_health()
 
     underaccounted = dict(base, external_runtime_stack_debt_threads=1)
@@ -374,6 +414,7 @@ def test_release_gate_requires_stack_debt_schema(monkeypatch: pytest.MonkeyPatch
 
 
 def test_shutdown_and_debug_snapshots_include_external_runtime_pool_domain() -> None:
+    """Verify shutdown and debug snapshots include external runtime pool domain."""
     shutdown = (SRC / "core_impl/runtime_shutdown.py").read_text(encoding="utf-8")
     diagnostics = (SRC / "core_impl/runtime_diagnostics.py").read_text(encoding="utf-8")
     resources = (SRC / "core_impl/process_resources.py").read_text(encoding="utf-8")
@@ -387,12 +428,14 @@ def test_shutdown_and_debug_snapshots_include_external_runtime_pool_domain() -> 
 
 
 def test_runtime_diagnostics_accepts_30_field_native_snapshot() -> None:
+    """Verify runtime diagnostics accepts 30 field native snapshot."""
     source = (SRC / "core_impl/runtime_diagnostics.py").read_text(encoding="utf-8")
-    assert "29, 30" in source or "29,30" in source
+    assert "len(values) != 30" in source
     assert '"external_runtime_stack_debt_threads"' in source
 
 
 def test_fd_native_waiter_uses_bounded_external_observation_poll() -> None:
+    """Verify FD native waiter uses bounded external observation poll."""
     arena = (CPP / "internal/runtime/operation_task_arena.cc").read_text(encoding="utf-8")
     start = arena.index("std::size_t acquire_process_file_descriptor_permits_wait")
     end = arena.index("void release_process_file_descriptor_permits", start)

@@ -1,4 +1,8 @@
-"""Strictly synchronous Azure Blob operations for threading_mode='single'."""
+"""Strictly synchronous Azure Blob operations for threading_mode='single'.
+
+It opens Blob services on the caller thread and performs bounded metadata, listing,
+download, and upload operations with explicit ownership.
+"""
 
 from __future__ import annotations
 
@@ -10,24 +14,30 @@ from typing import Any, Iterator
 from ...core_impl.governed_sort import governed_sort
 from ...core_impl.memory_budget import current_operation_memory_ledger
 from ...core_impl.temporary_storage import StreamingStorageReservation
-from ...core_impl.uris import name_matches, normalize_extensions
+from ...core_impl.uris import normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
     current_directory_metadata_budget,
-    split_parent_child,
 )
 from ...sources.models import RemoteFile
 from ..file_streams import write_sync_reader_to_file
 from ..io_footprint import open_remote_local_file
 from ..sync_cleanup_escrow import reserve_sync_cleanup
-from .azure import AzureRef, parse_uri, render_uri
+from . import (
+    direct_child_items,
+    requested_child_items,
+    requested_directory_groups,
+    sdk_error_identity,
+)
+from .azure import AzureRef, _directory_location, parse_uri, render_uri
 
 
 class _AzureServiceOwner:
     """Retryable owner for one synchronous service client and credential."""
 
     def __init__(self) -> None:
+        """Create empty service and credential slots for retryable synchronous cleanup."""
         self.service: Any | None = None
         self.credential: Any | None = None
 
@@ -88,8 +98,7 @@ def open_service(ref: AzureRef) -> Iterator[Any]:
 
 def _missing_or_permission(exc: Exception, uri: str) -> bool:
     """Classify Azure metadata failures, raising permissions immediately."""
-    status = getattr(exc, "status_code", None)
-    code = getattr(exc, "error_code", None)
+    status, code = sdk_error_identity(exc)
     if status == 404 or code in {"BlobNotFound", "ContainerNotFound"}:
         return True
     if status in {401, 403}:
@@ -131,7 +140,7 @@ def download_file_with_service(
     iterator = iter(stream.chunks())
 
     def read(_size: int) -> bytes:
-        """Provide a deterministic test or worker helper."""
+        """Return the next Blob chunk, or empty bytes after iterator exhaustion."""
         try:
             return next(iterator)
         except StopIteration:
@@ -200,13 +209,13 @@ def list_files(
     metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
     with open_service(ref) as service:
         container = service.get_container_client(ref.container)
-        for blob in container.walk_blobs(name_starts_with=prefix, delimiter="/"):
-            name = getattr(blob, "name", None)
-            if not isinstance(name, str):
-                continue
-            relative = name[len(prefix) :] if name.startswith(prefix) else name
-            if not relative or "/" in relative or not name_matches(relative, suffixes):
-                continue
+        for blob, relative in direct_child_items(
+            container.walk_blobs(name_starts_with=prefix, delimiter="/"),
+            prefix,
+            suffixes,
+            "name",
+        ):
+            name = blob.name
             size = getattr(blob, "size", None)
             remote_file = RemoteFile(
                 render_uri(ref, name),
@@ -232,18 +241,11 @@ def directories_containing_files(
         uris,
         metadata_budget=metadata_budget,
     )
-    groups: dict[tuple[str, str, str], dict[str, list[str]]] = {}
-    for uri in uris:
-        ref = parse_uri(uri)
-        parsed = split_parent_child(ref.blob)
-        if parsed is None:
-            continue
-        parent_prefix, child = parsed
-        key = (ref.account_url, ref.container, parent_prefix)
-        # pass63 proof anchor: metadata_budget.charge_group_associations()
-        discovery.publish_group_association(
-            lambda: groups.setdefault(key, {}).setdefault(child, []).append(uri)
-        )
+    groups = requested_directory_groups(
+        uris,
+        discovery,
+        _directory_location,
+    )
     by_account: dict[str, list[tuple[str, str, dict[str, list[str]]]]] = {}
     for (account_url, container, parent), children in groups.items():
         discovery.publish_group_association(
@@ -255,15 +257,14 @@ def directories_containing_files(
             for container_name, parent_prefix, children in account_groups:
                 prefix = f"{parent_prefix.rstrip('/')}/" if parent_prefix else ""
                 container = service.get_container_client(container_name)
-                for blob in container.list_blobs(name_starts_with=prefix):
-                    name = getattr(blob, "name", None)
-                    if not isinstance(name, str) or not name.startswith(prefix):
-                        continue
-                    relative = name[len(prefix) :]
-                    child, separator, filename = relative.partition("/")
-                    child_uris = children.get(child) if separator else None
-                    if not child_uris or "/" in filename or not name_matches(filename, accepted):
-                        continue
+                for blob, child_uris, filename in requested_child_items(
+                    container.list_blobs(name_starts_with=prefix),
+                    prefix,
+                    children,
+                    accepted,
+                    "name",
+                ):
+                    name = blob.name
                     size = getattr(blob, "size", None)
                     discovery.add(
                         child_uris,

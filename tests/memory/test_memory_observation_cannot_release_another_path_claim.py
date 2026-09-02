@@ -1,4 +1,8 @@
-"""Regression coverage for memory observation cannot release another path claim."""
+"""Consolidate ownership observation, reconciliation, and lock-separation contracts.
+
+The cases cover path claims, recycled descriptors, crash-leftover sweeps, retry accounting,
+remote-governor reset, cross-process journals, cleanup queues, and native teardown.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ import time
 from pathlib import Path
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -19,6 +24,7 @@ pytestmark = pytest.mark.skipif(
 def test_observation_cannot_release_another_path_claim(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify observation cannot release another path claim."""
     import schema_sanitizer.core_impl.path_identity as module
 
     artifact = tmp_path / "owned"
@@ -38,13 +44,16 @@ def test_observation_cannot_release_another_path_claim(
 def test_uncertain_close_never_retries_recycled_fd(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify uncertain close never retries recycled FD."""
     import schema_sanitizer.core_impl.path_identity as module
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.calls = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.calls += 1
 
     descriptor = os.open(os.devnull, os.O_RDONLY)
@@ -60,6 +69,7 @@ def test_uncertain_close_never_retries_recycled_fd(
     first = True
 
     def uncertain_close(fd: int) -> None:
+        """Close the descriptor with an intentionally uncertain outcome."""
         nonlocal first
         if first:
             first = False
@@ -82,6 +92,7 @@ def test_uncertain_close_never_retries_recycled_fd(
 
 
 def test_remote_startup_timeout_preserves_real_finally() -> None:
+    """Verify remote startup timeout preserves real finally."""
     from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
 
     started = threading.Event()
@@ -91,6 +102,7 @@ def test_remote_startup_timeout_preserves_real_finally() -> None:
 
     class Context:
         async def __aenter__(self) -> object:
+            """Enter the asynchronous context managed by the context test double."""
             started.set()
             try:
                 await asyncio.sleep(3600)
@@ -101,6 +113,7 @@ def test_remote_startup_timeout_preserves_real_finally() -> None:
             return object()
 
         async def __aexit__(self, *_exc: object) -> None:
+            """Exit the asynchronous context managed by the context test double and run cleanup."""
             exited.set()
 
     with pytest.raises(RuntimeError, match="startup exceeded"):
@@ -108,13 +121,14 @@ def test_remote_startup_timeout_preserves_real_finally() -> None:
             context_factory=Context,
             shutdown_timeout_seconds=0.05,
         )
-    assert started.wait(2)
+    assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
     release.set()
-    assert finalized.wait(2)
-    assert exited.wait(2)
+    assert finalized.wait(SCHEDULER_TIMEOUT_SECONDS)
+    assert exited.wait(SCHEDULER_TIMEOUT_SECONDS)
 
 
 def test_private_crash_leftovers_are_scanned(tmp_path: Path) -> None:
+    """Verify private crash leftovers are scanned."""
     from schema_sanitizer.core_impl.temporary_janitor import (
         _TemporaryArtifactJanitor,
     )
@@ -136,6 +150,7 @@ def test_private_crash_leftovers_are_scanned(tmp_path: Path) -> None:
 def test_external_claim_sweep_rotates_across_namespace(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify external claim sweep rotates across namespace."""
     import schema_sanitizer.core_impl.path_identity as module
 
     getattr(monkeypatch, "set" + "env")("SCHEMA_SANITIZER_COORDINATION_DIR", str(tmp_path))
@@ -151,6 +166,7 @@ def test_external_claim_sweep_rotates_across_namespace(
 
 
 def test_cleanup_dispatcher_counts_active_retained_bytes() -> None:
+    """Verify cleanup dispatcher counts active retained bytes."""
     from schema_sanitizer.core_impl.cleanup_dispatcher import (
         cleanup_dispatcher_snapshot,
         dispatch_cleanup,
@@ -161,17 +177,18 @@ def test_cleanup_dispatcher_counts_active_retained_bytes() -> None:
     charge = 2 * 1024 * 1024
 
     def blocking_cleanup() -> None:
+        """Pause at the blocking cleanup synchronization point."""
         started.set()
-        assert release.wait(3)
+        assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     before = cleanup_dispatcher_snapshot()
     assert dispatch_cleanup(blocking_cleanup, retained_bytes=charge)
-    assert started.wait(2)
+    assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
     active = cleanup_dispatcher_snapshot()
     assert active.active_bytes >= before.active_bytes + charge
     assert active.pending_bytes <= before.pending_bytes
     release.set()
-    deadline = time.monotonic() + 3
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
         if cleanup_dispatcher_snapshot().active_bytes <= before.active_bytes:
             break
@@ -182,6 +199,7 @@ def test_cleanup_dispatcher_counts_active_retained_bytes() -> None:
 def test_retry_replacement_preserves_exact_byte_accounting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify retry replacement preserves exact byte accounting."""
     from schema_sanitizer.core_impl import retry_scheduler as module
 
     scheduler = module._RetryScheduler()
@@ -214,6 +232,7 @@ def test_retry_replacement_preserves_exact_byte_accounting(
 
 
 def test_retry_subsystems_do_not_create_threading_timers() -> None:
+    """Verify retry subsystems do not create threading timers."""
     root = Path(__file__).resolve().parents[2]
     files = (
         root / "src/schema_sanitizer/core_impl/retry_scheduler.py",
@@ -228,6 +247,7 @@ def test_retry_subsystems_do_not_create_threading_timers() -> None:
 
 
 def test_remote_governor_fork_reset_clears_all_derived_state() -> None:
+    """Verify remote governor fork reset clears all derived state."""
     from schema_sanitizer.remote_impl.io_permits import RemoteIoPermitGovernor
 
     governor = RemoteIoPermitGovernor(capacity=4)
@@ -247,6 +267,7 @@ def test_remote_governor_fork_reset_clears_all_derived_state() -> None:
 
 
 def test_memory_cross_process_io_does_not_hold_local_ledger_lock() -> None:
+    """Verify memory cross process I/O does not hold local ledger lock."""
     from threading import Condition, Lock
 
     from schema_sanitizer.core_impl.memory_budget import OperationMemoryLedger
@@ -257,23 +278,29 @@ def test_memory_cross_process_io_does_not_hold_local_ledger_lock() -> None:
     class Native:
         reserved = 0
 
-        def operation_memory_ledger_reserve(
+        def operation_memory_ledger_reserve_snapshot(
             self, _capsule: object, amount: int, _stage: str
-        ) -> None:
+        ) -> tuple[int, int, int]:
+            """Increase the native reserved total and return its ledger snapshot."""
             self.reserved += amount
+            return 1024, self.reserved, self.reserved
 
         def operation_memory_ledger_release(self, _capsule: object, amount: int) -> None:
+            """Subtract the released bytes from the native reserved total."""
             self.reserved -= amount
 
         def operation_memory_ledger_snapshot(self, _capsule: object) -> tuple[int, int, int]:
+            """Return the current operation-memory ledger snapshot."""
             return 1024, self.reserved, self.reserved
 
     class Cross:
         def resize(self, _amount: int) -> None:
+            """Resize the resource represented by the cross test double."""
             entered.set()
-            assert release.wait(3)
+            assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
 
         def release(self) -> None:
+            """Release the resource held by the cross test double."""
             return None
 
     ledger = OperationMemoryLedger.__new__(OperationMemoryLedger)
@@ -298,70 +325,44 @@ def test_memory_cross_process_io_does_not_hold_local_ledger_lock() -> None:
     ledger._close_outstanding_bytes = 0
     thread = threading.Thread(target=lambda: ledger.reserve(1, stage="test"))
     thread.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert ledger.snapshot().reserved_bytes == 1
     release.set()
-    thread.join(2)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
 
 
 def test_storage_resize_journal_runs_outside_pool_lock(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    """Verify storage resize journal runs outside pool lock."""
     import schema_sanitizer.core_impl.temporary_storage as module
 
     entered = threading.Event()
     release = threading.Event()
+    pool = module.TemporaryStoragePermitPool(64 * 1024 * 1024)
+    lease = pool.acquire(10, label="test", path=tmp_path)
+    original_resize = module._PROCESS_TEMPORARY_STORAGE.resize_capability
 
-    class ProcessStorage:
-        def filesystem(self, path: object) -> tuple[int, Path, int]:
-            return 1, Path(str(path)), 1 << 30
+    def blocking_resize(*args: object, **kwargs: object) -> object:
+        """Pause at the blocking resize synchronization point."""
+        entered.set()
+        assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
+        return original_resize(*args, **kwargs)
 
-        def reserve(self, amount: int, **_kwargs: object) -> int:
-            return 1
-
-        def release(self, _key: int, _amount: int, **_kwargs: object) -> None:
-            entered.set()
-            assert release.wait(3)
-
-    monkeypatch.setattr(module, "_PROCESS_TEMPORARY_STORAGE", ProcessStorage())
-    pool = module.TemporaryStoragePermitPool.__new__(module.TemporaryStoragePermitPool)
-    pool.limit_bytes = 64 * 1024 * 1024
-    pool._lock = threading.Lock()
-    pool._condition = threading.Condition(pool._lock)
-    pool._reserved_bytes = 10
-    pool._pending_reserved_bytes = 0
-    pool._pending_active_leases = 0
-    pool._resize_inflight = 0
-    pool._pending_resize_growth = 0
-    pool._peak_reserved_bytes = 10
-    pool._active_leases = 1
-    pool._closed = False
-    pool._close_complete = False
-    pool._close_outstanding_bytes = 0
-    pool._close_active_leases = 0
-    pool._over_release_count = 0
-    pool._over_release_bytes = 0
-    thread = threading.Thread(
-        target=lambda: pool._resize(
-            10,
-            5,
-            filesystem_key=1,
-            label="test",
-            path=Path("/tmp/observation-cannot-release-another-path-claim"),
-            inode_count=1,
-        )
-    )
+    monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "resize_capability", blocking_resize)
+    thread = threading.Thread(target=lambda: lease.resize(5))
     thread.start()
-    assert entered.wait(2)
+    assert entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert pool.snapshot().reserved_bytes == 10
     release.set()
-    thread.join(2)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
     assert pool.snapshot().reserved_bytes == 5
+    lease.release()
 
 
 def test_native_teardown_and_active_byte_contracts() -> None:
+    """Verify native teardown and active byte contracts."""
     root = Path(__file__).resolve().parents[2]
     header = (root / "cpp/src/internal/runtime/operation_task_arena.hh").read_text()
     source = (root / "cpp/src/internal/runtime/operation_task_arena.cc").read_text()
@@ -379,6 +380,7 @@ def test_native_teardown_and_active_byte_contracts() -> None:
 
 
 def test_reconciliation_source_contracts() -> None:
+    """Verify reconciliation source contracts."""
     root = Path(__file__).resolve().parents[2]
     memory = (root / "src/schema_sanitizer/core_impl/memory_budget.py").read_text()
     storage = (root / "src/schema_sanitizer/core_impl/temporary_storage.py").read_text()

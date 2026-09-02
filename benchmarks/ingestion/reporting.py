@@ -1,4 +1,8 @@
-"""Machine-readable reporting helpers for ingestion benchmarks."""
+"""Machine-readable reporting helpers for ingestion benchmarks.
+
+It captures benchmark records, host CPU and memory metadata, and serializes the final
+report as JSON.
+"""
 
 from __future__ import annotations
 

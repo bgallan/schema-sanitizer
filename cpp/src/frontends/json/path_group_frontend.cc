@@ -1,4 +1,7 @@
-// Prefetches independent JSONL path frontends while preserving file order.
+// Prefetches independent JSONL path frontends while preserving file order. The
+// pipeline preserves source offsets and ownership while enforcing plan order
+// and memory bounds.
+
 #include "frontends/builtin_frontends.hh"
 
 #include "internal/memory/memory_budget.hh"
@@ -23,6 +26,9 @@ namespace sanitize::internal {
 namespace {
 
 struct GroupBatchStorage {
+
+  /// Creates pooled storage that retains every prefetched child batch in output
+  /// order.
   GroupBatchStorage(std::shared_ptr<void> pool,
                     std::shared_ptr<PoolResource> resource)
       : pool_keepalive(std::move(pool)),
@@ -60,6 +66,8 @@ using FetchExecutor = OrderedExecutor<FetchTask, FetchedBatch>;
 
 class JsonlPathGroupFrontend final {
 public:
+  /// Initializes ordered JSONL path traversal with bounded prefetch and stable
+  /// source names.
   JsonlPathGroupFrontend(std::vector<std::string> paths,
                          std::vector<std::string> source_names, Options options,
                          std::shared_ptr<OperationTaskArena> task_arena)
@@ -79,6 +87,8 @@ public:
     reset();
   }
 
+  /// Rewinds the JSON text frontend to its initial input position and clears
+  /// per-pass state.
   void reset() noexcept {
     active_executor_.reset();
     active_coordination_charge_.reset();
@@ -99,6 +109,7 @@ public:
     }
   }
 
+  /// Propagates the compiled plan to all open grouped JSON sources.
   void set_plan(const CompiledPlan *plan) noexcept {
     plan_ = plan;
     for (auto &child : children_) {
@@ -108,6 +119,7 @@ public:
     }
   }
 
+  /// Propagates the materialization mode to all open grouped JSON sources.
   void set_materialization_mode(FrontendMaterializationMode mode) noexcept {
     materialization_mode_ = mode;
     for (auto &child : children_) {
@@ -117,6 +129,7 @@ public:
     }
   }
 
+  /// Rebuilds grouped coordination storage and updates every open JSON source.
   void set_memory_pool(std::shared_ptr<void> pool) noexcept {
     active_executor_.reset();
     active_coordination_charge_.reset();
@@ -141,6 +154,7 @@ public:
     }
   }
 
+  /// Propagates task-arena ownership to all open grouped JSON sources.
   void set_task_arena(std::shared_ptr<OperationTaskArena> task_arena) noexcept {
     task_arena_ = std::move(task_arena);
     for (auto &child : children_) {
@@ -150,6 +164,8 @@ public:
     }
   }
 
+  /// Reads and materializes the next bounded row batch from the JSON text
+  /// frontend.
   sanitize::Result<RowBatch> next_batch(std::int64_t capacity) try {
     RowBatch out;
     if (capacity <= 0 || done_) {
@@ -240,6 +256,8 @@ public:
   }
 
 private:
+  /// Lazily constructs one child frontend and applies the group's active
+  /// runtime settings.
   sanitize::Status open_child(std::size_t child_index) {
     auto &child = children_[child_index];
     if (child.frontend) {
@@ -265,6 +283,7 @@ private:
     return sanitize::Status::OK();
   }
 
+  /// Opens a child and returns its first batch together with exhaustion state.
   sanitize::Result<FetchedBatch> fetch_first(FetchTask task) {
     SAN_RETURN_NOT_OK(open_child(task.child_index));
     SAN_ASSIGN_OR_RAISE(
@@ -275,6 +294,8 @@ private:
     return FetchedBatch{.batch = std::move(batch), .exhausted = exhausted};
   }
 
+  /// Ensures the current child has a stored first-fetch result ready for
+  /// consumption.
   sanitize::Status ensure_prefetched(std::int64_t capacity) {
     if (index_ >= children_.size()) {
       done_ = true;
@@ -297,6 +318,8 @@ private:
     return sanitize::Status::OK();
   }
 
+  /// Starts a bounded cohort of ordered first-batch fetches at the current
+  /// child.
   sanitize::Status start_prefetch(std::int64_t capacity) {
     active_executor_.reset();
     active_coordination_charge_.reset();
@@ -389,6 +412,7 @@ private:
     return active_executor_->FinishSubmission();
   }
 
+  /// Stores either a fetched batch or its failure in the child's pending slot.
   void store_fetch(std::size_t child, sanitize::Result<FetchedBatch> result) {
     PendingFetch pending;
     if (result.ok()) {
@@ -399,6 +423,8 @@ private:
     (*pending_)[child] = std::move(pending);
   }
 
+  /// Merges a nonempty child batch and retains its owner for the returned row
+  /// views.
   static void append_batch(RowBatch *out, GroupBatchStorage *storage,
                            RowBatch batch, std::int64_t *produced) {
     if (batch.rows.empty()) {
@@ -410,6 +436,8 @@ private:
     storage->batches.push_back(std::move(batch));
   }
 
+  /// Releases an exhausted child and advances ordered traversal to its
+  /// successor.
   void advance_child() noexcept {
     if (index_ < children_.size()) {
       // An exhausted child will never be revisited until reset(). Drop its
@@ -456,33 +484,43 @@ private:
   std::unique_ptr<FetchExecutor> active_executor_;
 };
 
+/// Rewinds the JSON text frontend to its initial input position and clears
+/// per-pass state.
 void group_reset(void *self) noexcept {
   static_cast<JsonlPathGroupFrontend *>(self)->reset();
 }
 
+/// Reads and materializes the next bounded row batch from the JSON text
+/// frontend.
 sanitize::Result<RowBatch> group_next_batch(void *self, std::int64_t capacity) {
   return static_cast<JsonlPathGroupFrontend *>(self)->next_batch(capacity);
 }
 
+/// Forwards a compiled plan through the grouped JSON frontend callback table.
 void group_set_plan(void *self, const CompiledPlan *plan) noexcept {
   static_cast<JsonlPathGroupFrontend *>(self)->set_plan(plan);
 }
 
+/// Forwards the materialization mode through the grouped JSON callback table.
 void group_set_materialization_mode(void *self,
                                     FrontendMaterializationMode mode) noexcept {
   static_cast<JsonlPathGroupFrontend *>(self)->set_materialization_mode(mode);
 }
 
+/// Forwards memory-pool ownership through the grouped JSON callback table.
 void group_set_memory_pool(void *self, std::shared_ptr<void> pool) noexcept {
   static_cast<JsonlPathGroupFrontend *>(self)->set_memory_pool(std::move(pool));
 }
 
+/// Forwards task-arena ownership through the grouped JSON callback table.
 void group_set_task_arena(
     void *self, std::shared_ptr<OperationTaskArena> task_arena) noexcept {
   static_cast<JsonlPathGroupFrontend *>(self)->set_task_arena(
       std::move(task_arena));
 }
 
+/// Destroys the heap-owned JSON text frontend state after its final callback
+/// completes.
 void group_destroy(void *self) noexcept {
   delete static_cast<JsonlPathGroupFrontend *>(self);
 }

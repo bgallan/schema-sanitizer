@@ -1,4 +1,6 @@
-// Selects and applies optional Parquet value encodings.
+// Produces dictionary, RLE, bit-packed, delta, and byte-stream-split Parquet
+// value payloads. This fragment is included by the consolidated writer to
+// isolate format-specific details.
 
 struct DictionaryEncodingData {
   std::string dictionary_values;
@@ -6,11 +8,14 @@ struct DictionaryEncodingData {
   std::int32_t dictionary_size = 0;
 };
 
+/// Returns the RLE dictionary-index bit width required for the encoded entry
+/// count.
 std::uint8_t dictionary_bit_width(std::size_t dictionary_size) {
   return static_cast<std::uint8_t>(
       std::max<std::size_t>(1U, std::bit_width(dictionary_size - 1U)));
 }
 
+/// Encodes one repeated dictionary index as a Parquet RLE run.
 void append_rle_run_u32(std::string &out, std::int64_t run_length,
                         std::uint32_t value, std::uint8_t bit_width) {
   append_varint(out, static_cast<std::uint64_t>(run_length) << 1U);
@@ -21,6 +26,8 @@ void append_rle_run_u32(std::string &out, std::int64_t run_length,
 }
 
 template <class Fn>
+/// Visits each logical dictionary item while abstracting fixed- and
+/// variable-width storage.
 bool for_each_dictionary_item(const LeafColumn &column, jsonl::JsonlKind kind,
                               std::string_view values, Fn &&fn) {
   if (is_byte_array_kind(kind)) {
@@ -55,6 +62,8 @@ bool for_each_dictionary_item(const LeafColumn &column, jsonl::JsonlKind kind,
   return true;
 }
 
+/// Returns a conservative dictionary scratch bytes estimate capped to prevent
+/// overflow and unbounded worker admission.
 std::size_t estimated_dictionary_scratch_bytes(std::size_t entry_count,
                                                std::size_t value_bytes) {
   constexpr std::size_t kEstimatedEntryOverhead =
@@ -66,6 +75,8 @@ std::size_t estimated_dictionary_scratch_bytes(std::size_t entry_count,
       saturating_size_multiply(entry_count, kEstimatedEntryOverhead));
 }
 
+/// Attempts dictionary encode column and cleanly declines when the bounded fast
+/// path is inapplicable.
 std::optional<DictionaryEncodingData>
 try_dictionary_encode_column(const LeafColumn &column,
                              std::string_view values) {
@@ -167,16 +178,20 @@ try_dictionary_encode_column(const LeafColumn &column,
   return out;
 }
 
+/// Appends one signed integer as an unsigned zigzag varint.
 void append_zigzag_varint(std::string &out, std::int64_t value) {
   const auto encoded = (static_cast<std::uint64_t>(value) << 1U) ^
                        static_cast<std::uint64_t>(value >> 63U);
   append_varint(out, encoded);
 }
 
+/// Returns the minimum bit width required to represent the supplied unsigned
+/// integer.
 std::uint8_t bit_width_u64(std::uint64_t value) {
   return static_cast<std::uint8_t>(std::bit_width(value));
 }
 
+/// Packs fixed-width unsigned values into the Parquet little-endian bit stream.
 void append_bit_packed_values(std::string &out,
                               std::span<const std::uint64_t> values,
                               std::uint8_t bit_width) {
@@ -209,6 +224,7 @@ void append_bit_packed_values(std::string &out,
   }
 }
 
+/// Subtracts two signed values and returns an error instead of overflowing.
 std::optional<std::int64_t> checked_i64_subtract(std::int64_t left,
                                                  std::int64_t right) {
   if ((right > 0 && left < std::numeric_limits<std::int64_t>::min() + right) ||
@@ -218,6 +234,7 @@ std::optional<std::int64_t> checked_i64_subtract(std::int64_t left,
   return left - right;
 }
 
+/// Computes a nonnegative signed delta and rejects subtraction overflow.
 std::uint64_t nonnegative_i64_difference(std::int64_t high, std::int64_t low) {
   if (low >= 0) {
     return static_cast<std::uint64_t>(high - low);
@@ -230,6 +247,8 @@ std::uint64_t nonnegative_i64_difference(std::int64_t high, std::int64_t low) {
 }
 
 template <class NextValue>
+/// Encodes delta binary packed sequence using the selected Parquet
+/// representation and bounded caller-owned storage.
 std::optional<std::string>
 encode_delta_binary_packed_sequence(std::size_t value_count,
                                     NextValue &&next_value) {
@@ -297,6 +316,8 @@ encode_delta_binary_packed_sequence(std::size_t value_count,
   return out;
 }
 
+/// Reports whether a Parquet leaf uses a supported floating-point physical
+/// type.
 bool is_float_column(const LeafColumn &column) {
   if (!column.node) {
     return false;
@@ -308,6 +329,7 @@ bool is_float_column(const LeafColumn &column) {
          kind == jsonl::JsonlKind::kFloat64;
 }
 
+/// Returns the physical byte width for a supported floating-point leaf kind.
 std::size_t float_value_width(const LeafColumn &column) {
   const auto kind = column.node->arrow_kind == jsonl::JsonlKind::kDictionary
                         ? column.node->dictionary_value_kind
@@ -315,13 +337,14 @@ std::size_t float_value_width(const LeafColumn &column) {
   return kind == jsonl::JsonlKind::kFloat32 ? sizeof(float) : sizeof(double);
 }
 
+/// Returns the physical value category used to select a Parquet leaf encoder.
 jsonl::JsonlKind leaf_value_kind(const LeafColumn &column) {
   return column.node->arrow_kind == jsonl::JsonlKind::kDictionary
              ? column.node->dictionary_value_kind
              : column.node->arrow_kind;
 }
 
-// Encodes float values with Parquet BYTE_STREAM_SPLIT.
+/// Encodes float values with Parquet BYTE_STREAM_SPLIT.
 std::optional<std::string> encode_byte_stream_split(std::string_view values,
                                                     std::size_t width) {
   if (width == 0 || values.empty() || values.size() % width != 0) {
@@ -342,6 +365,7 @@ std::optional<std::string> encode_byte_stream_split(std::string_view values,
 }
 
 template <class T>
+/// Reads one signed fixed-width value before DELTA_BINARY_PACKED encoding.
 std::int64_t load_signed_delta_value(std::string_view values,
                                      std::size_t index) {
   T value{};
@@ -349,6 +373,8 @@ std::int64_t load_signed_delta_value(std::string_view values,
   return static_cast<std::int64_t>(value);
 }
 
+/// Encodes delta binary packed column using the selected Parquet representation
+/// and bounded caller-owned storage.
 std::optional<std::string>
 encode_delta_binary_packed_column(const LeafColumn &column,
                                   std::string_view values) {
@@ -392,6 +418,8 @@ encode_delta_binary_packed_column(const LeafColumn &column,
   }
 }
 
+/// Encodes byte-array lengths and concatenated payloads with
+/// DELTA_LENGTH_BYTE_ARRAY.
 std::optional<std::string>
 encode_delta_length_byte_array(std::string_view values) {
   if (values.empty()) {
@@ -446,6 +474,8 @@ encode_delta_length_byte_array(std::string_view values) {
   return out;
 }
 
+/// Breaks equal-size encoding choices deterministically in favor of configured
+/// dictionary semantics.
 bool prefers_dictionary_tie_break(const LeafColumn &column) {
   if (column.path.empty()) {
     return false;
@@ -456,6 +486,8 @@ bool prefers_dictionary_tie_break(const LeafColumn &column) {
          name == "date" || name == "hour";
 }
 
+/// Encodes one page's levels and values with the smallest supported bounded
+/// representation.
 std::string encode_page_levels_and_values(const LeafColumn &column,
                                           const ColumnPageData &page_data,
                                           std::string_view encoded_values) {

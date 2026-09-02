@@ -1,4 +1,8 @@
-"""Fair process-wide weighted admission for remote I/O coroutines."""
+"""Fair process-wide weighted admission for remote I/O coroutines.
+
+It implements a fair weighted governor with FIFO admission, dynamic capacity,
+cancellation-safe leases, snapshots, and fork reset.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,7 @@ import asyncio
 import hashlib
 import os
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from itertools import islice
 from threading import Event, Lock, local
@@ -117,12 +121,9 @@ class _CapabilityPublication:
     __slots__ = ("lease_id", "capability")
 
     def __init__(self, capability: object) -> None:
+        """Preallocate a receipt that publishes the admitted capability with its lease ID."""
         self.lease_id = 0
         self.capability = capability
-
-    def __iter__(self):  # compatibility for focused historical tests
-        yield self.lease_id
-        yield self.capability
 
 
 @dataclass(slots=True)
@@ -154,6 +155,7 @@ class _GrantBatch:
     __slots__ = ("_items", "count", "next_batch", "chain_tail")
 
     def __init__(self, capacity: int) -> None:
+        """Preallocate fixed slots for committed waiter handoffs."""
         self._items: list[_Waiter | None] = [None] * max(0, capacity)
         self.count = 0
         self.next_batch: _GrantBatch | None = None
@@ -162,86 +164,38 @@ class _GrantBatch:
     def append(self, waiter: _Waiter) -> None:
         # Capacity was allocated before any grant transition. Assignment cannot
         # grow the list, so a committed waiter can always be retained here.
+        """Append one value to the bounded collection."""
         if self.count >= len(self._items):
             raise RuntimeError("remote I/O grant batch capacity invariant exceeded")
         self._items[self.count] = waiter
         self.count += 1
 
     def extend_chain(self, other: "_GrantBatch | None") -> None:
+        """Append another retained permit grant to this batch."""
         if other is None or other.count == 0:
             return
         self.chain_tail.next_batch = other
         self.chain_tail = other.chain_tail
 
     def item(self, index: int) -> _Waiter:
+        """Return the indexed permit grant from this batch."""
         waiter = self._items[index]
         if waiter is None:
             raise RuntimeError("remote I/O grant batch contains an empty committed slot")
         return waiter
 
     def __bool__(self) -> bool:
+        """Return whether the instance currently carries a value."""
         return self.count > 0
 
     def __len__(self) -> int:
+        """Return the number of retained values."""
         return self.count
 
     def __iter__(self) -> Iterator[_Waiter]:
+        """Iterate over the retained values."""
         for index in range(self.count):
             yield self.item(index)
-
-    def __eq__(self, other: object) -> bool:
-        """Preserve the historical list-like test/debug contract."""
-        if isinstance(other, list):
-            if len(other) != self.count:
-                return False
-            for index, waiter in enumerate(other):
-                if self.item(index) != waiter:
-                    return False
-            return True
-        return self is other
-
-
-class _WaiterMirror:
-    """O(1)-removal compatibility view of currently queued waiters."""
-
-    def __init__(self, on_external_mutation: Callable[[], object] | None = None) -> None:
-        self._items: dict[int, _Waiter] = {}
-        self._on_external_mutation = on_external_mutation
-
-    def append(self, waiter: _Waiter) -> None:
-        self._items[id(waiter)] = waiter
-        callback = self._on_external_mutation
-        if callback is not None and not waiter.indexed:
-            callback()
-
-    def extend(self, waiters: Iterable[_Waiter]) -> None:
-        for waiter in waiters:
-            self.append(waiter)
-
-    def remove(self, waiter: _Waiter) -> None:
-        try:
-            del self._items[id(waiter)]
-        except KeyError as exc:
-            raise ValueError("waiter is not queued") from exc
-
-    def discard(self, waiter: _Waiter) -> None:
-        self._items.pop(id(waiter), None)
-
-    def __len__(self) -> int:
-        return len(self._items)
-
-    def __iter__(self) -> Iterator[_Waiter]:
-        return iter(self._items.values())
-
-    def __getitem__(self, index: int) -> _Waiter:
-        if index < 0:
-            index += len(self._items)
-        if index < 0:
-            raise IndexError(index)
-        for current, waiter in enumerate(self._items.values()):
-            if current == index:
-                return waiter
-        raise IndexError(index)
 
 
 _RemoteIoForkBank = tuple[
@@ -251,7 +205,6 @@ _RemoteIoForkBank = tuple[
     dict[int, _CapabilityEntry],
     dict[int, _CapabilityEntry],
     dict[int, _CapabilityEntry],
-    _WaiterMirror,
     dict[str, OrderedDict[int, _Waiter]],
     OrderedDict[str, None],
     dict[int, OrderedDict[str, None]],
@@ -261,6 +214,7 @@ _RemoteIoForkBank = tuple[
 
 
 def _release_remote_submission_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Release remote submission capsule."""
     governor = capsule.arg0
     lease_id = capsule.arg1
     capability = capsule.arg2
@@ -270,6 +224,7 @@ def _release_remote_submission_capsule(capsule: PreparedFinalizerCleanup) -> Non
 
 
 def _release_remote_capacity_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Release remote capacity capsule."""
     governor = capsule.arg0
     lease_id = capsule.arg1
     capability = capsule.arg2
@@ -279,6 +234,7 @@ def _release_remote_capacity_capsule(capsule: PreparedFinalizerCleanup) -> None:
 
 
 def _release_remote_permit_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Release remote permit capsule."""
     governor = capsule.arg0
     lease_id = capsule.arg1
     capability = capsule.arg2
@@ -317,6 +273,7 @@ class RemoteIoSubmissionReservation:
         self._released = False
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this remote io submission reservation."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -348,11 +305,7 @@ class RemoteIoSubmissionReservation:
                 return
             self._released = True
         try:
-            release = getattr(self._governor, "_release_submission_reservation", None)
-            if callable(release) and self._lease_id:
-                release(self)
-            else:
-                self._governor._release_submission()
+            self._governor._release_submission_reservation(self)
         except BaseException:
             with self._lock:
                 self._released = False
@@ -413,6 +366,7 @@ class RemoteIoCapacityRegistration:
         self._released = False
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this remote io capacity registration."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -439,11 +393,7 @@ class RemoteIoCapacityRegistration:
                 return
             self._released = True
         try:
-            release = getattr(self._governor, "_release_capacity_registration", None)
-            if callable(release) and self._lease_id:
-                release(self)
-            else:
-                self._governor._unregister_capacity(self._token)
+            self._governor._release_capacity_registration(self)
         except BaseException:
             with self._lock:
                 self._released = False
@@ -471,7 +421,7 @@ class RemoteIoPermit:
     """Exactly-once weighted permit returned by the shared governor."""
 
     def __init__(self, governor: "RemoteIoPermitGovernor", weight: int, label: str) -> None:
-        """Initialize this helper."""
+        """Prearm finalization and bind the governor, requested weight, and diagnostic label."""
         self._finalizer_ticket = 0
         self._finalizer_capsule: PreparedFinalizerCleanup | None = None
         capsule = reserve_finalizer_cleanup(_release_remote_permit_capsule)
@@ -494,6 +444,7 @@ class RemoteIoPermit:
         return self._weight
 
     def _activate(self, *, lease_id: int, capability: object, weight: int) -> None:
+        """Activate this remote io permit with authoritative capacity and capability."""
         self._lease_id = lease_id
         self._capability = capability
         self._weight = weight
@@ -503,6 +454,7 @@ class RemoteIoPermit:
             capsule.arg2 = capability
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this remote io permit."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -529,13 +481,7 @@ class RemoteIoPermit:
                 return
             self._released = True
         try:
-            release = getattr(self._governor, "_release_permit", None)
-            if callable(release) and self._lease_id:
-                release(self)
-            else:
-                # Compatibility for focused historical test doubles. Production
-                # governors always authenticate the exact lease entry.
-                self._governor._release(self._weight)
+            self._governor._release_permit(self)
         except BaseException:
             with self._lock:
                 self._released = False
@@ -585,7 +531,7 @@ class RemoteIoPermitGovernor:
         max_pending_submissions: int = _DEFAULT_MAX_PENDING_SUBMISSIONS,
         max_capacity_registrations: int = _DEFAULT_MAX_CAPACITY_REGISTRATIONS,
     ) -> None:
-        """Initialize this helper."""
+        """Validate admission bounds and initialize fair queues, counters, and fork banks."""
         if isinstance(capacity, bool) or not isinstance(capacity, int):
             raise TypeError("remote I/O permit capacity must be an integer")
         if capacity <= 0:
@@ -625,11 +571,6 @@ class RemoteIoPermitGovernor:
         self._permit_owners: dict[int, _CapabilityEntry] = {}
         self._in_use = 0
         self._peak_in_use = 0
-        # ``_waiters`` remains a compatibility/tombstone mirror for older
-        # diagnostics and fault-injection tests. Scheduling uses per-operation
-        # queues plus a rotating active-operation ring.
-        self._legacy_waiters_dirty = False
-        self._waiters = _WaiterMirror(self._mark_legacy_waiters_dirty)
         self._operation_waiters: dict[str, OrderedDict[int, _Waiter]] = {}
         self._operation_order: OrderedDict[str, None] = OrderedDict()
         self._weight_buckets: dict[int, OrderedDict[str, None]] = {}
@@ -669,9 +610,11 @@ class RemoteIoPermitGovernor:
         self._bucket_rebuilds = 0
 
     def _record_protocol_violation_locked(self) -> None:
+        """Record protocol violation while holding the governing lock."""
         self._protocol_violations += 1
 
     def _return_in_use_locked(self, amount: int) -> bool:
+        """Return in use while holding the governing lock."""
         if amount < 0 or self._in_use < amount:
             self._record_protocol_violation_locked()
             excess = max(0, amount - self._in_use)
@@ -682,6 +625,7 @@ class RemoteIoPermitGovernor:
         return True
 
     def _finish_sync_waiter_locked(self) -> None:
+        """Finish sync waiter while holding the governing lock."""
         if self._sync_waiters <= 0:
             self._record_protocol_violation_locked()
             return
@@ -737,6 +681,7 @@ class RemoteIoPermitGovernor:
 
     @staticmethod
     def _entry_matches(owner: object, entry: _CapabilityEntry) -> bool:
+        """Return whether entry matches."""
         return (
             entry.owner_id == id(owner) and getattr(owner, "_capability", None) is entry.capability
         )
@@ -865,14 +810,6 @@ class RemoteIoPermitGovernor:
             self._peak_pending_submissions = next_peak
         return reservation
 
-    def _release_submission(self) -> None:
-        """Return one submitted-coroutine slot without underflow."""
-        with self._lock:
-            if self._pending_submissions <= 0:
-                self._record_protocol_violation_locked()
-                return
-            self._pending_submissions -= 1
-
     def _release_submission_capability(self, lease_id: int, capability: object) -> None:
         """Release a submission slot while retaining secondary ticket authority."""
         with self._lock:
@@ -920,7 +857,7 @@ class RemoteIoPermitGovernor:
 
     @staticmethod
     def _validate_capacity(requested: int) -> None:
-        """Implement the internal _validate_capacity helper."""
+        """Validate a strictly positive integer permit capacity."""
         if isinstance(requested, bool) or not isinstance(requested, int):
             raise TypeError("remote I/O permit capacity must be an integer")
         if requested <= 0:
@@ -963,15 +900,6 @@ class RemoteIoPermitGovernor:
         self._requested_capacity = next_requested
         self._pressure_capacity = next_pressure
         self._apply_cached_capacity_locked()
-
-    def _unregister_capacity(self, token: int) -> None:
-        """Compatibility unregister with prepare-before-retire capacity state."""
-        with self._lock:
-            next_requested, next_pressure = self._prepare_registration_removal_locked(token)
-            self._registrations.pop(token, None)
-            self._commit_registration_capacity_locked(next_requested, next_pressure)
-            deliveries = self._grant_ready_locked()
-        self._deliver(deliveries)
 
     def _release_capacity_capability(self, lease_id: int, capability: object) -> None:
         """Release capacity registration with a retryable control-plane tail."""
@@ -1151,7 +1079,7 @@ class RemoteIoPermitGovernor:
                 },
             )
         try:
-            # Pass62: publication -> delivery -> await is one ownership region.
+            # Publication, delivery, and awaiting share one ownership region.
             # Any BaseException after enqueue is reclaimed by the block below.
             self._deliver(deliveries_before)
             self._deliver(deliveries_after)
@@ -1307,7 +1235,7 @@ class RemoteIoPermitGovernor:
                     self._finish_sync_waiter_locked()
 
     def snapshot(self) -> RemoteIoPermitSnapshot:
-        """Implement the internal snapshot helper."""
+        """Return a bounded snapshot of remote I/O permit activity."""
         with self._lock:
             return RemoteIoPermitSnapshot(
                 capacity=self._capacity,
@@ -1352,6 +1280,7 @@ class RemoteIoPermitGovernor:
         *,
         control_ticket: ControlPlaneTicket | None = None,
     ) -> None:
+        """Publish permit while holding the governing lock."""
         publication = self._publish_capability_locked(
             permit, self._permit_owners, amount=weight, control_ticket=control_ticket
         )
@@ -1435,21 +1364,9 @@ class RemoteIoPermitGovernor:
                 self._permit_owners.pop(permit._lease_id, None)
         self._deliver_noexcept(deliveries)
 
-    def _release(self, weight: int) -> None:
-        """Implement the internal _release helper."""
-        with self._lock:
-            amount = max(0, weight)
-            self._return_in_use_locked(amount)
-            deliveries = self._post_commit_reschedule_locked()
-        self._deliver_noexcept(deliveries)
-
     def _effective_weight(self, waiter: _Waiter) -> int:
         """Clamp requested weight against the capacity at admission time."""
         return max(1, min(waiter.requested_weight, self._capacity))
-
-    def _mark_legacy_waiters_dirty(self) -> None:
-        """Record direct compatibility-view mutation outside scheduler APIs."""
-        self._legacy_waiters_dirty = True
 
     def _enqueue_waiter_locked(self, waiter: _Waiter) -> None:
         """Transactionally publish one waiter across all authoritative indexes."""
@@ -1457,6 +1374,7 @@ class RemoteIoPermitGovernor:
             # Allocate the loop callback before the waiter becomes authoritative.
             # Production delivery therefore creates no closure after grant commit.
             def deliver_waiter(waiter: _Waiter = waiter) -> None:
+                """Deliver the acquired permit to its waiting operation."""
                 self._delivery_callback(waiter)
 
             waiter.delivery_callback = deliver_waiter
@@ -1472,7 +1390,6 @@ class RemoteIoPermitGovernor:
         published_queue = False
         published_order = False
         published_waiter = False
-        mirror_published = False
         try:
             queue[id(waiter)] = waiter
             published_waiter = True
@@ -1483,8 +1400,6 @@ class RemoteIoPermitGovernor:
                 published_order = True
             waiter.indexed = True
             self._waiting_count = next_waiting
-            self._waiters.append(waiter)
-            mirror_published = True
             self._refresh_operation_weight_locked(operation_id)
         except BaseException:
             # Roll back only this waiter. Derived weight state is rebuildable.
@@ -1492,8 +1407,6 @@ class RemoteIoPermitGovernor:
                 self._remove_operation_weight_locked(operation_id)
             except BaseException:
                 self._scheduling_dirty = True
-            if mirror_published:
-                self._waiters.discard(waiter)
             self._waiting_count = next_waiting - 1
             waiter.indexed = False
             if published_waiter:
@@ -1510,19 +1423,6 @@ class RemoteIoPermitGovernor:
                     self._scheduling_dirty = True
             raise
 
-    def _sync_legacy_waiters_locked(self) -> None:
-        """Index direct compatibility mutations transactionally."""
-        if not self._legacy_waiters_dirty:
-            return
-        for waiter in self._waiters:
-            if waiter.state == "queued" and not waiter.indexed:
-                self._enqueue_waiter_locked(waiter)
-        self._legacy_waiters_dirty = False
-
-    def _compact_legacy_waiters_locked(self) -> None:
-        """Bound tombstone retention without touching the scheduler hot path."""
-        return
-
     def _operation_bucket_weight_locked(self, queue: OrderedDict[int, _Waiter]) -> int | None:
         """Return the lightest bounded local request without a temporary list."""
         head: _Waiter | None = None
@@ -1537,7 +1437,8 @@ class RemoteIoPermitGovernor:
                 if head.bypasses >= _MAX_HEAD_BYPASSES:
                     return weight
             else:
-                assert weight is not None
+                if weight is None:
+                    raise AssertionError("eligible bypass scan must retain a weight")
                 weight = min(weight, self._effective_weight(waiter))
             examined += 1
             if examined >= _MAX_LOCAL_BYPASS_SCAN + 1:
@@ -1545,6 +1446,7 @@ class RemoteIoPermitGovernor:
         return weight
 
     def _remove_operation_weight_locked(self, operation_id: str) -> None:
+        """Remove operation weight while holding the governing lock."""
         weight = self._operation_weights.pop(operation_id, None)
         if weight is None:
             return
@@ -1592,6 +1494,7 @@ class RemoteIoPermitGovernor:
 
     @staticmethod
     def _retire_waiter_control(waiter: _Waiter) -> None:
+        """Retire control-plane ownership for a completed permit waiter."""
         ticket = waiter.control_ticket
         if ticket is None:
             return
@@ -1615,14 +1518,12 @@ class RemoteIoPermitGovernor:
             else:
                 self._waiting_count -= 1
         waiter.indexed = False
-        self._waiters.discard(waiter)
         # Everything below is derived cleanup. A failure may leave repair debt
         # but must never make a cancelled authoritative waiter reappear.
         try:
             self._retire_waiter_control(waiter)
             self._refresh_operation_weight_locked(waiter.operation_id)
             self._remove_operation_if_empty_locked(waiter.operation_id)
-            self._compact_legacy_waiters_locked()
         except BaseException:
             self._record_post_commit_failure_locked()
 
@@ -1759,7 +1660,6 @@ class RemoteIoPermitGovernor:
                 queue.pop(id(waiter), None)
                 head.bypasses = next_head_bypasses
             waiter.indexed = False
-            self._waiters.discard(waiter)
             self._waiting_count = next_waiting
             self._bounded_bypasses = next_bypasses
             if queue:
@@ -1780,7 +1680,6 @@ class RemoteIoPermitGovernor:
                     self._weight_order[weight] = None
                 elif not self._weight_buckets.get(weight):
                     self._weight_buckets.pop(weight, None)
-                self._compact_legacy_waiters_locked()
             except BaseException:
                 self._record_post_commit_failure_locked()
             return waiter
@@ -1789,7 +1688,6 @@ class RemoteIoPermitGovernor:
     def _grant_ready_locked(self) -> _GrantBatch:
         """Grant into a batch whose storage is allocated before any grant commit."""
         self._repair_scheduler_locked()
-        self._sync_legacy_waiters_locked()
         available_units = max(0, self._capacity - self._in_use)
         max_grants = min(self._waiting_count, available_units)
         deliveries = _GrantBatch(max_grants)
@@ -1914,17 +1812,10 @@ class RemoteIoPermitGovernor:
                 if not isinstance(publication_error, (asyncio.InvalidStateError, RuntimeError)):
                     raise
 
-    def _deliver(self, waiters: _GrantBatch | list[_Waiter] | None) -> None:
+    def _deliver(self, waiters: _GrantBatch | None) -> None:
         """Deliver grant batches without allocating a post-commit queue/closure."""
         if waiters is None:
             return
-        if isinstance(waiters, list):
-            # Compatibility-only path for focused historical tests. Production
-            # grants arrive in a batch allocated before scheduler mutation.
-            compatibility = _GrantBatch(len(waiters))
-            for waiter in waiters:
-                compatibility.append(waiter)
-            waiters = compatibility
         if not waiters:
             return
         active = getattr(self._delivery_local, "pending", None)
@@ -1943,13 +1834,7 @@ class RemoteIoPermitGovernor:
                     try:
                         callback = waiter.delivery_callback
                         if callback is None:
-                            # Compatibility-only path for tests/debug callers that
-                            # construct a granted _Waiter without enqueueing it.
-                            def deliver_waiter(waiter: _Waiter = waiter) -> None:
-                                self._delivery_callback(waiter)
-
-                            callback = deliver_waiter
-                            waiter.delivery_callback = callback
+                            raise RuntimeError("remote I/O waiter has no delivery callback")
                         if waiter.loop is None:
                             callback()
                         else:
@@ -2027,7 +1912,6 @@ class RemoteIoPermitGovernor:
             {},
             {},
             {},
-            _WaiterMirror(self._mark_legacy_waiters_dirty),
             {},
             OrderedDict(),
             {},
@@ -2040,6 +1924,7 @@ class RemoteIoPermitGovernor:
         self._fork_prepared = self._fork_banks[self._fork_bank_index]
 
     def clear_fork_preparation(self) -> None:
+        """Clear state established while preparing for a fork."""
         self._fork_prepared = None
 
     def reset_after_fork(self) -> None:
@@ -2062,7 +1947,6 @@ class RemoteIoPermitGovernor:
             self._capacity_owners,
             self._submission_owners,
             self._permit_owners,
-            self._waiters,
             self._operation_waiters,
         )
         quarantine_inherited_state(
@@ -2079,7 +1963,6 @@ class RemoteIoPermitGovernor:
             self._capacity_owners,
             self._submission_owners,
             self._permit_owners,
-            self._waiters,
             self._operation_waiters,
             self._operation_order,
             self._weight_buckets,
@@ -2098,7 +1981,6 @@ class RemoteIoPermitGovernor:
         self._capacity = self._base_capacity
         self._in_use = 0
         self._peak_in_use = 0
-        self._legacy_waiters_dirty = False
         self._bucket_capacity = self._capacity
         self._waiting_count = 0
         self._sync_waiters = 0
@@ -2126,12 +2008,12 @@ _SHARED_REMOTE_IO_GOVERNOR = RemoteIoPermitGovernor(1)
 
 
 def default_remote_io_permit_capacity() -> int:
-    """Implement the internal default_remote_io_permit_capacity helper."""
+    """Return the default weighted capacity for process-wide remote I/O admission."""
     return _DEFAULT_CAPACITY
 
 
 def shared_remote_io_permit_governor() -> RemoteIoPermitGovernor:
-    """Implement the internal shared_remote_io_permit_governor helper."""
+    """Return the process-wide remote I/O permit governor."""
     return _SHARED_REMOTE_IO_GOVERNOR
 
 
@@ -2146,12 +2028,12 @@ def _reopen_remote_io_permit_admission_for_tests() -> None:
 
 
 def process_remote_io_permit_snapshot() -> RemoteIoPermitSnapshot:
-    """Implement the internal process_remote_io_permit_snapshot helper."""
+    """Capture the process-wide remote I/O admission snapshot."""
     return _SHARED_REMOTE_IO_GOVERNOR.snapshot()
 
 
 def _reset_shared_after_fork() -> None:
-    """Implement the internal _reset_shared_after_fork helper."""
+    """Reset the shared remote I/O governor in a forked child."""
     _SHARED_REMOTE_IO_GOVERNOR.reset_after_fork()
 
 

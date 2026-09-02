@@ -1,4 +1,8 @@
-"""Fail closed when the production Parquet contract runtime is not CI-ready."""
+"""Fail closed when the production Parquet contract runtime is not CI-ready.
+
+The command imports the installed package, verifies native and PyArrow readiness, and
+fails closed when the contract runtime is incomplete.
+"""
 
 from __future__ import annotations
 

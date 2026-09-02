@@ -1,4 +1,9 @@
-"""Contracts for packet-local parallel inference and ordered reduction."""
+"""Test packet-local parallel inference and its ordered schema reduction.
+
+Order-sensitive promotions, flattening diagnostics, scalar reference batches, oversized nested
+rows, low-memory token density, repeated-run stability, and a mixed nested differential matrix
+must agree with single-worker inference.
+"""
 
 from __future__ import annotations
 

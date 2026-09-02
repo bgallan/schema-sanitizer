@@ -1,4 +1,8 @@
-"""Bounded lifecycle helpers for shared asynchronous download sessions."""
+"""Bounded lifecycle helpers for shared asynchronous download sessions.
+
+It enters one shared asynchronous download session and registers an idempotent closer
+with operation finalization.
+"""
 
 from __future__ import annotations
 
@@ -47,6 +51,7 @@ class SharedDownloadSessionCloser:
     """Schedule one session exit exactly once and retain it across timeouts."""
 
     def __init__(self, coordinator: Any, download_session: Any, futures: tuple[Any, ...]) -> None:
+        """Bind the coordinator, shared session, and staging futures to one close transaction."""
         self._pid = os.getpid()
         self._coordinator = coordinator
         self._download_session = download_session
@@ -114,7 +119,8 @@ class SharedDownloadSessionCloser:
         timeout = normalize_duration(
             timeout_seconds, name="remote session close timeout", allow_zero=True
         )
-        assert timeout is not None
+        if timeout is None:
+            raise AssertionError("validated remote session close timeout cannot be absent")
         deadline = monotonic() + timeout
         with self._lock:
             if self._closed:
@@ -134,7 +140,8 @@ class SharedDownloadSessionCloser:
                     )
                 )
             future = attempt.future
-        assert future is not None
+        if future is None:
+            raise AssertionError("started remote session close must retain its future")
 
         try:
             future.result(timeout=max(0.0, deadline - monotonic()))
@@ -182,6 +189,7 @@ def enter_shared_download_session(
     attempt = _SessionEntryAttempt()
 
     async def enter_session(_context: Any) -> Any:
+        """Enter a provider session and retain its lifecycle owner."""
         entered = False
         try:
             value = await download_session.__aenter__()
@@ -258,7 +266,8 @@ def enter_shared_download_session(
     timeout = normalize_duration(
         timeout_seconds, name="remote session startup timeout", allow_zero=True
     )
-    assert timeout is not None
+    if timeout is None:
+        raise AssertionError("validated remote session startup timeout cannot be absent")
     deadline = monotonic() + timeout
     try:
         if not attempt.entered.wait(timeout=max(0.0, deadline - monotonic())):

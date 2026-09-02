@@ -1,4 +1,8 @@
-"""Direct Parquet nested projection runtime tests."""
+"""Direct Parquet nested projection runtime tests.
+
+It checks native materialization and projection of nested structs and lists, including
+pruning of unsupported unprojected columns.
+"""
 
 from __future__ import annotations
 
@@ -7,14 +11,15 @@ from pathlib import Path
 import pytest
 from _support.parquet_runtime import pa
 from _support.parquet_runtime import requires_pyarrow as _requires_pyarrow
-from conftest import require_native
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 
 @_requires_pyarrow
 def test_list_list_projection_uses_native_reader(
     tmp_path: Path,
 ) -> None:
-    """Verify projected nested scalar lists use the native reader."""
+    """Verify list list projection uses native reader."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -25,7 +30,6 @@ def test_list_list_projection_uses_native_reader(
         write_parquet_native_first_stream,
     )
 
-    require_native()
     path = tmp_path / "nested-list-projection.parquet"
     table = pa.table(
         {
@@ -65,7 +69,7 @@ def test_list_list_projection_uses_native_reader(
 def test_native_parquet_stream_materializes_required_struct_scalar_leaves(
     tmp_path: Path,
 ) -> None:
-    """Verify native reader can materialize required structs with scalar leaves."""
+    """Verify native Parquet stream materializes required struct scalar leaves."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -78,7 +82,6 @@ def test_native_parquet_stream_materializes_required_struct_scalar_leaves(
         write_parquet_native_first_stream,
     )
 
-    require_native()
     path = tmp_path / "required-struct.parquet"
     schema = pa.schema(
         [
@@ -135,7 +138,7 @@ def test_native_parquet_stream_materializes_required_struct_scalar_leaves(
 def test_native_parquet_stream_materializes_nullable_struct_scalar_leaves(
     tmp_path: Path,
 ) -> None:
-    """Verify native reader can materialize nullable structs with scalar leaves."""
+    """Verify native Parquet stream materializes nullable struct scalar leaves."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -148,7 +151,6 @@ def test_native_parquet_stream_materializes_nullable_struct_scalar_leaves(
         write_parquet_native_first_stream,
     )
 
-    require_native()
     path = tmp_path / "nullable-struct.parquet"
     schema = pa.schema(
         [
@@ -200,7 +202,7 @@ def test_native_parquet_stream_materializes_nullable_struct_scalar_leaves(
 def test_native_parquet_stream_projects_struct_scalar_leaves(
     tmp_path: Path,
 ) -> None:
-    """Verify native struct projection keeps every leaf under the struct."""
+    """Verify native Parquet stream projects struct scalar leaves."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -212,7 +214,6 @@ def test_native_parquet_stream_projects_struct_scalar_leaves(
         write_parquet_native_first_stream,
     )
 
-    require_native()
     path = tmp_path / "projected-struct.parquet"
     schema = pa.schema(
         [
@@ -268,7 +269,7 @@ def test_native_parquet_stream_projects_struct_scalar_leaves(
 def test_native_parquet_stream_projection_skips_unprojected_page_planning(
     tmp_path: Path,
 ) -> None:
-    """Verify projected native reads do not inspect unprojected page headers."""
+    """Verify native Parquet stream projection skips unprojected page planning."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -281,7 +282,6 @@ def test_native_parquet_stream_projection_skips_unprojected_page_planning(
         write_parquet_native_first_stream,
     )
 
-    require_native()
     path = tmp_path / "projected-skip-unprojected-page-planning.parquet"
     table = pa.table(
         {
@@ -342,7 +342,7 @@ def test_native_parquet_stream_projection_skips_unprojected_page_planning(
 def test_native_parquet_stream_projects_simple_list_with_unsupported_unprojected_column(
     tmp_path: Path,
 ) -> None:
-    """Verify list projection can use native route despite unprojected blockers."""
+    """Verify native Parquet stream projects simple list with unsupported unprojected column."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -355,7 +355,6 @@ def test_native_parquet_stream_projects_simple_list_with_unsupported_unprojected
         write_parquet_native_first_stream,
     )
 
-    require_native()
     path = tmp_path / "projected-list.parquet"
     schema = pa.schema(
         [
@@ -408,7 +407,7 @@ def test_native_parquet_stream_projects_simple_list_with_unsupported_unprojected
 def test_nested_native_parquet_reader_materializes_supported_nested_shapes(
     tmp_path: Path,
 ) -> None:
-    """Verify supported nested native-written files materialize natively."""
+    """Verify nested native Parquet reader materializes supported nested shapes."""
     from schema_sanitizer.adapters.parquet.record_batch_factory import (
         open_parquet_record_batch_stream_factory,
     )
@@ -421,7 +420,6 @@ def test_nested_native_parquet_reader_materializes_supported_nested_shapes(
         write_parquet_native_first_stream,
     )
 
-    require_native()
     path = tmp_path / "nested-native.parquet"
     table = pa.table(
         {

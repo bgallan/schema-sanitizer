@@ -1,4 +1,6 @@
-// Provides hardened process-wide and operation-scoped memory pools.
+// Implements hardened process-wide and operation-scoped memory pools.
+// Guarded allocations, shared ledgers, and resident admission expose
+// bounded diagnostics.
 
 #include "internal/memory/memory_pool.hh"
 #include "internal/memory/memory_budget.hh"
@@ -201,6 +203,8 @@ static_assert(sizeof(DefaultAllocationHeader) % alignof(std::max_align_t) == 0);
 static_assert(sizeof(TrackingAllocationHeader) % alignof(std::max_align_t) ==
               0);
 
+/// Validates an allocation alignment and returns its
+/// power-of-two representation.
 bool normalize_alignment(int64_t alignment, std::size_t *out) noexcept {
   if (!out) {
     return false;
@@ -230,6 +234,8 @@ bool normalize_alignment(int64_t alignment, std::size_t *out) noexcept {
   return true;
 }
 
+/// Computes guarded allocation overhead without allowing size arithmetic
+/// to overflow.
 bool checked_allocation_size(std::size_t requested, std::size_t alignment,
                              std::size_t header_size,
                              std::size_t *total) noexcept {
@@ -248,10 +254,12 @@ bool checked_allocation_size(std::size_t requested, std::size_t alignment,
   return true;
 }
 
+/// Writes the trailing canary used to detect allocation-buffer overruns.
 void write_allocation_guard(std::uint8_t *buffer, std::size_t size) noexcept {
   std::memset(buffer + size, kAllocationGuardPattern, kAllocationGuardBytes);
 }
 
+/// Checks whether an allocation's trailing overrun canary remains intact.
 bool allocation_guard_is_valid(const std::uint8_t *buffer,
                                std::size_t size) noexcept {
   for (std::size_t index = 0; index < kAllocationGuardBytes; ++index) {
@@ -262,11 +270,13 @@ bool allocation_guard_is_valid(const std::uint8_t *buffer,
   return true;
 }
 
+/// Rounds an address upward to the requested power-of-two alignment.
 std::uintptr_t align_up(std::uintptr_t value, std::size_t alignment) noexcept {
   return (value + alignment - 1U) &
          ~(static_cast<std::uintptr_t>(alignment) - 1U);
 }
 
+/// Raises an atomic high-water mark when the observed value is larger.
 void update_peak(std::atomic<int64_t> *peak, int64_t current) noexcept {
   auto observed = peak->load(std::memory_order_relaxed);
   while (current > observed && !peak->compare_exchange_weak(
@@ -277,6 +287,8 @@ void update_peak(std::atomic<int64_t> *peak, int64_t current) noexcept {
 
 class DefaultMemoryPool final : public MemoryPool {
 public:
+  /// Allocates aligned guarded storage and registers its
+  /// ownership metadata.
   sanitize::Status Allocate(int64_t size, int64_t alignment,
                             uint8_t **out) override {
     if (!out) {
@@ -343,6 +355,8 @@ public:
     return sanitize::Status::OK();
   }
 
+  /// Validates, wipes when configured, and releases a
+  /// registered allocation.
   void Free(uint8_t *buffer, int64_t size,
             int64_t alignment) noexcept override {
     if (!buffer) {
@@ -397,27 +411,35 @@ public:
     std::free(raw);
   }
 
+  /// Returns payload bytes currently allocated by the default pool.
   [[nodiscard]] int64_t bytes_allocated() const override {
     return bytes_allocated_.load(std::memory_order_relaxed);
   }
+  /// Returns the default pool's payload-byte high-water mark.
   [[nodiscard]] int64_t max_memory() const override {
     return max_memory_.load(std::memory_order_relaxed);
   }
+  /// Returns the number of allocations currently owned by the default pool.
   [[nodiscard]] int64_t allocation_count() const override {
     return allocation_count_.load(std::memory_order_relaxed);
   }
+  /// Returns frees rejected because ownership metadata was absent.
   [[nodiscard]] int64_t invalid_free_count() const override {
     return invalid_free_count_.load(std::memory_order_relaxed);
   }
+  /// Returns frees whose supplied size disagreed with allocation metadata.
   [[nodiscard]] int64_t size_mismatch_count() const override {
     return size_mismatch_count_.load(std::memory_order_relaxed);
   }
+  /// Returns allocations whose trailing overrun guard was corrupted.
   [[nodiscard]] int64_t corruption_count() const override {
     return corruption_count_.load(std::memory_order_relaxed);
   }
+  /// Reports whether released payloads are securely overwritten.
   [[nodiscard]] bool wipes_memory_on_free() const noexcept override {
     return secure_memory_cleanup_enabled();
   }
+  /// Returns the stable diagnostic name of the allocator backend.
   [[nodiscard]] std::string backend_name() const override {
     return {"schema_sanitizer::DefaultMemoryPool"};
   }
@@ -440,14 +462,21 @@ class ProcessMemoryGovernor final {
 public:
   class Lease final {
   public:
+    /// Creates an empty process-memory reservation lease.
     Lease() = default;
+    /// Owns process-memory capacity that returns to the governor
+    /// on destruction.
     Lease(ProcessMemoryGovernor *owner, std::int64_t bytes) noexcept
         : owner_(owner), bytes_(bytes) {}
+    /// Disables copying the process-memory reservation lease.
     Lease(const Lease &) = delete;
+    /// Disables copy assignment for the process-memory reservation lease.
     Lease &operator=(const Lease &) = delete;
+    /// Transfers ownership from another process-memory reservation lease.
     Lease(Lease &&other) noexcept
         : owner_(std::exchange(other.owner_, nullptr)),
           bytes_(std::exchange(other.bytes_, 0)) {}
+    /// Transfers owned state from another process-memory reservation lease.
     Lease &operator=(Lease &&other) noexcept {
       if (this != &other) {
         Release();
@@ -456,10 +485,14 @@ public:
       }
       return *this;
     }
+    /// Returns any remaining resident-memory capacity to the
+    /// process governor.
     ~Lease() { Release(); }
+    /// Returns bytes reserved by this process-memory lease.
     [[nodiscard]] std::int64_t bytes() const noexcept { return bytes_; }
 
   private:
+    /// Returns this lease's positive reservation to the governor exactly once.
     void Release() noexcept {
       if (owner_ && bytes_ > 0) {
         owner_->Release(bytes_);
@@ -472,6 +505,7 @@ public:
     std::int64_t bytes_ = 0;
   };
 
+  /// Acquires a process resident-memory lease after capacity admission.
   [[nodiscard]] Lease Acquire(std::int64_t requested, std::int64_t capacity) {
     constexpr std::int64_t kMinimumOperationAdmissionBytes = 1 << 20;
     constexpr std::int64_t kMaximumOperationAdmissionBytes = 8 << 20;
@@ -532,6 +566,8 @@ public:
     return Lease(this, lease_bytes);
   }
 
+  /// Snapshots capacity, usage, waiters, rejections, and
+  /// accounting failures.
   [[nodiscard]] ProcessMemoryGovernorStats Stats() const noexcept {
     std::lock_guard lock(mutex_);
     return ProcessMemoryGovernorStats{.capacity_bytes = capacity_bytes_,
@@ -545,6 +581,7 @@ private:
 
   struct Waiter final {};
 
+  /// Returns leased capacity and wakes queued process-memory admissions.
   void Release(std::int64_t bytes) noexcept {
     {
       std::lock_guard lock(mutex_);
@@ -561,6 +598,8 @@ private:
   std::deque<Waiter *> waiters_;
 };
 
+/// Returns the singleton coordinating process-wide
+/// resident-memory admission.
 ProcessMemoryGovernor &process_memory_governor() {
   // Process-lifetime ownership keeps late runtime/library destruction safe.
   static auto *governor = new ProcessMemoryGovernor();
@@ -569,45 +608,61 @@ ProcessMemoryGovernor &process_memory_governor() {
 
 class GovernedOperationMemoryPool final : public MemoryPool {
 public:
+  /// Couples an operation pool to its process resident-memory
+  /// admission lease.
   GovernedOperationMemoryPool(ProcessMemoryGovernor::Lease lease,
                               std::shared_ptr<MemoryPool> pool)
       : lease_(std::move(lease)), pool_(std::move(pool)) {}
 
+  /// Delegates allocation to the operation pool covered by the
+  /// process lease.
   sanitize::Status Allocate(int64_t size, int64_t alignment,
                             uint8_t **out) override {
     return pool_->Allocate(size, alignment, out);
   }
+  /// Returns storage through the operation pool covered by the
+  /// process lease.
   void Free(uint8_t *buffer, int64_t size,
             int64_t alignment) noexcept override {
     pool_->Free(buffer, size, alignment);
   }
+  /// Returns current payload bytes from the delegated operation pool.
   [[nodiscard]] int64_t bytes_allocated() const override {
     return pool_->bytes_allocated();
   }
+  /// Returns the delegated operation pool's payload high-water mark.
   [[nodiscard]] int64_t max_memory() const override {
     return pool_->max_memory();
   }
+  /// Returns the delegated operation pool's live allocation count.
   [[nodiscard]] int64_t allocation_count() const override {
     return pool_->allocation_count();
   }
+  /// Returns invalid frees observed by the delegated operation pool.
   [[nodiscard]] int64_t invalid_free_count() const override {
     return pool_->invalid_free_count();
   }
+  /// Returns size-mismatched frees observed by the delegated pool.
   [[nodiscard]] int64_t size_mismatch_count() const override {
     return pool_->size_mismatch_count();
   }
+  /// Returns guard corruptions observed by the delegated operation pool.
   [[nodiscard]] int64_t corruption_count() const override {
     return pool_->corruption_count();
   }
+  /// Returns the delegated operation pool's current byte limit.
   [[nodiscard]] int64_t limit_bytes() const override {
     return pool_->limit_bytes();
   }
+  /// Reports whether the delegated pool wipes released payloads.
   [[nodiscard]] bool wipes_memory_on_free() const noexcept override {
     return pool_->wipes_memory_on_free();
   }
+  /// Releases process capacity reserved for the governed operation.
   void ReleaseOperationLease() noexcept override {
     lease_ = ProcessMemoryGovernor::Lease{};
   }
+  /// Returns the delegated allocator backend's diagnostic name.
   [[nodiscard]] std::string backend_name() const override {
     return pool_->backend_name();
   }

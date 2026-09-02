@@ -1,4 +1,8 @@
-"""Logging and presentation helpers for example 07."""
+"""Logging and presentation helpers for example 07.
+
+It formats durations and URIs, logs run and skip plans, and presents conversion
+statistics and schema drift.
+"""
 
 from __future__ import annotations
 
@@ -223,6 +227,7 @@ def _warm_up_progress_logger(total: int):
         cpu_seconds: float,
         _io_wait_seconds: float,
     ) -> None:
+        """Capture one formatted log record for reporting assertions."""
         progress_total = callback_total or total
         LOGGER.info(
             "run=warmup progress=%d/%d label=%s duration=%s%s%s",

@@ -1,4 +1,6 @@
 // Declares the buffered JSON value scanner used across chunk boundaries.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #pragma once
 
@@ -21,7 +23,7 @@ class JsonValueSpanScanner {
 public:
   JsonValueSpanScanner(JsonStreamingScanner &scanner, BumpArena *arena);
 
-  // Scans one value and returns a text slice over buffered bytes.
+  /// Scans one value and returns a text slice over buffered bytes.
   sanitize::Result<TextSlice> scan();
 
 private:
@@ -35,23 +37,24 @@ private:
   static constexpr std::size_t kMaxValueBytes = std::size_t{128} << 20;
   static constexpr std::size_t kMaxSegments = 65'536;
 
-  // Returns whether a byte terminates a primitive JSON value.
+  /// Returns whether a byte terminates a primitive JSON value.
   static bool is_primitive_delim(char ch);
-  // Appends the current chunk segment to the buffered span.
+  /// Appends the current chunk segment to the buffered span.
   sanitize::Status push_segment(std::size_t end_pos);
-  // Buffers the current chunk tail and refills the scanner.
+  /// Buffers the current chunk tail and refills the scanner.
   sanitize::Status need_more();
-  // Initializes scanner mode from the first value byte.
+  /// Initializes scanner mode from the first value byte.
   sanitize::Status initialize_mode();
-  // Scans primitive bytes until a delimiter or EOF.
+  /// Scans primitive bytes until a delimiter or EOF.
   sanitize::Result<bool> scan_primitive();
-  // Processes one string or composite byte and returns whether the value ended.
+  /// Processes one string or composite byte and returns whether the value
+  /// ended.
   sanitize::Result<bool> scan_string_or_composite_byte();
-  // Processes one byte while inside a JSON string.
+  /// Processes one byte while inside a JSON string.
   sanitize::Result<bool> scan_string_byte(char ch);
-  // Processes one byte while inside a JSON composite value.
+  /// Processes one byte while inside a JSON composite value.
   sanitize::Result<bool> scan_composite_byte(char ch);
-  // Builds the final text slice from one chunk or copied buffered segments.
+  /// Builds the final text slice from one chunk or copied buffered segments.
   sanitize::Result<TextSlice> finish();
 
   JsonStreamingScanner &scanner_;
@@ -75,7 +78,7 @@ private:
   bool escape_ = false;
 };
 
-// Scans a JSON value that may span multiple input chunks.
+/// Scans a JSON value that may span multiple input chunks.
 sanitize::Result<TextSlice> scan_json_value_span(JsonStreamingScanner &scanner,
                                                  BumpArena *arena);
 

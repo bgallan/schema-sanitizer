@@ -1,4 +1,8 @@
-"""Strictly synchronous Google Cloud Storage operations for single mode."""
+"""Strictly synchronous Google Cloud Storage operations for single mode.
+
+It performs GCS metadata, listing, download, and resumable upload entirely on the caller
+thread for strict single mode.
+"""
 
 from __future__ import annotations
 
@@ -11,12 +15,11 @@ from ...core_impl.governed_sort import governed_sort
 from ...core_impl.memory_budget import memory_budget
 from ...core_impl.sync_retry import retry_sync
 from ...core_impl.temporary_storage import StreamingStorageReservation
-from ...core_impl.uris import content_type_for_uri, name_matches, normalize_extensions
+from ...core_impl.uris import content_type_for_uri, normalize_extensions
 from ...input_impl.directory_inputs import (
     DirectoryDiscovery,
     DirectoryDiscoveryBuilder,
     current_directory_metadata_budget,
-    split_parent_child,
 )
 from ...sources.models import RemoteFile
 from ..gcs_sync_resumable import upload_gcs_resumable_file
@@ -29,9 +32,16 @@ from ..sync_http import (
     upload_file_request,
 )
 from ..upload_policy import remote_upload_policy
+from . import (
+    direct_child_items,
+    next_page_token,
+    requested_child_items,
+    requested_directory_groups,
+)
+from . import gcs as _gcs
 from .gcs import (
     _GCS_OBJECT_FIELDS,
-    access_token,
+    _directory_location,
     api_base,
     media_url,
 )
@@ -41,18 +51,6 @@ from .gcs_objects import (
     remote_file_from_metadata,
     remote_file_sort_key,
 )
-
-
-def request_headers(
-    *, accept_json: bool = False, content_type: str | None = None
-) -> dict[str, str]:
-    """Return ADC-authorized headers without an asynchronous transport."""
-    headers: dict[str, str] = {"Authorization": f"Bearer {access_token()}"}
-    if accept_json:
-        headers["Accept"] = "application/json"
-    if content_type is not None:
-        headers["Content-Type"] = content_type
-    return headers
 
 
 def _json_result(result: Any, *, context: str) -> dict[str, Any]:
@@ -73,7 +71,7 @@ def file_metadata(uri: str, *, memory_limit_bytes: int | None = None) -> RemoteF
         f"{quote(ref.object_name, safe='')}"
     )
     url = request_json_url(url, {"fields": _GCS_OBJECT_FIELDS})
-    headers = request_headers(accept_json=True)
+    headers = _gcs.request_headers(accept_json=True)
     budget = memory_budget(memory_limit_bytes)
 
     def request() -> RemoteFile | None:
@@ -117,7 +115,7 @@ def download_file(
         else RemoteFile(uri, Path(parse_uri(uri).object_name).name)
     )
     budget = memory_budget(memory_limit_bytes)
-    auth_headers = headers or request_headers()
+    auth_headers = headers or _gcs.request_headers()
     retry_sync(
         lambda: download_to_file(
             media_url(selected.uri, generation=selected.generation),
@@ -146,7 +144,7 @@ def upload_file(
         memory_limit_bytes=memory_limit_bytes,
         threading_mode="single",
     )
-    headers = request_headers()
+    headers = _gcs.request_headers()
     if tuning.multipart:
         upload_gcs_resumable_file(
             local_path,
@@ -215,7 +213,7 @@ def list_directory(
     ref = parse_uri(uri)
     url = f"{api_base()}/storage/v1/b/{quote(ref.bucket, safe='')}/o"
     prefix = directory_prefix(ref.object_name)
-    headers = request_headers(accept_json=True)
+    headers = _gcs.request_headers(accept_json=True)
     budget = memory_budget(memory_limit_bytes)
     files: list[RemoteFile] = []
     metadata_budget = current_directory_metadata_budget(memory_limit_bytes)
@@ -241,13 +239,12 @@ def list_directory(
             retries=budget.async_retries,
             should_retry=retryable_http_error,
         )
-        for item in payload.get("items", ()):
-            name = item.get("name")
-            if not isinstance(name, str):
-                continue
-            relative = name[len(prefix) :] if name.startswith(prefix) else name
-            if not relative or "/" in relative or not name_matches(relative, suffixes):
-                continue
+        for item, relative in direct_child_items(
+            payload.get("items", ()),
+            prefix,
+            suffixes,
+            "name",
+        ):
             remote_file = remote_file_from_metadata(
                 ref.bucket,
                 item,
@@ -255,8 +252,8 @@ def list_directory(
             )
             metadata_budget.charge_file(remote_file, associations=4)
             files.append(remote_file)
-        page_token = payload.get("nextPageToken")
-        if not isinstance(page_token, str) or not page_token:
+        page_token = next_page_token(payload, "nextPageToken")
+        if page_token is None:
             break
     governed_sort(files, key=remote_file_sort_key, stage="remote_discovery_sort")
     return files
@@ -275,20 +272,12 @@ def directories_containing_files(
         uris,
         metadata_budget=metadata_budget,
     )
-    groups: dict[tuple[str, str], dict[str, list[str]]] = {}
-    for uri in uris:
-        ref = parse_uri(uri)
-        parsed = split_parent_child(ref.object_name)
-        if parsed is None:
-            continue
-        parent_prefix, child = parsed
-        # pass63 proof anchor: metadata_budget.charge_group_associations()
-        discovery.publish_group_association(
-            lambda: (
-                groups.setdefault((ref.bucket, parent_prefix), {}).setdefault(child, []).append(uri)
-            )
-        )
-    headers = request_headers(accept_json=True)
+    groups = requested_directory_groups(
+        uris,
+        discovery,
+        _directory_location,
+    )
+    headers = _gcs.request_headers(accept_json=True)
     budget = memory_budget(memory_limit_bytes)
     for (bucket, parent_prefix), children in groups.items():
         url = f"{api_base()}/storage/v1/b/{quote(bucket, safe='')}/o"
@@ -314,15 +303,13 @@ def directories_containing_files(
                 retries=budget.async_retries,
                 should_retry=retryable_http_error,
             )
-            for item in payload.get("items", ()):
-                name = item.get("name")
-                if not isinstance(name, str) or not name.startswith(prefix):
-                    continue
-                relative = name[len(prefix) :]
-                child, separator, filename = relative.partition("/")
-                child_uris = children.get(child) if separator else None
-                if not child_uris or "/" in filename or not name_matches(filename, accepted):
-                    continue
+            for item, child_uris, filename in requested_child_items(
+                payload.get("items", ()),
+                prefix,
+                children,
+                accepted,
+                "name",
+            ):
                 discovery.add(
                     child_uris,
                     remote_file_from_metadata(
@@ -331,8 +318,8 @@ def directories_containing_files(
                         display_name=filename,
                     ),
                 )
-            page_token = payload.get("nextPageToken")
-            if not isinstance(page_token, str) or not page_token:
+            page_token = next_page_token(payload, "nextPageToken")
+            if page_token is None:
                 break
     return discovery.finish()
 
@@ -342,6 +329,5 @@ __all__ = [
     "download_file",
     "file_metadata",
     "list_directory",
-    "request_headers",
     "upload_file",
 ]

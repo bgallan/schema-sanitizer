@@ -1,4 +1,8 @@
-"""Shared operation-memory scopes for public source discovery APIs."""
+"""Shared operation-memory scopes for public source discovery APIs.
+
+It creates a bounded operation context around public discovery calls and bridges
+synchronous or asynchronous execution with guaranteed cleanup.
+"""
 
 from __future__ import annotations
 
@@ -115,7 +119,7 @@ def run_public_source_discovery(
             source_file_extension=source_file_extension,
             memory_limit_bytes=memory_limit_bytes,
         )
-    from ..remote_impl.transport import run_sync
+    from ..remote_impl.async_bridge import run_sync
 
     return run_sync(
         async_discover(

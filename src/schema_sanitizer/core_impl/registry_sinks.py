@@ -1,4 +1,8 @@
-"""Registry-backed sink methods for Arrow and path sources."""
+"""Registry-backed sink methods for Arrow and path sources.
+
+The three private mixins attach native Arrow-stream, path-provider, and path-source routes to the
+execution context without widening its public surface.
+"""
 
 from __future__ import annotations
 

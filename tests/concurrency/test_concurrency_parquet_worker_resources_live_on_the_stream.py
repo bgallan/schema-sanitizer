@@ -1,12 +1,15 @@
-"""Regression coverage for concurrency parquet worker resources live on the stream."""
+"""Tie Parquet worker resources to the lifetime of the returned stream.
+
+Parallel scratch must be released at each row-group boundary, stream closure must retire retained
+workers, and single- and multi-worker conversions must stay byte-identical.
+"""
 
 from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
 
-from conftest import require_native
+from _support.resource_fakes import CapsuleStream
 
 ROOT = Path(__file__).resolve().parents[2]
 STATE = (
@@ -24,19 +27,6 @@ PARALLEL = (
     / "cpp/src/internal/parquet/footer_reader/native_stream/materialization/row_group"
     / "native_stream_parallel_columns.cc.inc"
 )
-
-
-class _CapsuleStream:
-    """Expose one owned Arrow C Stream capsule to a native consumer."""
-
-    def __init__(self, capsule: Any):
-        """Retain the owned Arrow C Stream capsule."""
-        self._capsule = capsule
-
-    def __arrow_c_stream__(self, requested_schema: Any = None) -> Any:
-        """Return the capsule through the Arrow PyCapsule protocol."""
-        del requested_schema
-        return self._capsule
 
 
 def test_parquet_worker_resources_live_on_the_stream() -> None:
@@ -66,9 +56,10 @@ def test_parallel_scratch_is_released_at_row_group_boundary() -> None:
     assert "getenv" not in row_group + parallel
 
 
-def test_parquet_single_and_multi_remain_byte_identical(tmp_path: Path) -> None:
+def test_parquet_single_and_multi_remain_byte_identical(
+    tmp_path: Path, require_native: None
+) -> None:
     """Persistent resources preserve deterministic single/multi output."""
-    require_native()
     from schema_sanitizer.core_impl.execution import ExecutionContext
     from schema_sanitizer.core_impl.native_runtime import native_core
     from schema_sanitizer.core_impl.native_symbols import PARQUET_STREAM_WRITE
@@ -92,7 +83,7 @@ def test_parquet_single_and_multi_remain_byte_identical(tmp_path: Path) -> None:
             multi_threading=mode == "multi", memory_limit_bytes=32 << 20, on_error="stop"
         ).raw
         capsule = native_core.parquet_stream_read(str(source), [], 32 << 20)
-        sink = context.to_sink_arrow_stream("stream", "arrow", _CapsuleStream(capsule), options)
+        sink = context.to_sink_arrow_stream("stream", "arrow", CapsuleStream(capsule), options)
         output = tmp_path / f"{mode}.parquet"
         PARQUET_STREAM_WRITE(sink, str(output), "uncompressed", -1, 64 << 20)
         sink.close_main_stream()

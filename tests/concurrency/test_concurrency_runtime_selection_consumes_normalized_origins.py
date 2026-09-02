@@ -1,16 +1,19 @@
-"""Regression coverage for concurrency runtime selection consumes normalized origins."""
+"""Check that arena runtime selection consumes normalized task origins.
+
+Overflow fallback must preserve modulo order, mixed-lane probes must exercise real scheduling,
+and evidence must cover both odd and power-of-two worker widths.
+"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
+
+from benchmarks.concurrency.assets import load_evidence, load_probe
 
 ROOT = Path(__file__).resolve().parents[2]
 ARENA = ROOT / "cpp/src/internal/runtime/operation_task_arena.cc"
 RUNTIME = ROOT / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc"
 SELECTION = ROOT / "cpp/src/internal/runtime/operation_task_arena_selection.hh"
-EVIDENCE = ROOT / "benchmarks/evidence/concurrency/scheduler/lane-origin-modulo.json"
-PROBE = ROOT / "benchmarks/probes/concurrency/scheduler/lane-origin-modulo-tsan.cc"
 
 
 def test_runtime_selection_consumes_normalized_origins() -> None:
@@ -33,7 +36,7 @@ def test_runtime_selection_consumes_normalized_origins() -> None:
 def test_overflow_fallback_preserves_exact_modulo_sequence() -> None:
     """Only size_t wraparound falls back to the exact modulo sequence."""
     selection = SELECTION.read_text(encoding="utf-8")
-    probe = PROBE.read_text(encoding="utf-8")
+    probe = load_probe("scheduler/lane-origin-modulo-tsan.cc")
     compact = probe.replace(" ", "").replace("\n", "")
 
     assert "std::numeric_limits<std::size_t>::max() - delta" in selection
@@ -46,7 +49,7 @@ def test_overflow_fallback_preserves_exact_modulo_sequence() -> None:
 
 def test_probe_covers_real_mixed_lane_arena() -> None:
     """The native/TSan probe crosses odd/even widths and all stage lanes."""
-    source = PROBE.read_text(encoding="utf-8")
+    source = load_probe("scheduler/lane-origin-modulo-tsan.cc")
     compact = source.replace(" ", "").replace("\n", "")
 
     assert "{2U,3U,4U,5U,8U,16U,32U}" in compact
@@ -61,7 +64,7 @@ def test_probe_covers_real_mixed_lane_arena() -> None:
 
 def test_evidence_covers_odd_and_power_of_two_widths() -> None:
     """Paired evidence remains positive across representative lane widths."""
-    evidence = json.loads(EVIDENCE.read_text(encoding="utf-8"))
+    evidence = load_evidence("lane-origin-modulo")
 
     assert evidence["pair_count"] == 15
     assert evidence["iterations_per_process"] == 20_000_000

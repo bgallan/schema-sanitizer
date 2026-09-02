@@ -1,4 +1,6 @@
 // Declares the bounded ordered multi-threaded materialization stream.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 
@@ -13,8 +15,8 @@
 
 namespace sanitize::internal {
 
-// Creates a stream whose workers prepare rows independently while one ordered
-// coordinator remains the sole owner of Arrow builders and batch boundaries.
+/// Creates a stream with parallel row preparation and single-owner ordered
+/// Arrow assembly.
 sanitize::Result<std::shared_ptr<sanitize::ExportBatchSource>>
 make_parallel_ingest_stream_source(
     std::string_view frontend_name, std::vector<RuntimeFieldLayout> fields,

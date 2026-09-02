@@ -1,4 +1,8 @@
-"""Bounded process-wide execution for blocking terminal cleanup publishers."""
+"""Run blocking terminal cleanup publishers on bounded process-wide workers.
+
+The dispatcher manages preallocated queues, delayed retries, dead letters, shutdown, fork
+recovery, and diagnostics without adding ungoverned cleanup threads.
+"""
 
 from __future__ import annotations
 
@@ -54,6 +58,7 @@ _CLEANUP_RETRY_OWNERS: dict[int, object] = {}
 
 
 def _retry_cleanup_dispatcher_token(token: int) -> None:
+    """Resume the dispatcher owner retained under a retry token."""
     with _CLEANUP_RETRY_OWNERS_LOCK:
         owner = _CLEANUP_RETRY_OWNERS.pop(token, None)
     if owner is None:
@@ -136,9 +141,11 @@ class _CleanupDispatcher:
     """Governed cleanup with physically separate runnable and terminal states."""
 
     def __init__(self) -> None:
+        """Initialize the cleanup dispatcher and its owned runtime state."""
         self._reset(os.getpid())
 
     def _reset(self, pid: int, *, cancel_old: bool = True) -> None:
+        """Reset process-local state owned by this cleanup dispatcher."""
         if globals().get("_DISPATCHER") is self:
             retire_terminal_category("cleanup_dispatcher")
         old_pid = getattr(self, "_pid", None)
@@ -149,7 +156,6 @@ class _CleanupDispatcher:
         self._queues: dict[CleanupSubsystem, deque[_CleanupCall]] = {}
         self._ready_subsystems: deque[CleanupSubsystem] = deque()
         self._deficits: dict[CleanupSubsystem, int] = {}
-        self._delayed_heap: list[tuple[int, int, _CleanupCall]] = []  # compatibility only
         self._owned_index: dict[int, _CleanupCall] = {}
         self._delayed_calls = 0
         self._delayed_bytes = 0
@@ -188,7 +194,6 @@ class _CleanupDispatcher:
         self._dead_letters: list[_CleanupCall | None] = [None] * _MAX_DEAD_LETTER_CALLS
         self._dead_letter_count = 0
         self._dead_letter_bytes = 0
-        self._parked: deque[_CleanupCall] = deque()  # compatibility only
         self._parked_calls = 0
         self._oldest_active_ns = 0
         self._active_started_ns: dict[int, int] = {}
@@ -196,10 +201,12 @@ class _CleanupDispatcher:
         self._corrupted = False
 
     def _ensure_process(self) -> None:
+        """Ensure the owner still belongs to the active process."""
         if self._pid != os.getpid():
             self._reset(os.getpid())
 
     def _mark_progress_locked(self) -> None:
+        """Mark progress while holding the governing lock."""
         try:
             self._progress_epoch = min((1 << 63) - 1, self._progress_epoch + 1)
             diagnostic_transition()
@@ -253,6 +260,7 @@ class _CleanupDispatcher:
         return not self._corrupted
 
     def _charge_owner_locked(self, call: _CleanupCall) -> None:
+        """Charge a cleanup owner before publication while holding the dispatcher lock."""
         subsystem = call.subsystem
         # Compute first; if Python cannot allocate one of the bounded integer
         # results, no authoritative field has changed yet.
@@ -302,7 +310,8 @@ class _CleanupDispatcher:
                 self._queues.pop(subsystem, None)
                 raise
         else:
-            assert queue is not None
+            if queue is None:
+                raise AssertionError("existing cleanup subsystem must have a queue")
             queue.append(call)
         call.next_attempt_ns = 0
         call.state = _CleanupState.RUNNABLE
@@ -325,6 +334,7 @@ class _CleanupDispatcher:
         self._delayed_bytes = next_bytes
 
     def _promote_delayed_locked(self, *, force: bool = False) -> None:
+        """Promote due cleanup calls while holding the dispatcher lock."""
         now = time.monotonic_ns()
         for call in self._owned_index.values():
             if call.state is not _CleanupState.DELAYED:
@@ -346,6 +356,7 @@ class _CleanupDispatcher:
         start_worker: bool = True,
         subsystem: CleanupSubsystem = CleanupSubsystem.GENERIC,
     ) -> bool:
+        """Submit one bounded work item to this cleanup dispatcher."""
         self._ensure_process()
         ensure_runtime_fork_safe()
         if not callable(callback):
@@ -443,9 +454,11 @@ class _CleanupDispatcher:
         return True
 
     def _has_failed_worker_leases_locked(self) -> bool:
+        """Return whether failed worker leases remain while holding the governing lock."""
         return bool(self._failed_worker_leases or self._terminal_failed_worker_lease is not None)
 
     def _retain_failed_worker_lease_locked(self, lease: Any) -> None:
+        """Retain failed worker lease while holding the cleanup dispatcher lock."""
         if any(existing is lease for existing in self._failed_worker_leases):
             return
         if self._terminal_failed_worker_lease is lease:
@@ -460,6 +473,7 @@ class _CleanupDispatcher:
         raise RuntimeError("cleanup worker lease ownership invariant exceeded")
 
     def _take_failed_worker_leases_locked(self) -> deque[Any]:
+        """Remove retained worker leases while holding the governing lock."""
         failed = self._failed_worker_leases
         self._failed_worker_leases = deque()
         terminal = self._terminal_failed_worker_lease
@@ -469,6 +483,7 @@ class _CleanupDispatcher:
         return failed
 
     def _register_availability_locked(self) -> None:
+        """Register availability while holding the governing lock."""
         if self._availability_registered:
             return
         self._availability_registered = bool(
@@ -476,6 +491,7 @@ class _CleanupDispatcher:
         )
 
     def _unregister_availability(self) -> None:
+        """Remove the registered capacity-availability callback."""
         with self._condition:
             if not self._availability_registered:
                 return
@@ -485,9 +501,11 @@ class _CleanupDispatcher:
     def _availability_wakeup(self) -> None:
         # The notifier acknowledges the sealed event only after this returns.
         # Keep the registration live if a transient failure escapes.
+        """Retry starting the cleanup worker when thread capacity becomes available."""
         self._retry_start()
 
     def _schedule_retry_locked(self) -> None:
+        """Schedule retry while holding the governing lock."""
         if self._retry_scheduled or self._closed:
             return
         retry_token = id(self)
@@ -512,6 +530,7 @@ class _CleanupDispatcher:
             self._register_availability_locked()
 
     def _ensure_workers(self) -> None:
+        """Ensure this cleanup dispatcher owns its configured governed workers."""
         while True:
             with self._condition:
                 self._promote_delayed_locked(force=self._closed)
@@ -585,6 +604,7 @@ class _CleanupDispatcher:
                 self._unregister_availability()
 
     def _retry_start(self) -> None:
+        """Retry starting the governed cleanup-dispatcher worker."""
         self._unregister_availability()
         with self._condition:
             self._retry_scheduled = False
@@ -618,6 +638,7 @@ class _CleanupDispatcher:
                 self._schedule_retry_locked()
 
     def _take_call_locked(self) -> _CleanupCall | None:
+        """Remove the next cleanup call while holding the dispatcher lock."""
         self._promote_delayed_locked(force=self._closed)
         visits = 0
         max_visits = max(1, len(self._ready_subsystems) * 64)
@@ -657,18 +678,8 @@ class _CleanupDispatcher:
                 retained_bytes=call.retained_bytes,
             )
 
-    def _requeue_call_locked(self, call: _CleanupCall) -> None:
-        """Compatibility helper: delayed work is never put in runnable queues."""
-        if call.parked:
-            call.state = _CleanupState.PARKED
-            self._parked_calls += 1
-            self._publish_terminal_call_locked(call)
-        elif call.next_attempt_ns > time.monotonic_ns():
-            self._enqueue_delayed_locked(call)
-        else:
-            self._enqueue_runnable_locked(call)
-
     def _run(self, lease: Any) -> None:
+        """Run the background worker loop for this cleanup dispatcher."""
         current = threading.current_thread()
         try:
             while True:
@@ -786,6 +797,7 @@ class _CleanupDispatcher:
                 self._ensure_workers()
 
     def close(self, *, deadline_seconds: float = 1.0) -> bool:
+        """Release resources owned by this cleanup dispatcher."""
         deadline = deadline_ns_from_timeout(
             deadline_seconds, name="cleanup dispatcher shutdown deadline"
         )
@@ -839,6 +851,7 @@ class _CleanupDispatcher:
             )
 
     def snapshot(self) -> CleanupDispatcherSnapshot:
+        """Return a bounded snapshot of the current cleanup dispatcher."""
         self._ensure_process()
         with self._condition:
             return CleanupDispatcherSnapshot(
@@ -916,6 +929,7 @@ def cleanup_dispatcher_snapshot() -> CleanupDispatcherSnapshot:
 
 
 def _reset_cleanup_after_fork() -> None:
+    """Reset cleanup after fork."""
     global _CLEANUP_RETRY_OWNERS_LOCK, _CLEANUP_RETRY_OWNERS
     from .fork_safety import fork_quarantine_generation
 

@@ -1,4 +1,7 @@
-// Shared state and operations for Arrow-source registry sink methods.
+// Declares shared state and operations for Arrow-source registry sink methods.
+// The routines preserve source order and Arrow ownership while applying
+// compiled registry plans.
+
 #pragma once
 
 #include <cstddef>
@@ -12,11 +15,10 @@
 #endif
 #include <Python.h>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/metadata/columns/api.hh"
 #include "api/python_abi3/metadata/stream/stream.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
+#include "internal/abi/python_abi3/native_sink.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/core/status.hh"
 #include "sanitize/options/options.hh"
@@ -37,9 +39,16 @@ namespace core_abi3_internal::arrow_registry_detail {
 
 class GilGuard {
 public:
+  /// Acquires the Python GIL for the duration of a native registry callback.
   GilGuard() : state_(PyGILState_Ensure()) {}
+
+  /// Disables copying so the acquired GIL state is released exactly once.
   GilGuard(const GilGuard &) = delete;
+
+  /// Disables copy assignment so GIL ownership cannot be duplicated.
   GilGuard &operator=(const GilGuard &) = delete;
+
+  /// Restores the Python thread state captured when the guard was created.
   ~GilGuard() { PyGILState_Release(state_); }
 
 private:
@@ -48,11 +57,10 @@ private:
 
 struct PyRegistrySinkOutputs {
   ArrowArrayStream *main_stream = nullptr;
-  schema_sanitizer_diagnostics *diagnostics = nullptr;
-  char *registry_json = nullptr;
-  char *drifts_json = nullptr;
-  char *conversion_timestamp = nullptr;
-  char *err = nullptr;
+  NativeDiagnostics *diagnostics = nullptr;
+  std::string registry_json = "{}";
+  std::string drifts_json = "[]";
+  std::string conversion_timestamp;
 };
 
 struct ArrowSourceSpec {
@@ -62,7 +70,7 @@ struct ArrowSourceSpec {
 
 struct NativeArrowSourcesStreamState {
   ~NativeArrowSourcesStreamState();
-  schema_sanitizer_context *ctx = nullptr;
+  NativeContext *ctx = nullptr;
   sanitize::PreparedOptionsPtr prepared;
   std::shared_ptr<void> operation_memory_pool;
   std::shared_ptr<sanitize::internal::PerformanceTelemetry> telemetry;
@@ -79,7 +87,7 @@ struct NativeArrowSourcesStreamState {
   std::size_t index = 0;
   bool first_row_pending = true;
   ArrowArrayStream *inner = nullptr;
-  schema_sanitizer_diagnostics *diagnostics = nullptr;
+  NativeDiagnostics *diagnostics = nullptr;
   std::unique_ptr<MetadataStreamState> metadata;
   std::string last_error;
 };
@@ -106,14 +114,14 @@ sanitize::Result<ArrowArrayStream *> make_passthrough_arrow_stream(
 
 sanitize::Result<sanitize::SchemaRegistryMergeResult>
 merge_arrow_source_schemas(
-    schema_sanitizer_context *ctx, const std::vector<ArrowSourceSpec> &sources,
+    NativeContext *ctx, const std::vector<ArrowSourceSpec> &sources,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
     const char *field_name_policy,
     const sanitize::LogicalSchema *previous_schema = nullptr);
 
 sanitize::Result<sanitize::SchemaRegistryMergeResult>
 merge_arrow_source_provider_schemas(
-    schema_sanitizer_context *ctx, PyObject *provider_obj,
+    NativeContext *ctx, PyObject *provider_obj,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
     const char *field_name_policy,
     const sanitize::LogicalSchema *previous_schema = nullptr);
@@ -123,9 +131,11 @@ void arrow_sources_release(ArrowArrayStream *stream);
 int arrow_sources_get_schema(ArrowArrayStream *stream, ArrowSchema *out);
 int arrow_sources_get_next(ArrowArrayStream *stream, ArrowArray *out);
 
+PyObject *pack_arrow_source_registry_stream(
+    PyObject *keepalive, std::unique_ptr<NativeArrowSourcesStreamState> state,
+    PyObject *chunk_provider = nullptr);
 PyObject *pack_arrow_source_provider_registry_stream(
-    PyObject *ctx_obj, schema_sanitizer_context *ctx,
-    PyObject *stream_provider_obj,
+    PyObject *ctx_obj, NativeContext *ctx, PyObject *stream_provider_obj,
     const sanitize::PreparedOptionsPtr &prepared_options,
     std::shared_ptr<NativeRegistryPlan> registry_plan,
     const char *field_name_policy, const char *schema_mode,

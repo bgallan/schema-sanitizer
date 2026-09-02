@@ -1,3 +1,9 @@
+// Encodes column and offset indexes, then writes them with validated file
+// positions. This fragment is included by the consolidated writer to isolate
+// format-specific details.
+
+/// Encodes column index using the selected Parquet representation and bounded
+/// caller-owned storage.
 std::string encode_column_index(const std::vector<PageInfo> &pages) {
   std::string out;
   CompactWriter writer(out);
@@ -23,10 +29,13 @@ std::string encode_column_index(const std::vector<PageInfo> &pages) {
   return out;
 }
 
+/// Reports whether every logical value in a Parquet page is null.
 bool page_is_null_page(const PageInfo &page) {
   return page.num_values > 0 && page.null_count == page.num_values;
 }
 
+/// Reports whether all page statistics are present and comparable for a Parquet
+/// column index.
 bool can_encode_column_index(const std::vector<PageInfo> &pages) {
   for (const auto &page : pages) {
     if (page_is_null_page(page)) {
@@ -39,6 +48,8 @@ bool can_encode_column_index(const std::vector<PageInfo> &pages) {
   return true;
 }
 
+/// Encodes offset index using the selected Parquet representation and bounded
+/// caller-owned storage.
 std::string encode_offset_index(const std::vector<PageInfo> &pages) {
   std::string out;
   CompactWriter writer(out);
@@ -59,6 +70,8 @@ std::string encode_offset_index(const std::vector<PageInfo> &pages) {
   return out;
 }
 
+/// Writes row group page indexes in physical Parquet order after all offsets
+/// and metadata sizes are validated.
 sanitize::Status
 write_row_group_page_indexes(CountingOutput &out,
                              const std::vector<LeafColumn> &columns,

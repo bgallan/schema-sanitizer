@@ -1,4 +1,9 @@
-"""Fixed-clock single-versus-multi golden matrix."""
+"""Compare single- and multi-worker behavior under a fixed operation clock.
+
+Analytical and file frontends, directory and Parquet fallbacks, error policies, registry
+generation and strict preconditions, reused native state, nested schemas, and partition warm-up
+must all produce equivalent golden results.
+"""
 
 from __future__ import annotations
 
@@ -46,7 +51,7 @@ def _write_input(path: Path, input_format: str, rows: int = 513) -> dict[str, An
         for index in range(rows)
     ]
     options: dict[str, Any] = {"input_format": input_format}
-    if input_format in {"jsonl", "ndjson", "json"}:
+    if input_format in {"jsonl", "json"}:
         path.write_text(
             "\n".join(json.dumps(record, separators=(",", ":")) for record in records) + "\n",
             encoding="utf-8",
@@ -82,7 +87,6 @@ def _write_input(path: Path, input_format: str, rows: int = 513) -> dict[str, An
         ("json", ".json"),
         ("json_array", ".json"),
         ("jsonl", ".jsonl"),
-        ("ndjson", ".ndjson"),
         ("csv", ".csv"),
         ("xml", ".xml"),
     ],
@@ -226,9 +230,6 @@ def test_fixed_clock_parquet_output_fallback_equivalence(
 ) -> None:
     """Forced PyArrow output fallback preserves replay and logical files."""
     from schema_sanitizer.api_impl.file_conversion import direct_writers
-    from schema_sanitizer.api_impl.file_conversion.writers import (
-        last_parquet_stream_route,
-    )
 
     def native_writer_unavailable(*_args: Any, **_kwargs: Any) -> bool:
         """Force the supported replayable PyArrow fallback route."""
@@ -248,7 +249,6 @@ def test_fixed_clock_parquet_output_fallback_equivalence(
     options = _write_input(source, "jsonl", rows=3_200)
     outputs = {mode: tmp_path / f"fallback-{mode}.parquet" for mode in ("single", "multi")}
     results = {}
-    routes = {}
     for mode in ("single", "multi"):
         results[mode] = ss.to_parquet(
             source,
@@ -258,11 +258,13 @@ def test_fixed_clock_parquet_output_fallback_equivalence(
             parquet_compression="snappy",
             **options,
         )
-        routes[mode] = last_parquet_stream_route()
 
     assert_results_equivalent(results["single"], results["multi"])
     assert_logical_files_equivalent(outputs["single"], outputs["multi"])
-    assert routes == {"single": "pyarrow", "multi": "pyarrow"}
+    assert {mode: result.stats["file_output_route"] for mode, result in results.items()} == {
+        "single": "pyarrow",
+        "multi": "pyarrow",
+    }
 
 
 def _strict_materialization(rows: list[dict[str, Any]], mode: str, on_error: str) -> Any:

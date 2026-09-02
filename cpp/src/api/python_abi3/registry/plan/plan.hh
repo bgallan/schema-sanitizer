@@ -1,4 +1,6 @@
-// Native registry plan ownership, construction, and Python capsule API.
+// Declares native registry plan ownership, construction, and Python capsule
+// API. The routines preserve source order and Arrow ownership while applying
+// compiled registry plans.
 
 #pragma once
 

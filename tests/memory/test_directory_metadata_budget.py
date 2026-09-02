@@ -1,4 +1,7 @@
-"""Regression coverage for bounded directory and remote control metadata."""
+"""Checks that directory listings and synchronous or asynchronous control responses charge
+one operation-wide metadata budget before materialization. Fixed overhead remains usable
+under small limits, while oversized remote listings and response bodies fail before
+their entries are retained."""
 
 from __future__ import annotations
 
@@ -26,7 +29,7 @@ def _large_remote_file() -> RemoteFile:
 
 
 def test_directory_metadata_budget_is_shared_by_single_operation() -> None:
-    """Verify repeated provider calls cannot each consume a fresh allowance."""
+    """Verify directory metadata budget is shared by single operation."""
     file = _large_remote_file()
     with OperationExecutionContext(
         threading_mode="single",
@@ -49,7 +52,7 @@ def test_directory_metadata_budget_is_shared_by_single_operation() -> None:
 def test_folder_listing_rejects_metadata_growth_before_retaining_every_file(
     tmp_path: Path,
 ) -> None:
-    """Verify one huge local listing is bounded even when files are empty."""
+    """Verify folder listing rejects metadata growth before retaining every file."""
     folder = tmp_path / "many"
     folder.mkdir()
     for index in range(600):
@@ -68,7 +71,7 @@ def test_folder_listing_rejects_metadata_growth_before_retaining_every_file(
 
 
 def test_small_user_limit_keeps_fixed_directory_runtime_overhead() -> None:
-    """Verify one normal path can reach the parser under tiny test budgets."""
+    """Verify small user limit keeps fixed directory runtime overhead."""
     budget = DirectoryMetadataBudget(128)
     budget.charge_file(RemoteFile("s3://bucket/row.json", "row.json", 1))
     assert budget.used_bytes > 0
@@ -81,17 +84,17 @@ class _SyncResponse:
     status = 200
 
     def __init__(self, payload: bytes) -> None:
-        """Initialize the helper state."""
+        """Initialize the sync response test double."""
         self.payload = payload
         self.requested: int | None = None
 
     def read(self, size: int = -1) -> bytes:
-        """Implement the minimal response protocol required by the test."""
+        """Read bounded data from the sync response test double."""
         self.requested = size
         return self.payload if size < 0 else self.payload[:size]
 
     def getheaders(self) -> list[tuple[str, str]]:
-        """Implement the minimal response protocol required by the test."""
+        """Return the controlled HTTP response headers."""
         return []
 
 
@@ -99,18 +102,18 @@ class _Connection:
     """Provide a minimal closeable HTTP connection test double."""
 
     def __init__(self) -> None:
-        """Initialize the helper state."""
+        """Initialize the connection test double."""
         self.closed = False
 
     def close(self) -> None:
-        """Close the helper resource exactly once."""
+        """Close the resources owned by the connection test double."""
         self.closed = True
 
 
 def test_sync_control_response_is_bounded_before_full_materialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify blocking HTTP control bodies read at most limit plus one byte."""
+    """Verify sync control response is bounded before full materialization."""
     response = _SyncResponse(b"x" * 128)
     connection = _Connection()
     monkeypatch.setattr(
@@ -134,7 +137,7 @@ def test_sync_control_response_is_bounded_before_full_materialization(
 
 
 def test_async_control_response_is_bounded_before_full_materialization() -> None:
-    """Verify aiohttp control bodies read at most limit plus one byte."""
+    """Verify async control response is bounded before full materialization."""
 
     class Content:
         """Provide an asynchronous bounded-body reader test double."""
@@ -142,7 +145,7 @@ def test_async_control_response_is_bounded_before_full_materialization() -> None
         requested: int | None = None
 
         async def read(self, size: int = -1) -> bytes:
-            """Implement the minimal response protocol required by the test."""
+            """Read bounded data from the content test double."""
             self.requested = size
             return b"x" * size
 
@@ -152,6 +155,7 @@ def test_async_control_response_is_bounded_before_full_materialization() -> None
         content = Content()
 
     async def exercise() -> None:
+        """Read a hostile async response through the bounded control path."""
         response = Response()
         with pytest.raises(SchemaSanitizerResourceError) as excinfo:
             await read_bounded_response_bytes(

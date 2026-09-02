@@ -1,3 +1,5 @@
 # Fuzz inputs are opaque bytes. Never normalize or merge their contents.
 fuzz/corpus/*/** -text -diff -merge
 fuzz/regressions/*/** -text -diff -merge
+fuzz/regressions/*.sha1.zip -text -diff -merge
+benchmarks/probes/*.zip -text -diff -merge

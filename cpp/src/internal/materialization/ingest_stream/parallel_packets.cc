@@ -1,4 +1,6 @@
 // Implements bounded packet sizing for parallel materialization.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/ingest_stream/parallel_packets.hh"
 #include "internal/parsing/json/validated_row.hh"
@@ -16,6 +18,7 @@ constexpr std::size_t kValueAccountingOverhead = 96;
 constexpr std::size_t kMaxValueAccountingDepth = 64;
 constexpr std::int64_t kHighCoreWideFlatScoreLimit = 96;
 
+/// Derives long-running worker admission for wide flat materialization plans.
 [[nodiscard]] constexpr std::int64_t
 sustained_wide_flat_worker_ceiling(std::int64_t effective_workers,
                                    std::int64_t score) noexcept {
@@ -35,6 +38,8 @@ static_assert(sustained_wide_flat_worker_ceiling(32, 128) == 4);
 static_assert(sustained_wide_flat_worker_ceiling(64, 64) == 32);
 static_assert(sustained_wide_flat_worker_ceiling(64, 128) == 8);
 
+/// Derives packet worker capacity from plan width and available operation
+/// threads.
 [[nodiscard]] constexpr std::int64_t
 scaled_worker_baseline(std::int64_t effective_workers,
                        std::int64_t baseline_at_32) noexcept {
@@ -52,12 +57,14 @@ static_assert(scaled_worker_baseline(32, 8) == 8);
 static_assert(scaled_worker_baseline(64, 8) == 16);
 static_assert(scaled_worker_baseline(128, 16) == 64);
 
+/// Adds materialization scores and clamps overflow to the score maximum.
 [[nodiscard]] std::int64_t saturating_add_score(std::int64_t left,
                                                 std::int64_t right) noexcept {
   const auto max = std::numeric_limits<std::int64_t>::max();
   return right > max - left ? max : left + right;
 }
 
+/// Multiplies materialization scores and clamps overflow to the score maximum.
 [[nodiscard]] std::int64_t
 saturating_multiply_score(std::int64_t value, std::int64_t factor) noexcept {
   const auto max = std::numeric_limits<std::int64_t>::max();
@@ -67,6 +74,8 @@ saturating_multiply_score(std::int64_t value, std::int64_t factor) noexcept {
   return value > max / factor ? max : value * factor;
 }
 
+/// Returns a recursive plan weight used to size and admit materialization
+/// packets.
 [[nodiscard]] std::int64_t
 logical_materialization_score(const LogicalType &type) noexcept {
   switch (type.kind) {
@@ -100,6 +109,8 @@ logical_materialization_score(const LogicalType &type) noexcept {
   return 1;
 }
 
+/// Reports whether plan width crosses the flat-materialization packet-scaling
+/// threshold.
 [[nodiscard]] bool is_wide_flat_plan(const CompiledPlan &plan) noexcept {
   constexpr std::size_t kWideFlatColumnThreshold = 24;
   if (plan.columns.size() < kWideFlatColumnThreshold) {
@@ -112,6 +123,8 @@ logical_materialization_score(const LogicalType &type) noexcept {
       });
 }
 
+/// Reports whether variable-width fields dominate a wide flat plan's memory
+/// cost.
 [[nodiscard]] bool
 is_variable_width_heavy_flat_plan(const CompiledPlan &plan) noexcept {
   if (plan.columns.empty()) {
@@ -124,6 +137,7 @@ is_variable_width_heavy_flat_plan(const CompiledPlan &plan) noexcept {
   return utf8_columns * 4 >= plan.columns.size();
 }
 
+/// Sums recursive field weights into the plan score used for packet sizing.
 [[nodiscard]] std::int64_t
 plan_materialization_score(const CompiledPlan &plan) noexcept {
   std::int64_t score = 0;
@@ -137,6 +151,8 @@ plan_materialization_score(const CompiledPlan &plan) noexcept {
   return std::max<std::int64_t>(1, score);
 }
 
+/// Adds diagnostic or sizing counters and clamps overflow to the destination
+/// maximum.
 [[nodiscard]] std::size_t saturating_add(std::size_t left,
                                          std::size_t right) noexcept {
   const auto max = std::numeric_limits<std::size_t>::max();
@@ -148,6 +164,8 @@ struct ValueAccounting {
   std::size_t cap = 1;
   bool saturated = false;
 
+  /// Adds one component to the conservative score while saturating instead of
+  /// overflowing.
   void add(std::size_t amount) noexcept {
     if (saturated) {
       return;
@@ -160,6 +178,8 @@ struct ValueAccounting {
   }
 };
 
+/// Charges one observed value and its nested evidence against the packet memory
+/// budget.
 sanitize::Status account_value(const ValueView &value, std::size_t depth,
                                ValueAccounting *accounting) {
   accounting->add(kValueAccountingOverhead);
@@ -221,6 +241,8 @@ sanitize::Status account_value(const ValueView &value, std::size_t depth,
   return sanitize::Status::OK();
 }
 
+/// Estimates source bytes retained by one row packet, including validated token
+/// metadata.
 [[nodiscard]] std::size_t
 estimate_row_source_bytes(const RowRef &row,
                           std::size_t accounting_cap) noexcept {
@@ -363,6 +385,8 @@ materialization_packet_limits(const ExecutionPolicy &policy,
   };
 }
 
+/// Transfers owned buffers and reservations while leaving the source safe to
+/// destroy.
 OwnedRowPacket::OwnedRowPacket(OwnedRowPacket &&other) noexcept
     : rows(other.rows), owner(std::move(other.owner)),
       releaser(std::move(other.releaser)), release_begin(other.release_begin),
@@ -377,6 +401,8 @@ OwnedRowPacket::OwnedRowPacket(OwnedRowPacket &&other) noexcept
   other.release_count = 0;
 }
 
+/// Transfers owned buffers and reservations while leaving the source safe to
+/// destroy.
 OwnedRowPacket &OwnedRowPacket::operator=(OwnedRowPacket &&other) noexcept {
   if (this != &other) {
     if (releaser && release_count != 0) {
@@ -399,6 +425,7 @@ OwnedRowPacket &OwnedRowPacket::operator=(OwnedRowPacket &&other) noexcept {
   return *this;
 }
 
+/// Releases the packet's row range and returns its source-memory reservation.
 OwnedRowPacket::~OwnedRowPacket() {
   if (releaser && release_count != 0) {
     releaser->ReleaseRows(release_begin, release_count);

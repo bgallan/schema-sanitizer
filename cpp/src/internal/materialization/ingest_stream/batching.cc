@@ -1,4 +1,6 @@
 // Implements batching and row materialization for the ingest stream.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/ingest_stream/source_internal.hh"
 

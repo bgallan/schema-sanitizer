@@ -1,4 +1,6 @@
 // Implements compact worker-local inference evidence collection.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #include "internal/inference/parallel_evidence.hh"
 
@@ -21,6 +23,7 @@ namespace {
 
 using EvidenceKind = InferenceEvidenceNode::Kind;
 
+/// Allocates the next packet-local evidence node and returns its stable index.
 sanitize::Result<std::size_t>
 append_evidence_node(InferenceEvidencePacket *packet) {
   if (packet->nodes.size() >=
@@ -34,6 +37,8 @@ append_evidence_node(InferenceEvidencePacket *packet) {
   return index;
 }
 
+/// Returns the stable packet-local index of an evidence node within its owning
+/// vector.
 [[nodiscard]] std::uint32_t evidence_index(std::size_t value) noexcept {
   return static_cast<std::uint32_t>(value);
 }
@@ -43,6 +48,8 @@ sanitize::Status append_value(InferenceEvidencePacket *packet,
                               const PreparedOptions &opts, DepthState depth,
                               sanitize::internal::StopToken stop);
 
+/// Adds a named value and its recursively collected shape evidence to the
+/// packet.
 sanitize::Status append_named_value(InferenceEvidencePacket *packet,
                                     std::string_view key,
                                     const ValueView &value,
@@ -78,6 +85,7 @@ struct ObjectCollectContext {
   sanitize::internal::StopToken stop;
 };
 
+/// Collects one object field through the allocation-free value-view callback.
 sanitize::Status append_object_field(void *raw, std::string_view key,
                                      std::uint64_t, ValueView value) {
   auto *context = static_cast<ObjectCollectContext *>(raw);
@@ -96,6 +104,8 @@ struct ArrayCollectContext {
   sanitize::internal::StopToken stop;
 };
 
+/// Adds one array element and its descendants to the packet's preorder node
+/// sequence.
 sanitize::Status append_array_element(void *raw, ValueView value) {
   auto *context = static_cast<ArrayCollectContext *>(raw);
   if (context->stop.stop_requested()) {
@@ -107,6 +117,8 @@ sanitize::Status append_array_element(void *raw, ValueView value) {
                       enter_value_depth(context->depth, value), context->stop);
 }
 
+/// Classifies one value and recursively records its object or array
+/// descendants.
 sanitize::Status append_value(InferenceEvidencePacket *packet,
                               std::size_t node_index, const ValueView &value,
                               const PreparedOptions &opts, DepthState depth,
@@ -146,6 +158,7 @@ sanitize::Status append_value(InferenceEvidencePacket *packet,
   return sanitize::Status::OK();
 }
 
+/// Collects shape and scalar evidence from every field in one materialized row.
 sanitize::Status append_materialized_row(const RowRef &row,
                                          const PreparedOptions &opts,
                                          InferenceEvidencePacket *packet,
@@ -163,6 +176,7 @@ sanitize::Status append_materialized_row(const RowRef &row,
   return sanitize::Status::OK();
 }
 
+/// Removes JSON whitespace from both ends of a source slice without allocating.
 [[nodiscard]] std::string_view trim_json_ws(std::string_view value) noexcept {
   while (!value.empty() &&
          std::isspace(static_cast<unsigned char>(value.front())) != 0) {
@@ -177,6 +191,7 @@ struct JsonRootContext {
   sanitize::internal::StopToken stop;
 };
 
+/// Collects one root-object field through the on-demand JSON callback.
 sanitize::Status append_json_root_field(void *raw, std::string_view key,
                                         std::uint64_t hash, ValueView value) {
   auto *context = static_cast<JsonRootContext *>(raw);
@@ -187,6 +202,8 @@ sanitize::Status append_json_root_field(void *raw, std::string_view key,
   return append_object_field(&object_context, key, hash, value);
 }
 
+/// Parses raw JSON when available and collects one row's recursive inference
+/// evidence.
 sanitize::Status append_json_row(const RowRef &row, const PreparedOptions &opts,
                                  JsonOnDemandDoc *document,
                                  InferenceEvidencePacket *packet,
@@ -207,6 +224,8 @@ sanitize::Status append_json_row(const RowRef &row, const PreparedOptions &opts,
                             DepthState{}, stop);
 }
 
+/// Derives the inference evidence packet byte limit from the operation
+/// execution policy.
 [[nodiscard]] std::int64_t
 packet_limit_from_policy(const ExecutionPolicy &policy) noexcept {
   // Each completed evidence packet can remain in the reorder window while its
@@ -232,8 +251,12 @@ ParallelInferenceEvidenceBuilder::ParallelInferenceEvidenceBuilder(
       parse_json_raw_(frontend_name_ == "json" || frontend_name_ == "jsonl" ||
                       frontend_name_ == "json_array") {}
 
+/// Releases worker-local inference arenas and any packet reservation still
+/// held.
 ParallelInferenceEvidenceBuilder::~ParallelInferenceEvidenceBuilder() = default;
 
+/// Validates dependencies and constructs the packet-local parallel inference
+/// evidence builder.
 sanitize::Result<std::shared_ptr<ParallelInferenceEvidenceBuilder>>
 ParallelInferenceEvidenceBuilder::Make(
     std::string_view frontend_name, const PreparedOptions *opts,
@@ -342,6 +365,8 @@ sanitize::Status ParallelInferenceEvidenceBuilder::append_flat_row(
   return sanitize::Status::OK();
 }
 
+/// Consumes the accumulated packet-local evidence and returns an immutable
+/// inference packet.
 sanitize::Result<InferenceEvidencePacket>
 ParallelInferenceEvidenceBuilder::Build(OwnedRowPacket &&owned,
                                         std::size_t worker_index,

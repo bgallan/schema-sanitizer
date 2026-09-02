@@ -1,4 +1,7 @@
-// Implements native schema-registry merge entry points.
+// Implements recursive native schema-registry merge and variant evolution.
+// Field-family indexes preserve historical shapes while deterministic
+// promotion, wrapping, and drift events reconcile new observations with
+// canonical state.
 
 #include "sanitize/schema_registry/schema_registry.hh"
 
@@ -35,6 +38,7 @@ struct FieldMergeIndex {
   BorrowedStringLookupMap<VariantFamilyIndex> families;
 };
 
+/// Registers an exact field name and its semantic version family position.
 void register_field(FieldMergeIndex &index, const LogicalField &field,
                     std::size_t position) {
   index.by_name.insert_or_assign(std::string_view(field.name), position);
@@ -48,6 +52,8 @@ void register_field(FieldMergeIndex &index, const LogicalField &field,
   }
 }
 
+/// Builds exact-name and version-family indexes for the current registry
+/// fields.
 FieldMergeIndex build_field_merge_index(const std::vector<LogicalField> &fields,
                                         std::size_t expected_size) {
   FieldMergeIndex index;
@@ -59,6 +65,7 @@ FieldMergeIndex build_field_merge_index(const std::vector<LogicalField> &fields,
   return index;
 }
 
+/// Returns the first unused semantic version name for an incoming field type.
 std::string next_variant_name(const FieldMergeIndex &index,
                               std::string_view base_name,
                               const LogicalType &incoming_type) {
@@ -77,10 +84,12 @@ std::string next_variant_name(const FieldMergeIndex &index,
   }
 }
 
+/// Returns whether a logical type is neither a struct nor a list.
 bool is_scalar_type(const LogicalType &type) noexcept {
   return type.kind != LogicalKind::kStruct && type.kind != LogicalKind::kList;
 }
 
+/// Finds a field position by exact output name.
 std::optional<std::size_t>
 find_field_index(const std::vector<LogicalField> &fields,
                  std::string_view name) noexcept {
@@ -93,6 +102,7 @@ find_field_index(const std::vector<LogicalField> &fields,
   return static_cast<std::size_t>(std::distance(fields.begin(), field));
 }
 
+/// Creates a nullable owned field with a deep-copied logical type.
 LogicalField make_nullable_field(std::string name, const LogicalType &type) {
   LogicalField field;
   field.name = std::move(name);
@@ -101,12 +111,13 @@ LogicalField make_nullable_field(std::string name, const LogicalType &type) {
   return field;
 }
 
+/// Reconciles two logical types or reports that a new variant is required.
 std::optional<LogicalType>
 merge_types(const LogicalType &base_type, const LogicalType &incoming_type,
             std::string_view source_path, std::vector<DriftEvent> &drifts,
             std::string_view detected_at, std::string_view default_key_name);
 
-// Recursively merges into the newest compatible member of a version family.
+/// Recursively merges into the newest compatible member of a version family.
 bool merge_into_existing_family_variant(
     std::vector<LogicalField> &fields, const FieldMergeIndex &index,
     std::string_view base_name, std::optional<std::size_t> skipped_position,
@@ -175,6 +186,7 @@ bool merge_into_existing_family_variant(
   return false;
 }
 
+/// Merges a scalar observation into a struct's configured wrapper field.
 std::optional<LogicalType> merge_struct_with_wrapped_scalar(
     const LogicalType &base_type, const LogicalType &incoming_type,
     std::string_view source_path, std::vector<DriftEvent> &drifts,
@@ -226,6 +238,8 @@ std::optional<LogicalType> merge_struct_with_wrapped_scalar(
   return out;
 }
 
+/// Merges incoming fields into canonical fields and records every durable
+/// drift.
 std::vector<LogicalField>
 merge_fields(const std::vector<LogicalField> &base_fields,
              const std::vector<LogicalField> &incoming_fields,
@@ -337,6 +351,8 @@ merge_fields(const std::vector<LogicalField> &base_fields,
   return out;
 }
 
+/// Recursively promotes compatible types while preserving incompatible
+/// variants.
 std::optional<LogicalType>
 merge_types(const LogicalType &base_type, const LogicalType &incoming_type,
             std::string_view source_path, std::vector<DriftEvent> &drifts,

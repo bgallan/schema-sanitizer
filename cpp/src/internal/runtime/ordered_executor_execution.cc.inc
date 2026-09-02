@@ -1,3 +1,9 @@
+// Executes one ordered packet under cooperative cancellation. Exceptions
+// become status-bearing outcomes without disrupting the packet's
+// ordinal position.
+
+/// Executes one packet and converts cancellation or exceptions into its
+/// outcome.
 Outcome execute_packet(Packet &&packet, std::size_t worker_index,
                        sanitize::internal::StopToken stop) noexcept {
   const auto ordinal = packet.ordinal;

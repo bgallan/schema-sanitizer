@@ -1,4 +1,6 @@
-// Declares the native Arrow direct ingestion schema model.
+// Declares the native Arrow direct ingestion schema model. These routines keep
+// Arrow schema interpretation and buffer ownership explicit at the ABI
+// boundary.
 
 #pragma once
 

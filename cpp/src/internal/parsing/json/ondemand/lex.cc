@@ -1,4 +1,6 @@
 // Implements lexical JSON cursor scanning primitives.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/json/ondemand/scan.hh"
 
@@ -14,27 +16,27 @@ namespace sanitize::internal::json_scan {
 
 namespace {
 
-// Returns whether a character is an ASCII decimal digit.
+/// Returns whether a character is an ASCII decimal digit.
 bool is_digit(char ch) { return ch >= '0' && ch <= '9'; }
 
-// Builds a JSON parse error at the cursor.
+/// Builds a JSON parse error at the cursor.
 sanitize::Status parse_error_at(const Cursor &c, std::string_view message) {
   return sanitize::Status::Invalid(message, std::to_string(c.offset()));
 }
 
-// Consumes a contiguous ASCII digit run.
+/// Consumes a contiguous ASCII digit run.
 void consume_digits(Cursor &c) {
   while (c.p < c.end && is_digit(*c.p))
     ++c.p;
 }
 
-// Consumes the optional sign before a JSON number.
+/// Consumes the optional sign before a JSON number.
 void consume_optional_minus(Cursor &c) {
   if (c.p < c.end && *c.p == '-')
     ++c.p;
 }
 
-// Consumes the required integer part of a JSON number.
+/// Consumes the required integer part of a JSON number.
 sanitize::Status consume_integer_part(Cursor &c) {
   if (c.p >= c.end) {
     return parse_error_at(c, "JSON parse error: invalid number at byte ");
@@ -50,7 +52,7 @@ sanitize::Status consume_integer_part(Cursor &c) {
   return parse_error_at(c, "JSON parse error: invalid number at byte ");
 }
 
-// Consumes an optional fractional part of a JSON number.
+/// Consumes an optional fractional part of a JSON number.
 sanitize::Status consume_fraction_part(Cursor &c) {
   if (c.p >= c.end || *c.p != '.') {
     return sanitize::Status::OK();
@@ -63,7 +65,7 @@ sanitize::Status consume_fraction_part(Cursor &c) {
   return sanitize::Status::OK();
 }
 
-// Consumes an optional exponent part of a JSON number.
+/// Consumes an optional exponent part of a JSON number.
 sanitize::Status consume_exponent_part(Cursor &c) {
   if (c.p >= c.end || (*c.p != 'e' && *c.p != 'E')) {
     return sanitize::Status::OK();

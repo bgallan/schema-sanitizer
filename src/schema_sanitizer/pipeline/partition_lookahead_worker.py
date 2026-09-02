@@ -1,4 +1,8 @@
-"""Bounded daemon worker used by partition source lookahead."""
+"""Bounded daemon worker used by partition source lookahead.
+
+Its one-slot queue and single governed daemon provide speculative preparation with bounded
+backlog, fork rejection, and deadline-aware shutdown.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +26,7 @@ from ..core_impl.fork_safety import ensure_runtime_fork_safe
 from ..core_impl.governed_thread import (
     reap_governed_thread_retirements,
     retire_governed_runtime_thread,
-    start_governed_runtime_thread,
+    start_governed_thread,
 )
 from ..core_impl.process_resources import acquire_project_threads
 from ..core_impl.retry_scheduler import adopt_failed_release
@@ -72,7 +76,7 @@ class ThreadPoolExecutor:
                 daemon=True,
             )
             registration = self._runtime_registration
-            start_governed_runtime_thread(registration, self._thread)
+            start_governed_thread(self._thread, registration=registration)
             started = True
         except BaseException as exc:
             if not started:
@@ -110,6 +114,7 @@ class ThreadPoolExecutor:
             raise
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this thread pool executor."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -145,7 +150,7 @@ class ThreadPoolExecutor:
         wait: bool = True,
         cancel_futures: bool = False,
     ) -> None:
-        """Close admission while preserving the historical executor API."""
+        """Close worker admission and optionally wait for queued work."""
         deadline = 5.0 if wait else 0.0
         self._close(
             deadline_seconds=deadline,
@@ -165,6 +170,7 @@ class ThreadPoolExecutor:
         deadline_seconds: float,
         cancel_futures: bool,
     ) -> bool:
+        """Close this thread pool executor and release its retained resources."""
         if os.getpid() != getattr(self, "_pid", os.getpid()):
             return False
         ensure_runtime_fork_safe()

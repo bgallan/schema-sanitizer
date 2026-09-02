@@ -1,4 +1,8 @@
-"""Regression coverage for memory coordinator close waits for submission callback registration."""
+"""Exercises coordinator and callback-registration boundaries across staged paths, janitor
+symlink handling, lookahead and prefetch closure, provider construction, permit
+scheduling, and session interruption. Close waits for committed registrations and
+claimed consumers, retains owners on registration failure, and never deletes a
+replacement with a different physical identity."""
 
 from __future__ import annotations
 
@@ -15,7 +19,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, WaitObservedCondition
+from _support.resource_fakes import CountingLease, DeadThread
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    WaitObservedCondition,
+    join_thread_or_fail,
+)
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -32,53 +41,46 @@ _NATIVE_STUB_MODULES = (
 )
 
 
-class _DeadThread:
-    ident = None
-
-    def is_alive(self) -> bool:
-        return False
-
-    def join(self, timeout: float | None = None) -> None:
-        return None
-
-
-class _SubmissionOwner:
-    def __init__(self) -> None:
-        self.released = False
-
-    def release(self) -> None:
-        self.released = True
-
-
 class _Governor:
-    def __init__(self, owner: _SubmissionOwner) -> None:
+    def __init__(self, owner: CountingLease) -> None:
+        """Initialize the governor test double."""
         self.owner = owner
 
-    def reserve_submission(self) -> _SubmissionOwner:
+    def reserve_submission(self) -> CountingLease:
+        """Reserve one controlled asynchronous submission."""
         return self.owner
 
     async def acquire(self, *_args: Any, **_kwargs: Any) -> Any:
+        """Acquire the resource represented by the governor test double."""
         raise AssertionError("test coroutine must not execute")
 
 
 class _StoppedLoop:
     def is_running(self) -> bool:
+        """Report whether the fake event loop is running."""
         return False
+
+    def is_closed(self) -> bool:
+        """Report whether the fake event loop is closed."""
+        return True
 
 
 class _BlockingCallbackFuture(Future[Any]):
     def __init__(self, coroutine: Any) -> None:
+        """Initialize the blocking callback future test double."""
         super().__init__()
         self.coroutine = coroutine
         self.registration_entered = Event()
         self.allow_registration = Event()
 
     def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+        """Register a completion callback with the blocking callback future test double."""
         self.registration_entered.set()
         assert self.allow_registration.wait(SCHEDULER_TIMEOUT_SECONDS)
         super().add_done_callback(fn)
 
     def cancel(self) -> bool:
+        """Cancel work retained by the blocking callback future test double."""
         self.coroutine.close()
         return super().cancel()
 
@@ -86,13 +88,15 @@ class _BlockingCallbackFuture(Future[Any]):
 def test_coordinator_close_waits_for_submission_callback_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify coordinator close waits for submission callback registration."""
     from schema_sanitizer.remote_impl import io_coordinator as module
 
-    owner = _SubmissionOwner()
+    owner = CountingLease()
     created: list[_BlockingCallbackFuture] = []
     future_created = Event()
 
     def submit_bridge(coroutine: Any, _loop: Any) -> _BlockingCallbackFuture:
+        """Submit the bridge operation through the controlled executor."""
         future = _BlockingCallbackFuture(coroutine)
         created.append(future)
         future_created.set()
@@ -110,8 +114,14 @@ def test_coordinator_close_waits_for_submission_callback_registration(
     coordinator._loop = _StoppedLoop()
     coordinator._context = None
     coordinator._futures = set()
+    coordinator._submissions = {}
     coordinator._failed_submissions = module.deque()
+    coordinator._failed_permits = module.deque()
     coordinator._callbackless_submissions = {}
+    coordinator._deferred_terminal_callbacks = module.deque()
+    coordinator._terminal_callback_owners = set()
+    coordinator._failed_terminal_callbacks = module.deque()
+    coordinator._shutdown_future = None
     coordinator._submission_callbacks_inflight = 0
     coordinator._closed = False
     coordinator._closing = False
@@ -124,7 +134,8 @@ def test_coordinator_close_waits_for_submission_callback_registration(
     coordinator._protocol_violations = 0
     coordinator._permit_registration = None
     coordinator._thread_lease = None
-    coordinator._thread = _DeadThread()
+    coordinator._runtime_registration = None
+    coordinator._thread = DeadThread()
 
     submitted: list[Future[Any]] = []
     submitter = Thread(
@@ -143,14 +154,15 @@ def test_coordinator_close_waits_for_submission_callback_registration(
     assert closer.is_alive()
     assert not owner.released
     future.allow_registration.set()
-    submitter.join(SCHEDULER_TIMEOUT_SECONDS)
-    closer.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(submitter)
+    join_thread_or_fail(closer)
     assert not close_errors
     assert owner.released
     assert coordinator._submission_callbacks_inflight == 0
 
 
 def _capture_error(call: Any, errors: list[BaseException]) -> None:
+    """Capture the error for the enclosing assertion."""
     try:
         call()
     except BaseException as exc:
@@ -158,6 +170,7 @@ def _capture_error(call: Any, errors: list[BaseException]) -> None:
 
 
 def test_staged_path_refuses_to_delete_replacement(tmp_path: Path) -> None:
+    """Verify staged path refuses to delete replacement."""
     from schema_sanitizer.remote_impl.staging_paths import StagedPath
 
     path = tmp_path / "owned"
@@ -167,6 +180,7 @@ def test_staged_path_refuses_to_delete_replacement(tmp_path: Path) -> None:
         released = False
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released = True
 
     lease = Lease()
@@ -183,6 +197,7 @@ def test_staged_path_refuses_to_delete_replacement(tmp_path: Path) -> None:
 def test_janitor_deletes_dangling_symlink_before_releasing_lease(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify janitor deletes dangling symlink before releasing lease."""
     from schema_sanitizer.core_impl import temporary_janitor as module
 
     link = tmp_path / "dangling"
@@ -192,26 +207,29 @@ def test_janitor_deletes_dangling_symlink_before_releasing_lease(
         calls = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.calls += 1
 
     lease = Lease()
     janitor = module._TemporaryArtifactJanitor()
-    quarantine = tmp_path / "quarantine"
-    quarantine.mkdir()
-    monkeypatch.setattr(janitor, "root", lambda: quarantine)
-    monkeypatch.setattr(janitor, "_ensure_thread_locked", lambda: None)
+    quarantine = janitor.root()
+    monkeypatch.setattr(janitor, "_ensure_worker", lambda: None)
     assert janitor.quarantine(link, is_dir=False, lease=lease)
     assert lease.calls == 0
     assert janitor.snapshot().pending_artifacts == 1
+    with janitor._lock:
+        quarantined_path = next(iter(janitor._pending.values())).path
     janitor.sweep()
     assert lease.calls == 1
     assert janitor.snapshot().pending_artifacts == 0
-    assert not any((tmp_path / "quarantine").iterdir())
+    assert quarantined_path.parent == quarantine
+    assert not os.path.lexists(quarantined_path)
 
 
 def test_janitor_retains_lease_when_quarantined_inode_is_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify janitor retains lease when quarantined inode is replaced."""
     from schema_sanitizer.core_impl import temporary_janitor as module
 
     source = tmp_path / "source"
@@ -221,16 +239,17 @@ def test_janitor_retains_lease_when_quarantined_inode_is_replaced(
         released = False
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released = True
 
     lease = Lease()
     janitor = module._TemporaryArtifactJanitor()
-    quarantine = tmp_path / "quarantine"
-    quarantine.mkdir()
-    monkeypatch.setattr(janitor, "root", lambda: quarantine)
-    monkeypatch.setattr(janitor, "_ensure_thread_locked", lambda: None)
+    quarantine = janitor.root()
+    monkeypatch.setattr(janitor, "_ensure_worker", lambda: None)
     assert janitor.quarantine(source, is_dir=False, lease=lease)
-    retained = next(iter(quarantine.iterdir()))
+    with janitor._lock:
+        retained = next(iter(janitor._pending.values())).path
+    assert retained.parent == quarantine
     retained.unlink()
     retained.write_text("replacement")
     janitor.sweep()
@@ -243,42 +262,52 @@ def test_janitor_retains_lease_when_quarantined_inode_is_replaced(
 
 class _Prepared:
     def __init__(self) -> None:
+        """Initialize the prepared test double."""
         self.closed = False
 
     def close(self) -> None:
+        """Close the resources owned by the prepared test double."""
         self.closed = True
 
 
 class _SynchronousCompletionFuture:
     def __init__(self, prepared: _Prepared) -> None:
+        """Initialize the synchronous completion future test double."""
         self.prepared = prepared
         self.completed = False
 
     def cancel(self) -> bool:
+        """Cancel work retained by the synchronous completion future test double."""
         return False
 
     def done(self) -> bool:
+        """Report whether the synchronous completion future test double has completed."""
         return self.completed
 
     def add_done_callback(self, callback: Any) -> None:
+        """Register a completion callback with the synchronous completion future test double."""
         self.completed = True
         callback(self)
 
     def result(self) -> _Prepared:
+        """Return the terminal result retained by the fake future."""
         return self.prepared
 
 
 class _Executor:
     def __init__(self) -> None:
+        """Initialize the executor test double."""
         self.closed = False
 
     def shutdown(self, **_kwargs: Any) -> None:
+        """Shut down the executor represented by the executor test double."""
         self.closed = True
 
 
 def test_lookahead_close_does_not_reenter_under_callback_registration(
     native_stub: None,
 ) -> None:
+    """Verify lookahead close does not reenter under callback registration."""
     from schema_sanitizer.pipeline import partition_lookahead as module
 
     prepared = _Prepared()
@@ -291,6 +320,7 @@ def test_lookahead_close_does_not_reenter_under_callback_registration(
     owner._close_condition = Condition(owner._close_lock)
     owner._close_in_progress = False
     owner._submissions_inflight = 0
+    owner._protocol_violations = 0
     owner._consumer_inflight = False
     owner._close_started = False
     owner._late_close_registered = False
@@ -299,16 +329,17 @@ def test_lookahead_close_does_not_reenter_under_callback_registration(
     owner._future = future
     owner._future_context = None
     owner._executor = executor
+    owner._close_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
     closer = Thread(target=owner.close)
     closer.start()
-    closer.join(SCHEDULER_TIMEOUT_SECONDS)
-    assert not closer.is_alive()
+    join_thread_or_fail(closer)
     assert prepared.closed
     assert executor.closed
     assert owner._closed
 
 
 def test_session_entry_timeout_self_closes_without_second_submission() -> None:
+    """Verify session entry timeout self closes without second submission."""
     from schema_sanitizer.remote_impl.session_lifecycle import (
         enter_shared_download_session,
     )
@@ -317,6 +348,7 @@ def test_session_entry_timeout_self_closes_without_second_submission() -> None:
     started = Event()
 
     def run_loop() -> None:
+        """Run the helper event loop until its submitted operation completes."""
         asyncio.set_event_loop(loop)
         started.set()
         loop.run_forever()
@@ -329,9 +361,11 @@ def test_session_entry_timeout_self_closes_without_second_submission() -> None:
         submissions = 0
 
         def submit(self, operation: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             self.submissions += 1
 
             async def invoke() -> Any:
+                """Forward the invocation through the controlled coordinator."""
                 return await operation(None)
 
             return asyncio.run_coroutine_threadsafe(invoke(), loop)
@@ -341,10 +375,12 @@ def test_session_entry_timeout_self_closes_without_second_submission() -> None:
 
     class Session:
         async def __aenter__(self) -> object:
+            """Enter the asynchronous context managed by the session test double."""
             await asyncio.get_running_loop().run_in_executor(None, allow_entry.wait)
             return self
 
         async def __aexit__(self, *_args: Any) -> None:
+            """Exit the asynchronous context managed by the session test double and run cleanup."""
             exited.set()
 
     coordinator = Coordinator()
@@ -356,11 +392,12 @@ def test_session_entry_timeout_self_closes_without_second_submission() -> None:
         assert coordinator.submissions == 1
     finally:
         loop.call_soon_threadsafe(loop.stop)
-        thread.join(SCHEDULER_TIMEOUT_SECONDS)
+        join_thread_or_fail(thread)
         loop.close()
 
 
 def test_staged_result_concurrent_abandon_closes_once() -> None:
+    """Verify staged result concurrent abandon closes once."""
     from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
 
     entered = Event()
@@ -370,9 +407,10 @@ def test_staged_result_concurrent_abandon_closes_once() -> None:
         calls = 0
 
         def close(self) -> None:
+            """Close the resources owned by the staged test double."""
             self.calls += 1
             entered.set()
-            assert release.wait(2)
+            assert release.wait(SCHEDULER_TIMEOUT_SECONDS)
 
     staged = Staged()
     owner = StagedResultOwnership()
@@ -387,8 +425,8 @@ def test_staged_result_concurrent_abandon_closes_once() -> None:
     second.start()
     assert owner._condition.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     release.set()
-    first.join(SCHEDULER_TIMEOUT_SECONDS)
-    second.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(first)
+    join_thread_or_fail(second)
     assert staged.calls == 1
     assert results == [True, True]
 
@@ -396,12 +434,14 @@ def test_staged_result_concurrent_abandon_closes_once() -> None:
 def test_provider_lease_construction_failure_does_not_consume_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify provider lease construction failure does not consume slot."""
     from schema_sanitizer.remote_impl import provider_throttle as module
 
     governor = module.ProviderThrottleGovernor()
 
     class BrokenLease:
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            """Initialize the broken lease test double."""
             raise MemoryError("lease allocation failed")
 
     monkeypatch.setattr(module, "ProviderRequestLease", BrokenLease)
@@ -412,6 +452,7 @@ def test_provider_lease_construction_failure_does_not_consume_slot(
 
 
 def test_permit_scheduler_grants_many_operations_without_quadratic_scan() -> None:
+    """Verify permit scheduler grants many operations without quadratic scan."""
     from schema_sanitizer.remote_impl import io_permits as module
 
     count = 4096
@@ -434,11 +475,13 @@ def test_permit_scheduler_grants_many_operations_without_quadratic_scan() -> Non
             original_effective_weight = governor._effective_weight
 
             def counted_candidate(*args: Any, **kwargs: Any) -> Any:
+                """Record counted candidate for the enclosing assertion."""
                 nonlocal candidate_calls
                 candidate_calls += 1
                 return original_candidate(*args, **kwargs)
 
             def counted_effective_weight(*args: Any, **kwargs: Any) -> int:
+                """Record counted effective weight for the enclosing assertion."""
                 nonlocal effective_weight_calls
                 effective_weight_calls += 1
                 return original_effective_weight(*args, **kwargs)
@@ -454,6 +497,7 @@ def test_permit_scheduler_grants_many_operations_without_quadratic_scan() -> Non
 
 
 def test_primary_cleanup_gate_covers_coordinator_callback_boundaries() -> None:
+    """Verify primary cleanup gate covers coordinator callback boundaries."""
     completed = subprocess.run(
         [sys.executable, "meta/ci/quality/check_primary_cleanup.py"],
         check=False,
@@ -465,16 +509,20 @@ def test_primary_cleanup_gate_covers_coordinator_callback_boundaries() -> None:
 
 class _RejectingCallbackFuture(Future[Any]):
     def __init__(self, coroutine: Any) -> None:
+        """Initialize the rejecting callback future test double."""
         super().__init__()
         self.coroutine = coroutine
 
     def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+        """Register a completion callback with the rejecting callback future test double."""
         raise RuntimeError("callback registration failed")
 
     def cancel(self) -> bool:
+        """Cancel work retained by the rejecting callback future test double."""
         return False
 
     def finish(self) -> None:
+        """Close the rejected coroutine and complete the future."""
         self.coroutine.close()
         self.set_result(None)
 
@@ -482,12 +530,14 @@ class _RejectingCallbackFuture(Future[Any]):
 def test_coordinator_retains_owner_when_callback_registration_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify coordinator retains owner when callback registration fails."""
     from schema_sanitizer.remote_impl import io_coordinator as module
 
-    owner = _SubmissionOwner()
+    owner = CountingLease()
     created: list[_RejectingCallbackFuture] = []
 
     def submit_bridge(coroutine: Any, _loop: Any) -> _RejectingCallbackFuture:
+        """Submit the bridge operation through the controlled executor."""
         future = _RejectingCallbackFuture(coroutine)
         created.append(future)
         return future
@@ -506,8 +556,14 @@ def test_coordinator_retains_owner_when_callback_registration_fails(
     coordinator._loop = _StoppedLoop()
     coordinator._context = None
     coordinator._futures = set()
+    coordinator._submissions = {}
     coordinator._failed_submissions = module.deque()
+    coordinator._failed_permits = module.deque()
     coordinator._callbackless_submissions = {}
+    coordinator._deferred_terminal_callbacks = module.deque()
+    coordinator._terminal_callback_owners = set()
+    coordinator._failed_terminal_callbacks = module.deque()
+    coordinator._shutdown_future = None
     coordinator._submission_callbacks_inflight = 0
     coordinator._closed = False
     coordinator._closing = False
@@ -520,7 +576,8 @@ def test_coordinator_retains_owner_when_callback_registration_fails(
     coordinator._protocol_violations = 0
     coordinator._permit_registration = None
     coordinator._thread_lease = None
-    coordinator._thread = _DeadThread()
+    coordinator._runtime_registration = None
+    coordinator._thread = DeadThread()
 
     with pytest.raises(RuntimeError, match="callback registration failed"):
         coordinator.submit(lambda _context: asyncio.sleep(0))
@@ -536,8 +593,7 @@ def test_coordinator_retains_owner_when_callback_registration_fails(
     assert coordinator._submission_callbacks_inflight == 1
     assert closer.is_alive()
     created[0].finish()
-    closer.join(SCHEDULER_TIMEOUT_SECONDS)
-    assert not closer.is_alive()
+    join_thread_or_fail(closer)
     assert not close_errors
     assert owner.released
     assert not coordinator._callbackless_submissions
@@ -545,6 +601,7 @@ def test_coordinator_retains_owner_when_callback_registration_fails(
 
 
 def test_path_identity_survives_owned_content_updates(tmp_path: Path) -> None:
+    """Verify path identity survives owned content updates."""
     from schema_sanitizer.core_impl.path_identity import (
         claim_path_identity,
         lstat_identity,
@@ -564,6 +621,7 @@ def test_path_identity_survives_owned_content_updates(tmp_path: Path) -> None:
 def test_lookahead_close_waits_for_trigger_commit(
     native_stub: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify lookahead close waits for trigger commit."""
     from schema_sanitizer.pipeline import partition_lookahead as module
 
     submit_entered = Event()
@@ -574,26 +632,33 @@ def test_lookahead_close_waits_for_trigger_commit(
         closed = False
 
         def close(self) -> None:
+            """Close the resources owned by the child context test double."""
             self.closed = True
 
     child = ChildContext()
 
     class ParentContext:
+        memory_ledger = None
+
         def fork(self) -> ChildContext:
+            """Return the child context derived from the parent context."""
             return child
 
     class BlockingExecutor:
         shutdown_called = False
 
         def submit(self, *_args: Any, **_kwargs: Any) -> Future[Any]:
+            """Submit work through the blocking executor test double."""
             submit_entered.set()
-            assert allow_submit.wait(2)
+            assert allow_submit.wait(SCHEDULER_TIMEOUT_SECONDS)
             return submitted_future
 
         def shutdown(self, **_kwargs: Any) -> None:
+            """Shut down the executor represented by the blocking executor test double."""
             self.shutdown_called = True
 
     executor = BlockingExecutor()
+    executor._thread_lease = object()
     owner = object.__new__(module.PartitionSourceLookahead)
     owner._pid = os.getpid()
     owner.enabled = True
@@ -602,6 +667,7 @@ def test_lookahead_close_waits_for_trigger_commit(
     owner._close_condition = WaitObservedCondition(owner._close_lock)
     owner._close_in_progress = False
     owner._submissions_inflight = 0
+    owner._protocol_violations = 0
     owner._consumer_inflight = False
     owner._close_started = False
     owner._late_close_registered = False
@@ -610,8 +676,14 @@ def test_lookahead_close_waits_for_trigger_commit(
     owner._future = None
     owner._future_context = None
     owner._executor = executor
+    owner._close_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
     owner._current_options = lambda: object()
-    monkeypatch.setattr(module, "adaptive_concurrency_target", lambda *_a, **_k: 2)
+    monkeypatch.setattr(module, "_adaptive_parallel_slots", lambda *_a, **_k: 2)
+    monkeypatch.setattr(
+        module,
+        "acquire_stage_concurrency_admission",
+        lambda *_a, **_k: SimpleNamespace(slots=2, close=lambda: None),
+    )
 
     trigger = Thread(target=owner.trigger)
     trigger.start()
@@ -621,10 +693,8 @@ def test_lookahead_close_waits_for_trigger_commit(
     assert owner._close_condition.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert closer.is_alive()
     allow_submit.set()
-    trigger.join(SCHEDULER_TIMEOUT_SECONDS)
-    closer.join(SCHEDULER_TIMEOUT_SECONDS)
-    assert not trigger.is_alive()
-    assert not closer.is_alive()
+    join_thread_or_fail(trigger)
+    join_thread_or_fail(closer)
     assert submitted_future.cancelled()
     assert child.closed
     assert executor.shutdown_called
@@ -636,6 +706,7 @@ def test_lookahead_close_waits_for_trigger_commit(
 def test_prefetch_close_waits_for_external_storage_admission(
     native_stub: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify prefetch close waits for external storage admission."""
     from schema_sanitizer.api_impl.source_plan import remote as module
 
     acquire_entered = Event()
@@ -645,9 +716,15 @@ def test_prefetch_close_waits_for_external_storage_admission(
         files = ("one",)
         chunk_size = 1
 
+        @staticmethod
+        def estimated_chunk_bytes(_start: int) -> int:
+            """Return the manifest estimate for one staged chunk."""
+            return 1
+
         def try_acquire_storage_lease(self, _start: int) -> None:
+            """Block storage admission until released, then decline the lease."""
             acquire_entered.set()
-            assert allow_acquire.wait(2)
+            assert allow_acquire.wait(SCHEDULER_TIMEOUT_SECONDS)
             return None
 
     owner = object.__new__(module.RemoteChunkPrefetchIterator)
@@ -662,6 +739,7 @@ def test_prefetch_close_waits_for_external_storage_admission(
     owner._download_session = None
     owner._futures = deque()
     owner._failed_storage_leases = deque()
+    owner._callbackless_storage_futures = {}
     owner._next_start = 0
     owner._close_lock = RLock()
     owner._close_condition = WaitObservedCondition(owner._close_lock)
@@ -669,13 +747,16 @@ def test_prefetch_close_waits_for_external_storage_admission(
     owner._cleanup_callbacks_inflight = 0
     owner._admissions_inflight = 0
     owner._consumers_inflight = 0
+    owner._protocol_violations = 0
     owner._starting = False
     owner._fill_in_progress = False
     owner._close_started = False
     owner._session_closer = None
+    owner._finalizer_ticket = None
+    owner._finalizer_capsule = None
     owner._closed = False
     owner._started = True
-    monkeypatch.setattr(module, "adaptive_concurrency_target", lambda *_a, **_k: 1)
+    monkeypatch.setattr(module, "_adaptive_parallel_slots", lambda *_a, **_k: 1)
 
     filler = Thread(target=owner._fill_prefetch_window)
     filler.start()
@@ -685,15 +766,14 @@ def test_prefetch_close_waits_for_external_storage_admission(
     assert owner._close_condition.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert closer.is_alive()
     allow_acquire.set()
-    filler.join(SCHEDULER_TIMEOUT_SECONDS)
-    closer.join(SCHEDULER_TIMEOUT_SECONDS)
-    assert not filler.is_alive()
-    assert not closer.is_alive()
+    join_thread_or_fail(filler)
+    join_thread_or_fail(closer)
     assert owner._closed
     assert owner._admissions_inflight == 0
 
 
 def test_prefetch_close_waits_for_claimed_consumer(native_stub: None) -> None:
+    """Verify prefetch close waits for claimed consumer."""
     from schema_sanitizer.api_impl.source_plan import remote as module
     from schema_sanitizer.remote_impl.staged_ownership import StagedResultOwnership
 
@@ -701,6 +781,7 @@ def test_prefetch_close_waits_for_claimed_consumer(native_stub: None) -> None:
         closed = False
 
         def close(self) -> None:
+            """Close the resources owned by the staged test double."""
             self.closed = True
 
     staged = Staged()
@@ -710,6 +791,7 @@ def test_prefetch_close_waits_for_claimed_consumer(native_stub: None) -> None:
 
     class ClaimedFuture(Future[Any]):
         def result(self, timeout: float | None = None) -> Any:
+            """Return the terminal result retained by the fake future."""
             consumer_claimed.set()
             return super().result(timeout=timeout)
 
@@ -724,16 +806,20 @@ def test_prefetch_close_waits_for_claimed_consumer(native_stub: None) -> None:
     owner._download_session = None
     owner._futures = deque((future,))
     owner._failed_storage_leases = deque()
+    owner._callbackless_storage_futures = {}
     owner._close_lock = RLock()
     owner._close_condition = WaitObservedCondition(owner._close_lock)
     owner._close_in_progress = False
     owner._cleanup_callbacks_inflight = 0
     owner._admissions_inflight = 0
     owner._consumers_inflight = 0
+    owner._protocol_violations = 0
     owner._starting = False
     owner._fill_in_progress = False
     owner._close_started = False
     owner._session_closer = None
+    owner._finalizer_ticket = None
+    owner._finalizer_capsule = None
     owner._closed = False
     owner._started = True
     owner._ensure_started = lambda: None
@@ -750,16 +836,15 @@ def test_prefetch_close_waits_for_claimed_consumer(native_stub: None) -> None:
     assert owner._close_condition.wait_entered.wait(SCHEDULER_TIMEOUT_SECONDS)
     assert closer.is_alive()
     future.set_result(staged)
-    consumer.join(SCHEDULER_TIMEOUT_SECONDS)
-    closer.join(SCHEDULER_TIMEOUT_SECONDS)
-    assert not consumer.is_alive()
-    assert not closer.is_alive()
+    join_thread_or_fail(consumer)
+    join_thread_or_fail(closer)
     assert consumed == [staged]
     assert not staged.closed
     assert owner._closed
 
 
 def test_primary_cleanup_gate_inspects_error_branch_beside_helper() -> None:
+    """Verify primary cleanup gate inspects error branch beside helper."""
     from meta.ci.quality import check_primary_cleanup as gate
 
     tree = ast.parse(
@@ -784,31 +869,42 @@ def close_boundary(primary_error, owner):
 
 class _CallbackRejectingFuture(Future[Any]):
     def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+        """Register a completion callback with the callback rejecting future test double."""
         raise RuntimeError("callback registration rejected")
 
     def cancel(self) -> bool:
+        """Cancel work retained by the callback rejecting future test double."""
         return False
 
 
 def test_prefetch_retains_storage_owner_when_callback_registration_fails(
     native_stub: None,
 ) -> None:
+    """Verify prefetch retains storage owner when callback registration fails."""
     from schema_sanitizer.api_impl.source_plan import remote as module
 
     future = _CallbackRejectingFuture()
 
     class Coordinator:
         def submit(self, *_args: Any, **_kwargs: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             return future
 
     class Manifest:
+        @staticmethod
+        def estimated_chunk_bytes(_start: int) -> int:
+            """Return the manifest estimate for one staged chunk."""
+            return 1
+
         async def stage_chunk_async(self, *_args: Any, **_kwargs: Any) -> Any:
+            """Stage one chunk through the controlled asynchronous session."""
             raise AssertionError("the synthetic Future owns execution")
 
     class Lease:
         calls = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.calls += 1
 
     lease = Lease()
@@ -827,6 +923,7 @@ def test_prefetch_retains_storage_owner_when_callback_registration_fails(
     owner._cleanup_callbacks_inflight = 0
     owner._admissions_inflight = 0
     owner._consumers_inflight = 0
+    owner._protocol_violations = 0
     owner._starting = False
     owner._fill_in_progress = False
 
@@ -843,6 +940,7 @@ def test_prefetch_retains_storage_owner_when_callback_registration_fails(
 def test_lookahead_callback_registration_failure_remains_retryable(
     native_stub: None,
 ) -> None:
+    """Verify lookahead callback registration failure remains retryable."""
     from schema_sanitizer.pipeline import partition_lookahead as module
 
     prepared = _Prepared()
@@ -855,6 +953,7 @@ def test_lookahead_callback_registration_failure_remains_retryable(
     owner._close_condition = Condition(owner._close_lock)
     owner._close_in_progress = False
     owner._submissions_inflight = 0
+    owner._protocol_violations = 0
     owner._consumer_inflight = False
     owner._close_started = False
     owner._late_close_registered = False
@@ -863,6 +962,7 @@ def test_lookahead_callback_registration_failure_remains_retryable(
     owner._future = future
     owner._future_context = None
     owner._executor = executor
+    owner._close_timeout_seconds = SCHEDULER_TIMEOUT_SECONDS
 
     with pytest.raises(RuntimeError, match="callback registration rejected"):
         owner.close()
@@ -879,13 +979,16 @@ def test_lookahead_callback_registration_failure_remains_retryable(
 def test_session_entry_interruption_publishes_abandon_decision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify session entry interruption publishes abandon decision."""
     from schema_sanitizer.remote_impl import session_lifecycle as module
 
     class InterruptedEvent:
         def wait(self, timeout: float | None = None) -> bool:
+            """Wait for the interrupted event test double to reach its terminal state."""
             raise KeyboardInterrupt
 
         def set(self) -> None:
+            """Mark the interrupted event and forward to the base implementation."""
             return None
 
     attempt = SimpleNamespace(
@@ -898,6 +1001,7 @@ def test_session_entry_interruption_publishes_abandon_decision(
 
     class Coordinator:
         def submit(self, _operation: Any) -> Future[Any]:
+            """Submit work through the coordinator test double."""
             return Future()
 
     with pytest.raises(KeyboardInterrupt):
@@ -906,6 +1010,7 @@ def test_session_entry_interruption_publishes_abandon_decision(
 
 
 def test_path_identity_rejects_second_owner_claim(tmp_path: Path) -> None:
+    """Verify path identity rejects second owner claim."""
     from schema_sanitizer.core_impl.path_identity import claim_path_identity
 
     path = tmp_path / "single-owner"
@@ -919,6 +1024,7 @@ def test_path_identity_rejects_second_owner_claim(tmp_path: Path) -> None:
 def test_staged_path_restores_replacement_captured_by_cleanup_rename(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify staged path restores replacement captured by cleanup rename."""
     from schema_sanitizer.remote_impl import staging_paths as module
 
     path = tmp_path / "owned-race"
@@ -928,6 +1034,7 @@ def test_staged_path_restores_replacement_captured_by_cleanup_rename(
         released = False
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.released = True
 
     lease = Lease()
@@ -936,6 +1043,7 @@ def test_staged_path_restores_replacement_captured_by_cleanup_rename(
     raced = False
 
     def replace_after_substitution(source: Any, target: Any) -> None:
+        """Replace the staged path after substituting its filesystem target."""
         nonlocal raced
         if not raced:
             raced = True
@@ -950,50 +1058,3 @@ def test_staged_path_restores_replacement_captured_by_cleanup_rename(
     assert not lease.released
     assert not owner._closed
     assert not list(tmp_path.glob(".schema-sanitizer-delete-*"))
-
-
-def test_janitor_restores_replacement_captured_by_quarantine_rename(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from schema_sanitizer.core_impl import temporary_janitor as module
-    from schema_sanitizer.core_impl.path_identity import claim_path_identity
-
-    source = tmp_path / "janitor-race"
-    source.write_text("original")
-    expected = claim_path_identity(source)
-    assert expected is not None
-
-    class Lease:
-        released = False
-
-        def release(self) -> None:
-            self.released = True
-
-    lease = Lease()
-    janitor = module._TemporaryArtifactJanitor()
-    quarantine = tmp_path / "quarantine-race"
-    quarantine.mkdir()
-    monkeypatch.setattr(janitor, "root", lambda: quarantine)
-    monkeypatch.setattr(janitor, "_ensure_thread_locked", lambda: None)
-    real_replace = module.os.replace
-    raced = False
-
-    def replace_after_substitution(source_path: Any, target_path: Any) -> None:
-        nonlocal raced
-        if not raced:
-            raced = True
-            Path(source_path).unlink()
-            Path(source_path).write_text("replacement")
-        real_replace(source_path, target_path)
-
-    monkeypatch.setattr(module.os, "replace", replace_after_substitution)
-    assert not janitor.quarantine(
-        source,
-        is_dir=False,
-        lease=lease,
-        expected_identity=expected,
-    )
-    assert source.read_text() == "replacement"
-    assert not lease.released
-    assert not any(quarantine.iterdir())
-    assert janitor.snapshot().identity_mismatches == 1

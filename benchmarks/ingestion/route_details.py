@@ -1,56 +1,38 @@
-"""Route-detail helpers for local ingestion benchmarks."""
+"""Supported diagnostic details for local ingestion benchmark results.
+
+It formats the input-plan, Parquet-input, and file-output routes owned by each public
+operation result without consulting mutable process-global observations.
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
 
-def jsonl_route_detail() -> str:
-    """Return JSONL writer route details for benchmark output."""
-    from schema_sanitizer.adapters.pyarrow.jsonl_sink import last_jsonl_stream_route
-
-    route = last_jsonl_stream_route()
-    return f"jsonl_route={route}"
-
-
-def metadata_route_detail() -> str:
-    """Return metadata injection route details for benchmark output."""
-    from schema_sanitizer.adapters.pyarrow.file_metadata import last_metadata_route
-
-    return f"metadata_route={last_metadata_route()}"
-
-
-def csv_nested_route_detail() -> str:
-    """Return CSV nested rendering route details for benchmark output."""
-    from schema_sanitizer.adapters.pyarrow.csv_sink import last_csv_nested_route
-
-    return f"csv_nested_route={last_csv_nested_route()}"
-
-
-def parquet_direct_route_detail() -> str:
-    """Return direct Parquet routing details for benchmark output."""
-    from schema_sanitizer.api_impl.parquet.direct_routes import last_parquet_direct_route
-
-    return f"parquet_direct_route={last_parquet_direct_route()}"
-
-
-def native_directory_route_detail() -> str:
-    """Return native directory routing details for benchmark output."""
-    from schema_sanitizer.input_impl.source_plan import last_native_multisource_route
-
-    return f"native_directory_route={last_native_multisource_route()}"
-
-
-def sink_source_route_detail() -> str:
-    """Return normal native sink source routing details for benchmark output."""
-    from schema_sanitizer.core_impl.execution import last_sink_source_route
-
-    return f"sink_source_route={last_sink_source_route()}"
-
-
 def join_route_details(*details: str | None) -> str:
     """Join non-empty benchmark route details."""
     return " ".join(detail for detail in details if detail)
+
+
+def result_route_details(result: Any) -> str:
+    """Return input and output routes carried by one public operation result."""
+    stats = getattr(result, "stats", None)
+    if not isinstance(stats, dict):
+        return ""
+    return join_route_details(
+        *(
+            f"{key}={value}"
+            for key in (
+                "input_source_route",
+                "input_plan_route",
+                "parquet_input_route",
+                "parquet_input_fallback_reason",
+                "file_output_route",
+                "file_metadata_route",
+            )
+            if isinstance((value := stats.get(key)), str) and value
+        )
+    )
 
 
 def stream_stats_suffix(result: Any) -> str:

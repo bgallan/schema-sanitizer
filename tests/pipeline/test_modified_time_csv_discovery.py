@@ -1,4 +1,8 @@
-"""GCS metadata and generation-safe discovery contracts for CSV window ingestion."""
+"""GCS metadata and generation-safe discovery contracts for CSV window ingestion.
+
+The suite covers timestamp parsing, sync and async listings, generation-pinned
+downloads, deterministic ordering, exact windows, packet plans, and one-listing reuse.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ from schema_sanitizer.input_impl.directory_inputs import (
 )
 from schema_sanitizer.remote_impl import staging
 from schema_sanitizer.remote_impl.providers import gcs, gcs_sync
+from schema_sanitizer.remote_impl.providers.gcs_objects import remote_file_from_metadata
 from schema_sanitizer.remote_impl.sync_http import SyncHttpResult
 from schema_sanitizer.sources import RemoteFile
 
@@ -44,7 +49,7 @@ def test_remote_file_keeps_non_gcs_callers_source_compatible() -> None:
 
 def test_gcs_metadata_parser_normalizes_rfc3339_offsets_to_utc() -> None:
     """GCS timestamps are aware UTC datetimes and all identity fields survive."""
-    file = gcs._remote_file_from_metadata(
+    file = remote_file_from_metadata(
         "bucket",
         _gcs_item(
             "events/a.csv",
@@ -70,7 +75,7 @@ def test_gcs_metadata_parser_rejects_invalid_or_naive_timestamps(value: object) 
     item["updated"] = value  # type: ignore[assignment]
 
     with pytest.raises(ValueError, match="updated"):
-        gcs._remote_file_from_metadata("bucket", item)
+        remote_file_from_metadata("bucket", item)
 
 
 def test_async_bucket_root_listing_requests_metadata_and_sorts_by_identity(
@@ -99,43 +104,43 @@ def test_async_bucket_root_listing_requests_metadata_and_sorts_by_identity(
         status = 200
 
         def __init__(self, payload: dict[str, object]) -> None:
-            """Store one JSON response payload."""
+            """Initialize response state for body, offset, and content."""
             self._body = json.dumps(payload).encode()
             self._offset = 0
             self.content = self
 
         async def __aenter__(self):
-            """Enter the asynchronous response context."""
+            """Return the managed response value from context entry."""
             return self
 
         async def __aexit__(self, *_exc: object) -> bool:
-            """Leave the asynchronous response context."""
+            """Finalize the response context without suppressing exceptions."""
             return False
 
         async def read(self, size: int) -> bytes:
-            """Return at most ``size`` bytes through the bounded reader API."""
+            """Read data from the in-memory transport at its current offset."""
             end = min(len(self._body), self._offset + size)
             chunk = self._body[self._offset : end]
             self._offset = end
             return chunk
 
         def at_eof(self) -> bool:
-            """Report whether the bounded body has been consumed."""
+            """Return whether the in-memory response body has been fully consumed."""
             return self._offset == len(self._body)
 
     class Session:
         """Minimal asynchronous client-session double."""
 
         async def __aenter__(self):
-            """Enter the asynchronous session context."""
+            """Return the managed session value from context entry."""
             return self
 
         async def __aexit__(self, *_exc: object) -> bool:
-            """Leave the asynchronous session context."""
+            """Finalize the session context without suppressing exceptions."""
             return False
 
         def get(self, _url: str, *, params: dict[str, str]):
-            """Return the next paginated response and capture its query."""
+            """Return the configured response for the requested provider object."""
             captured.append(dict(params))
             return Response(pages.pop(0))
 
@@ -179,7 +184,7 @@ def test_sync_metadata_requests_all_gcs_identity_fields(monkeypatch: pytest.Monk
             ).encode(),
         )
 
-    monkeypatch.setattr(gcs_sync, "access_token", lambda: "token")
+    monkeypatch.setattr(gcs, "access_token", lambda: "token")
     monkeypatch.setattr(gcs_sync, "request_bytes", request_bytes)
 
     file = gcs_sync.file_metadata("gcs://bucket/events/a.csv")
@@ -205,7 +210,7 @@ def test_sync_download_pins_generation_and_uses_precondition(
         captured_url = url
 
     monkeypatch.setattr(gcs_sync, "download_to_file", download)
-    monkeypatch.setattr(gcs_sync, "request_headers", lambda **_kwargs: {})
+    monkeypatch.setattr(gcs, "request_headers", lambda **_kwargs: {})
 
     selected = RemoteFile(
         "gs://bucket/events/a.csv",

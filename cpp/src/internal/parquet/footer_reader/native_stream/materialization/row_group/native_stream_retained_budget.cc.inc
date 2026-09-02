@@ -1,5 +1,8 @@
-// Enforces actual retained Arrow buffer capacity for native row windows.
+// Accounts for retained Arrow and decoder capacity and divides scratch
+// allowances among workers. This fragment is included by the consolidated
+// footer reader inside its private implementation namespace.
 
+/// Adds one retained allocation to a checked byte total.
 sanitize::Status add_native_retained_capacity(std::int64_t *total,
                                               std::size_t capacity,
                                               std::size_t element_size,
@@ -15,6 +18,7 @@ sanitize::Status add_native_retained_capacity(std::int64_t *total,
       total, static_cast<std::int64_t>(capacity * element_size), label);
 }
 
+/// Measures recursively retained Arrow buffer capacity with checked arithmetic.
 sanitize::Result<std::int64_t>
 native_array_retained_capacity_bytes(const NativeParquetArrayState &state) {
   std::int64_t total = 0;
@@ -60,6 +64,8 @@ native_array_retained_capacity_bytes(const NativeParquetArrayState &state) {
   return total;
 }
 
+/// Rejects a materialized Arrow array when recursively retained buffer capacity
+/// exceeds its reservation.
 sanitize::Status
 enforce_native_array_retained_budget(const NativeParquetArrayState &state,
                                      std::int64_t limit) {
@@ -74,10 +80,14 @@ enforce_native_array_retained_budget(const NativeParquetArrayState &state,
 }
 
 struct NativeParquetSharedReservationBudget {
+  /// Initializes the shared atomic capacity available to parallel column
+  /// decoders.
   NativeParquetSharedReservationBudget(std::int64_t capacity,
                                        std::int64_t initial)
       : limit(std::max<std::int64_t>(1, capacity)), used(initial) {}
 
+  /// Atomically reserves shared scratch capacity when doing so remains within
+  /// the configured limit.
   [[nodiscard]] bool try_reserve(std::int64_t bytes) noexcept {
     if (bytes < 0 || bytes > limit) {
       return false;
@@ -93,6 +103,7 @@ struct NativeParquetSharedReservationBudget {
     return false;
   }
 
+  /// Decrements shared reserved-byte usage by the supplied positive amount.
   void release(std::int64_t bytes) noexcept {
     if (bytes > 0) {
       used.fetch_sub(bytes, std::memory_order_acq_rel);
@@ -104,18 +115,24 @@ struct NativeParquetSharedReservationBudget {
 };
 
 struct NativeParquetColumnReservation {
+  /// Binds one column decode to its shared scratch and retained-output
+  /// reservations.
   NativeParquetColumnReservation(
       std::shared_ptr<NativeParquetSharedReservationBudget> owner,
       std::int64_t scratch_bytes, std::int64_t output_bytes)
       : budget(std::move(owner)), scratch(scratch_bytes), output(output_bytes) {
   }
 
+  /// Returns uncommitted scratch and retained-output capacity to the shared
+  /// decode budget.
   ~NativeParquetColumnReservation() {
     if (budget) {
       budget->release(scratch + output);
     }
   }
 
+  /// Converts the reservation from scratch capacity to retained decoded-buffer
+  /// capacity.
   void finish_decode() noexcept {
     if (budget && scratch > 0) {
       budget->release(scratch);
@@ -123,6 +140,8 @@ struct NativeParquetColumnReservation {
     }
   }
 
+  /// Commits output only after preparation succeeds, preserving physical output
+  /// order.
   void commit_output() noexcept {
     finish_decode();
     // The committed Arrow buffers remain live in NativeParquetArrayState. Keep
@@ -136,6 +155,8 @@ struct NativeParquetColumnReservation {
   std::int64_t output = 0;
 };
 
+/// Estimates the largest temporary decode footprint among one column's page
+/// spans.
 std::int64_t
 native_parquet_column_scratch_bytes(const ColumnChunkInfo &column) noexcept {
   std::int64_t maximum = 64LL * 1024LL;
@@ -164,6 +185,8 @@ native_parquet_column_scratch_bytes(const ColumnChunkInfo &column) noexcept {
   return maximum;
 }
 
+/// Charges native Parquet column to the active memory budget before allocating
+/// derived storage.
 sanitize::Result<std::shared_ptr<NativeParquetColumnReservation>>
 reserve_native_parquet_column(
     const RowGroupInfo &row_group, const ColumnChunkInfo &column,
@@ -196,6 +219,7 @@ reserve_native_parquet_column(
   }
 }
 
+/// Returns the largest per-column scratch estimate in a row group.
 std::int64_t native_parquet_max_column_scratch_bytes(
     const RowGroupInfo &row_group) noexcept {
   std::int64_t maximum = 64LL * 1024LL;

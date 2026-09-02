@@ -1,4 +1,6 @@
 // Declares built-in frontend registry dispatch entry points.
+// Stable names resolve to CSV, JSON, JSONL, or XML factories without exposing
+// concrete frontend classes to ingestion orchestration.
 
 #pragma once
 
@@ -10,7 +12,7 @@
 
 namespace sanitize {
 
-// Creates a built-in frontend by registry name.
+/// Creates a built-in frontend by registry name.
 FrontendHandle make_builtin_frontend(std::string_view name, ChunkSourcePtr src,
                                      const Options &opts);
 

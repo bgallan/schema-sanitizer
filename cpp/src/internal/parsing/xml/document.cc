@@ -1,4 +1,6 @@
 // Implements XML document parser lifecycle, allocation, and cursor helpers.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/xml/document.hh"
 
@@ -11,6 +13,8 @@
 
 namespace sanitize::internal {
 
+/// Destroys and deallocates an XML node through the same polymorphic resource
+/// that created it.
 void XmlNodeDeleter::operator()(XmlNode *node) const noexcept {
   if (!node) {
     return;

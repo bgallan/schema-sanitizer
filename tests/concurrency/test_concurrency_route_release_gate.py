@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency route release gate."""
+"""Run the concurrency release gate through the real public 8-by-7 format matrix.
+
+Each pair must execute its declared route, Parquet-to-pandas must share the governed PyArrow pool,
+and the global proof still requires orthogonal transport and lifetime profiles.
+"""
 
 from __future__ import annotations
 
@@ -30,6 +34,7 @@ def _require_release_adapters() -> None:
 
 
 def _prepare_sources(root: Path) -> dict[str, tuple[Any, dict[str, Any], int]]:
+    """Prepare the path and Arrow sources used by the release-gate checks."""
     csv_path = root / "input.csv"
     csv_path.write_text("a,b\n1,x\n2,y\n", encoding="utf-8")
 
@@ -41,9 +46,6 @@ def _prepare_sources(root: Path) -> dict[str, tuple[Any, dict[str, Any], int]]:
 
     jsonl_path = root / "input.jsonl"
     jsonl_path.write_text('{"a":1,"b":"x"}\n{"a":2,"b":"y"}\n', encoding="utf-8")
-
-    ndjson_path = root / "input.ndjson"
-    ndjson_path.write_text('{"a":1,"b":"x"}\n{"a":2,"b":"y"}\n', encoding="utf-8")
 
     xml_path = root / "input.xml"
     xml_path.write_text(
@@ -66,7 +68,6 @@ def _prepare_sources(root: Path) -> dict[str, tuple[Any, dict[str, Any], int]]:
         "json": (json_path, {}, 1),
         "json_array": (json_array_path, {}, 2),
         "jsonl": (jsonl_path, {}, 2),
-        "ndjson": (ndjson_path, {}, 2),
         "xml": (xml_path, {"xml_row_tag": "row"}, 2),
         "parquet": (parquet_path, {}, 2),
         # A fresh immutable list is safe to reuse; the public Python-input path
@@ -83,6 +84,7 @@ def _run_pair(
     input_kwargs: dict[str, Any],
     expected_rows: int,
 ) -> None:
+    """Run the input/output pair through the controlled execution path."""
     common: dict[str, Any] = {
         "input_format": input_name,
         "multi_threading": True,
@@ -145,7 +147,7 @@ def test_release_gate_executes_real_public_8x7_format_matrix(tmp_path: Path) -> 
 
     # Transport/lifetime profiles are an orthogonal release dimension and are
     # certified by the strict global gate after their own real integrations run.
-    assert validate_format_pair_release_contracts() == 56
+    assert validate_format_pair_release_contracts() == 49
     evidence = payload_observed_concurrency_pair_guarantees()
     assert all(
         all(count > 0 for count in evidence[input_name][output_name].values())
@@ -190,7 +192,7 @@ def test_global_release_gate_still_requires_orthogonal_route_profiles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The strict release gate cannot silently skip transport/lifetime proof."""
-    monkeypatch.setattr(coverage, "validate_format_pair_release_contracts", lambda: 56)
+    monkeypatch.setattr(coverage, "validate_format_pair_release_contracts", lambda: 49)
 
     def reject_missing_routes() -> int:
         """Represent an incomplete real route-profile integration run."""

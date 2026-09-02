@@ -1,4 +1,8 @@
-"""Tests explicit public input formats, extensions, and directory mode."""
+"""Tests explicit public input formats, extensions, and directory mode.
+
+It verifies native-first Parquet directory plans, lazy child opening, source tracking,
+registry state, and consistent converter keyword contracts.
+"""
 
 from __future__ import annotations
 
@@ -7,14 +11,12 @@ from pathlib import Path
 import pytest
 from _support.public_input_modes import GENERATED_COLUMNS as GENERATED
 from _support.public_input_modes import data_rows as _data_rows
-from conftest import require_native
 
 import schema_sanitizer as ss
 
 
-def test_native_directory_source_plan_is_native_first(tmp_path: Path) -> None:
-    """Verify source plans keep native path-source plans without retaining tuple payloads."""
-    require_native()
+def test_native_directory_source_plan_is_native_first(tmp_path: Path, require_native: None) -> None:
+    """Verify native directory source plan is native first."""
     from schema_sanitizer.api_impl.input.preparation import prepare_public_input
     from schema_sanitizer.api_impl.source_plan.attached import source_plan_from_data
 
@@ -47,7 +49,7 @@ def test_native_directory_source_plan_is_native_first(tmp_path: Path) -> None:
 def test_directory_conversion_uses_self_bootstrapping_native_path_sources(
     tmp_path: Path, monkeypatch, input_format: str
 ) -> None:
-    """Verify directory conversion avoids the old Python registry pre-probe."""
+    """Verify directory conversion uses self bootstrapping native path sources."""
     from schema_sanitizer.api_impl.source_plan import probing as source_plan_probe
 
     folder = tmp_path / input_format
@@ -74,7 +76,7 @@ def test_directory_conversion_uses_self_bootstrapping_native_path_sources(
         expected_ids = ["1", "2"]
 
     def fail_python_probe(*_args, **_kwargs):
-        """Fail when the old Python registry pre-probe path is used."""
+        """Fail when directory conversion performs a redundant Python pre-probe."""
         raise AssertionError("directory conversion should self-bootstrap in native code")
 
     monkeypatch.setattr(
@@ -92,7 +94,7 @@ def test_directory_conversion_uses_self_bootstrapping_native_path_sources(
 
 
 def test_parquet_directory_source_file_tracks_each_child(tmp_path: Path) -> None:
-    """Verify Parquet directory rows carry the child Parquet path."""
+    """Verify Parquet directory source file tracks each child."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     folder = tmp_path / "parquet"
@@ -108,15 +110,14 @@ def test_parquet_directory_source_file_tracks_each_child(tmp_path: Path) -> None
         str((folder / "a.parquet").resolve()),
         str((folder / "b.parquet").resolve()),
     ]
+    assert result.stats["parquet_input_route"] == "native_registry_source_plan"
+    assert result.stats["parquet_input_fallback_reason"] == ""
 
 
 def test_parquet_directory_source_file_is_native_tracked(tmp_path: Path) -> None:
-    """Verify native Parquet directory conversion owns source_file tracking."""
+    """Verify Parquet directory source file is native tracked."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
-    from schema_sanitizer.api_impl.parquet.multisource import (
-        last_parquet_multisource_route,
-    )
 
     folder = tmp_path / "parquet"
     folder.mkdir()
@@ -131,13 +132,12 @@ def test_parquet_directory_source_file_is_native_tracked(tmp_path: Path) -> None
         str((folder / "a.parquet").resolve()),
         str((folder / "b.parquet").resolve()),
     ]
-    assert last_parquet_multisource_route() == "native_arrow_source_chunk_provider_auto_registry"
 
 
 def test_parquet_directory_writer_source_file_does_not_precount_rows(
     tmp_path: Path,
 ) -> None:
-    """Verify Parquet directory file writers use native source_file tracking."""
+    """Verify Parquet directory writer source file does not precount rows."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
 
@@ -159,17 +159,16 @@ def test_parquet_directory_writer_source_file_does_not_precount_rows(
     assert result.stats["inferred_rows"] == 3
     assert result.stats["materialized_rows"] == 3
     assert result.stats["batches"] >= 1
+    assert result.stats["parquet_input_route"] == "native_registry_source_plan"
+    assert result.stats["parquet_input_fallback_reason"] == ""
 
 
 def test_parquet_directory_writer_uses_arrow_source_auto_registry(
     tmp_path: Path,
 ) -> None:
-    """Verify Parquet directory file writers use native Arrow-source auto registry."""
+    """Verify Parquet directory writer uses arrow source auto registry."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
-    from schema_sanitizer.api_impl.parquet.multisource import (
-        last_parquet_multisource_route,
-    )
 
     folder = tmp_path / "parquet-auto-registry"
     folder.mkdir()
@@ -182,7 +181,6 @@ def test_parquet_directory_writer_uses_arrow_source_auto_registry(
     generated = {"schema_registry", "schema_drifts", "source_file", "ingestion_timestamp"}
     rows = pq.read_table(out).to_pylist()
     assert result.schema_registry is not None
-    assert last_parquet_multisource_route() == "native_arrow_source_chunk_provider_auto_registry"
     assert [{key: value for key, value in row.items() if key not in generated} for row in rows] == [
         {"id": 1, "name": None},
         {"id": None, "name": "two"},
@@ -195,7 +193,7 @@ def test_parquet_directory_writer_uses_arrow_source_auto_registry(
 def test_parquet_directory_writer_accepts_previous_native_registry_state(
     tmp_path: Path,
 ) -> None:
-    """Verify Parquet directory writers can start from compiled registry state."""
+    """Verify Parquet directory writer accepts previous native registry state."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.core_impl.schema_registry import native_registry_state_context
@@ -229,7 +227,7 @@ def test_parquet_directory_source_plan_does_not_preopen_factories(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Verify Parquet source planning is lazy and leaves factory opening to execution."""
+    """Verify Parquet directory source plan does not preopen factories."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     import schema_sanitizer.input_impl.source_plan as source_plan_model
@@ -284,7 +282,7 @@ def test_parquet_directory_source_plan_does_not_preopen_factories(
 def test_parquet_arrow_source_chunk_provider_opens_bounded_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify Parquet Arrow-source chunks are opened lazily and closed between chunks."""
+    """Verify Parquet arrow source chunk provider opens bounded chunks."""
     from schema_sanitizer.api_impl.parquet import arrow_sources as parquet_arrow_sources
     from schema_sanitizer.api_impl.parquet.arrow_sources import ParquetArrowSource
 
@@ -295,12 +293,12 @@ def test_parquet_arrow_source_chunk_provider_opens_bounded_chunks(
         """Fake Arrow stream factory with close tracking."""
 
         def __init__(self, path: str) -> None:
-            """Store the source path."""
+            """Initialize factory state for path and schema."""
             self.path = path
             self.schema = object()
 
         def close(self) -> None:
-            """Record factory closure."""
+            """Close the factory and release its retained resources."""
             closed.append(self.path)
 
     def fake_factory_or_none(data, **_kwargs):
@@ -357,7 +355,7 @@ def test_parquet_arrow_source_chunk_provider_opens_bounded_chunks(
 
 
 def test_file_and_analytical_functions_share_keyword_contract() -> None:
-    """Verify all seven public converters expose the same input/options contract."""
+    """Verify file and analytical functions share keyword contract."""
     import inspect
 
     analytical = set(inspect.signature(ss.to_pyarrow).parameters) - {"input_path"}

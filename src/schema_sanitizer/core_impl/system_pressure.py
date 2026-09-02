@@ -1,4 +1,8 @@
-"""Best-effort Linux cgroup and PSI pressure signals for adaptive admission."""
+"""Read Linux cgroup and PSI pressure signals for adaptive admission.
+
+Memory usage, cgroup events, and pressure stalls are cached and translated into scaled admission
+targets, with best-effort fallback and fork-safe reset.
+"""
 
 from __future__ import annotations
 
@@ -97,13 +101,14 @@ def _cgroup_events() -> tuple[int | None, int | None]:
 def _cgroup_usage_ratio() -> float | None:
     """Return the highest memory usage ratio across constraining ancestors."""
     view = current_cgroup_view()
+    version = view.controller_version("memory")
     ratios: tuple[float | None, ...]
-    if view.version == 2:
+    if version == 2:
         ratios = (
             read_effective_cgroup_usage_ratio("memory.high", "memory.current", controller="memory"),
             read_effective_cgroup_usage_ratio("memory.max", "memory.current", controller="memory"),
         )
-    elif view.version == 1:
+    elif version == 1:
         ratios = (
             read_effective_cgroup_usage_ratio(
                 "memory.limit_in_bytes",
@@ -212,11 +217,13 @@ _FORK_PREPARED_PRESSURE_STATE: tuple[Lock, SystemPressureSnapshot] | None = None
 
 
 def _prepare_pressure_for_fork() -> None:
+    """Prepare pressure for fork."""
     global _FORK_PREPARED_PRESSURE_STATE
     _FORK_PREPARED_PRESSURE_STATE = _FORK_PRESSURE_BANKS[_FORK_PRESSURE_BANK_INDEX]
 
 
 def _clear_pressure_fork_preparation() -> None:
+    """Clear pressure fork preparation."""
     global _FORK_PREPARED_PRESSURE_STATE
     _FORK_PREPARED_PRESSURE_STATE = None
 

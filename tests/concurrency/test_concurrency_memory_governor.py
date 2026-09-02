@@ -1,4 +1,9 @@
-"""Integrated regressions for wide arenas and process memory governance."""
+"""Integrate wide operation arenas with process CPU and memory governance.
+
+The suite covers worker bitmaps above 32, NUMA-aware stealing, PMR-backed queues and output,
+affinity-sensitive CPU admission, governed text scratch, skew fallback, process-pool byte routing,
+stream-lived leases, and suboperations that must not reserve the same budget twice.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import require_native
+from _support.synchronization import join_thread_or_fail
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -27,9 +32,8 @@ def _governor_stats() -> tuple[int, int, int]:
     return tuple(int(value) for value in values)
 
 
-def test_dynamic_worker_bitmaps_schedule_above_32_without_a_hard_cap() -> None:
+def test_dynamic_worker_bitmaps_schedule_above_32_without_a_hard_cap(require_native: None) -> None:
     """Wide lanes initialize and exercise every requested physical worker."""
-    require_native()
 
     for workers in (33, 64, 96):
         (
@@ -86,9 +90,8 @@ def test_wide_worker_bitmap_has_a_nonempty_summary_and_numa_local_stealing() -> 
     assert "same_domain" in arena
 
 
-def test_process_cpu_governor_bounds_two_concurrent_registrations() -> None:
+def test_process_cpu_governor_bounds_two_concurrent_registrations(require_native: None) -> None:
     """Concurrent operation registrations share one fair CPU capacity."""
-    require_native()
     capacity, peak, waits, completed = native_core.process_cpu_governor_probe(256)
 
     assert capacity >= 1
@@ -98,9 +101,8 @@ def test_process_cpu_governor_bounds_two_concurrent_registrations() -> None:
         assert waits > 0
 
 
-def test_process_cpu_governor_observes_live_affinity_changes() -> None:
+def test_process_cpu_governor_observes_live_affinity_changes(require_native: None) -> None:
     """Caching cgroup discovery must not cache a stale process affinity."""
-    require_native()
     if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
         pytest.skip("process CPU affinity is unavailable")
     original_affinity = os.sched_getaffinity(0)
@@ -132,11 +134,12 @@ def test_text_output_uses_worker_local_governed_scratch() -> None:
     assert "max_cached_bytes" in resource
 
 
-def test_skewed_text_row_degrades_to_bounded_serial_encoding(tmp_path: Path) -> None:
+def test_skewed_text_row_degrades_to_bounded_serial_encoding(
+    tmp_path: Path, require_native: None
+) -> None:
     """A row larger than the packet target drains parallel output safely."""
     from schema_sanitizer.api_impl.execution_context import default_pool
 
-    require_native()
     source = tmp_path / "skewed.jsonl"
     output = tmp_path / "skewed-output.jsonl"
     value = "x" * (2 * 1024 * 1024)
@@ -169,9 +172,8 @@ def test_every_context_routes_actual_bytes_through_the_process_pool() -> None:
     assert "kMaximumOperationAdmissionBytes" in memory_pool
 
 
-def test_operation_pool_lease_tracks_stream_lifetime() -> None:
+def test_operation_pool_lease_tracks_stream_lifetime(require_native: None) -> None:
     """The global lease remains live with a stream and returns on close."""
-    require_native()
     limit = 8 * 1024 * 1024
     options = normalize_call_options(memory_limit_bytes=limit).raw
     output = ExecutionContext().to_sink_text(
@@ -194,9 +196,10 @@ def test_operation_pool_lease_tracks_stream_lifetime() -> None:
     assert waiting == 0
 
 
-def test_process_governor_allows_suboperations_without_double_reserving_budget() -> None:
+def test_process_governor_allows_suboperations_without_double_reserving_budget(
+    require_native: None,
+) -> None:
     """Full-budget streams coexist; their real bytes share the process pool."""
-    require_native()
     capacity, leased, waiting = _governor_stats()
     if capacity == 0:
         capacity = int(native_core.memory_budget(-1)[0])
@@ -230,8 +233,7 @@ def test_process_governor_allows_suboperations_without_double_reserving_budget()
     thread = threading.Thread(target=open_second, daemon=True)
     thread.start()
     try:
-        thread.join(timeout=10.0)
-        assert not thread.is_alive()
+        join_thread_or_fail(thread)
         _, active_leases, queued = _governor_stats()
         assert 0 < active_leases <= 8 * 1024 * 1024
         assert queued == 0
@@ -245,10 +247,11 @@ def test_process_governor_allows_suboperations_without_double_reserving_budget()
     assert waiting == 0
 
 
-def test_iter_batches_keeps_the_memory_lease_until_close(tmp_path: Path) -> None:
+def test_iter_batches_keeps_the_memory_lease_until_close(
+    tmp_path: Path, require_native: None
+) -> None:
     """Lazy analytical output owns its operation until the iterator closes."""
     pytest.importorskip("pyarrow")
-    require_native()
     source = tmp_path / "lazy.jsonl"
     source.write_text('{"value":1}\n{"value":2}\n', encoding="utf-8")
 
@@ -258,7 +261,10 @@ def test_iter_batches_keeps_the_memory_lease_until_close(tmp_path: Path) -> None
         multi_threading=True,
         memory_limit_bytes=64 * 1024 * 1024,
     )
+    retained_stats: dict[str, object] | None = None
     try:
+        assert stream.stats["input_source_route"] == "path"
+        assert stream.stats["materialized_rows"] == 0
         stream_resources = stream._keepalive
         payload_owner = stream_resources._payload_owner
         assert payload_owner.memory_lease.reserved_bytes > 0
@@ -271,6 +277,8 @@ def test_iter_batches_keeps_the_memory_lease_until_close(tmp_path: Path) -> None
         assert waiting == 0
         assert first_rows + sum(batch.num_rows for batch in stream) == 2
         assert list(stream) == []
+        retained_stats = stream.stats
+        assert retained_stats["input_source_route"] == "path"
         assert stream_resources._payload_owner is None
         assert payload_owner.memory_lease is None
         assert payload_owner.control_ticket is None
@@ -279,6 +287,9 @@ def test_iter_batches_keeps_the_memory_lease_until_close(tmp_path: Path) -> None
         assert waiting == 0
     finally:
         stream.close()
+
+    assert retained_stats is not None
+    assert stream.stats == retained_stats
 
     _capacity, leased, waiting = _governor_stats()
     assert leased == 0

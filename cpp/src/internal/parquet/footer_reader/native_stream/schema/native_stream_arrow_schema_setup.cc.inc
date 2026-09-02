@@ -1,5 +1,6 @@
-// Native stream Arrow schema construction helpers.
-// Included directly by footer_reader.cc.
+// Initializes Arrow schema nodes and calculates recursive child-resource
+// requirements. This fragment is included by the consolidated footer reader
+// inside its private implementation namespace.
 
 struct NativeRecursiveSchemaLeafInfo {
   std::vector<std::string> path;
@@ -15,6 +16,8 @@ struct NativeRecursiveSchemaSource {
   const std::vector<LeafLevelInfo> *empty_file_leaves = nullptr;
 };
 
+/// Loads one leaf's path, levels, Arrow format, and requiredness from schema
+/// metadata.
 sanitize::Result<NativeRecursiveSchemaLeafInfo>
 native_recursive_schema_leaf_info(const NativeRecursiveSchemaSource &source,
                                   std::size_t column_index) {
@@ -44,6 +47,8 @@ native_recursive_schema_leaf_info(const NativeRecursiveSchemaSource &source,
                                        leaf.top_level_required};
 }
 
+/// Returns the definition level at which a recursive leaf is required by its
+/// parent.
 sanitize::Result<std::int16_t>
 native_recursive_schema_leaf_required_definition_level(
     const NativeRecursiveSchemaLeafInfo &leaf) {
@@ -64,6 +69,8 @@ native_recursive_schema_leaf_required_definition_level(
   return leaf.path_definition_levels[parent_level_index];
 }
 
+/// Initializes a leaf Arrow schema whose release callback owns no child
+/// resources.
 void initialize_native_column_schema(NativeParquetColumnSchema *column,
                                      std::string name, std::string format,
                                      std::int16_t max_definition_level,
@@ -84,6 +91,8 @@ void initialize_native_column_schema(NativeParquetColumnSchema *column,
   column->schema.release = &native_parquet_schema_child_release;
 }
 
+/// Finalizes native struct schema only after required children and layout
+/// metadata are complete.
 void finalize_native_struct_schema(NativeParquetStructSchema *schema,
                                    bool nullable) {
   sanitize::internal::cdata_stream::clear_schema(&schema->schema);
@@ -100,6 +109,8 @@ void finalize_native_struct_schema(NativeParquetStructSchema *schema,
   schema->schema.release = &native_parquet_schema_child_release;
 }
 
+/// Finalizes native map schema only after required children and layout metadata
+/// are complete.
 void finalize_native_map_schema(NativeParquetMapSchema *schema, bool nullable) {
   schema->child_ptrs[0] = &schema->entries.schema;
   sanitize::internal::cdata_stream::clear_schema(&schema->schema);
@@ -114,6 +125,8 @@ void finalize_native_map_schema(NativeParquetMapSchema *schema, bool nullable) {
   schema->schema.release = &native_parquet_schema_child_release;
 }
 
+/// Finalizes native list schema only after required children and layout
+/// metadata are complete.
 void finalize_native_list_schema(NativeParquetListSchema *schema,
                                  bool nullable) {
   sanitize::internal::cdata_stream::clear_schema(&schema->schema);
@@ -128,6 +141,8 @@ void finalize_native_list_schema(NativeParquetListSchema *schema,
   schema->schema.release = &native_parquet_schema_child_release;
 }
 
+/// Returns the precomputed struct, list, and leaf resource counts for one
+/// subtree.
 sanitize::Result<NativeRecursiveMaterializationResourceCounts>
 native_recursive_schema_resource_counts(
     const std::vector<NativeRecursiveMaterializationResourceCounts>
@@ -141,6 +156,8 @@ native_recursive_schema_resource_counts(
   return subtree_counts[node_index];
 }
 
+/// Builds one recursive Arrow schema node and attaches its ownership to the
+/// root struct.
 sanitize::Result<ArrowSchema *> build_native_recursive_schema_node(
     const NativeRecursiveSchemaSource &source,
     const NativeRecursiveMaterializationTree &tree,
@@ -156,6 +173,7 @@ sanitize::Status build_native_recursive_struct_schema(
     std::size_t node_index, NativeParquetStructSchema *struct_schema,
     bool nullable);
 
+/// Builds an Arrow map schema from a validated recursive Parquet node.
 sanitize::Status build_native_recursive_map_schema(
     const NativeRecursiveSchemaSource &source,
     const NativeRecursiveMaterializationTree &tree,

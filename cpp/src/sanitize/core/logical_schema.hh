@@ -1,4 +1,6 @@
-// Defines logical schema fields, types, and traversal helpers.
+// Defines owned logical schema fields, recursive types, and traversal helpers.
+// Copy-safe models and depth calculations provide the common schema contract
+// used by planning, registry evolution, and analytical output adapters.
 
 #pragma once
 
@@ -37,15 +39,15 @@ struct LogicalField {
   std::unique_ptr<LogicalType> type;
   bool nullable = true;
 
-  // Creates an empty logical field.
+  /// Creates an empty logical field.
   LogicalField() = default;
-  // Creates a deep copy of another logical field.
+  /// Creates a deep copy of another logical field.
   LogicalField(const LogicalField &o);
-  // Copies another logical field.
+  /// Copies another logical field.
   LogicalField &operator=(const LogicalField &o);
-  // Moves a logical field.
+  /// Moves a logical field.
   LogicalField(LogicalField &&) noexcept = default;
-  // Moves another logical field.
+  /// Moves another logical field.
   LogicalField &operator=(LogicalField &&) noexcept = default;
 };
 
@@ -58,64 +60,64 @@ struct LogicalType {
   // List element.
   std::unique_ptr<LogicalType> value;
 
-  // Creates a null logical type.
+  /// Creates a null logical type.
   LogicalType() = default;
-  // Creates a logical type for one scalar or container kind.
+  /// Creates a logical type for one scalar or container kind.
   explicit LogicalType(LogicalKind k) : kind(k) {}
 
-  // Creates a deep copy of another logical type.
+  /// Creates a deep copy of another logical type.
   LogicalType(const LogicalType &o);
-  // Copies another logical type.
+  /// Copies another logical type.
   LogicalType &operator=(const LogicalType &o);
-  // Moves a logical type.
+  /// Moves a logical type.
   LogicalType(LogicalType &&) noexcept = default;
-  // Moves another logical type.
+  /// Moves another logical type.
   LogicalType &operator=(LogicalType &&) noexcept = default;
 
-  // Creates a boolean logical type.
+  /// Creates a boolean logical type.
   static LogicalType Bool() { return LogicalType(LogicalKind::kBool); }
-  // Creates an int64 logical type.
+  /// Creates an int64 logical type.
   static LogicalType Int64() { return LogicalType(LogicalKind::kInt64); }
-  // Creates a float64 logical type.
+  /// Creates a float64 logical type.
   static LogicalType Float64() { return LogicalType(LogicalKind::kFloat64); }
-  // Creates a UTF-8 logical type.
+  /// Creates a UTF-8 logical type.
   static LogicalType Utf8() { return LogicalType(LogicalKind::kUtf8); }
-  // Creates a nanosecond timestamp logical type.
+  /// Creates a nanosecond timestamp logical type.
   static LogicalType TimestampNs() {
     return LogicalType(LogicalKind::kTimestampNs);
   }
-  // Creates a date32 logical type.
+  /// Creates a date32 logical type.
   static LogicalType Date32() { return LogicalType(LogicalKind::kDate32); }
-  // Creates a time32 logical type.
+  /// Creates a time32 logical type.
   static LogicalType Time32s() { return LogicalType(LogicalKind::kTime32s); }
 
-  // Creates a list logical type.
+  /// Creates a list logical type.
   static LogicalType List(LogicalType elem);
-  // Creates a struct logical type.
+  /// Creates a struct logical type.
   static LogicalType Struct(std::vector<LogicalField> f);
 };
 
 struct LogicalSchema {
   std::vector<LogicalField> fields;
 
-  // Creates an empty logical schema.
+  /// Creates an empty logical schema.
   LogicalSchema() = default;
-  // Creates a deep copy of another logical schema.
+  /// Creates a deep copy of another logical schema.
   LogicalSchema(const LogicalSchema &o);
-  // Copies another logical schema.
+  /// Copies another logical schema.
   LogicalSchema &operator=(const LogicalSchema &o);
-  // Moves a logical schema.
+  /// Moves a logical schema.
   LogicalSchema(LogicalSchema &&) noexcept = default;
-  // Moves another logical schema.
+  /// Moves another logical schema.
   LogicalSchema &operator=(LogicalSchema &&) noexcept = default;
 };
 
-// Convenience: compute Arrow container depth (scalar leaves and root field
-// wrappers do not count; struct/list containers count).
+/// Computes Arrow container depth. Scalar leaves and root field wrappers do not
+/// count, while struct and list containers do.
 int arrow_schema_depth(const LogicalSchema &s);
 
-// Convenience: compute Parquet/BigQuery RECORD depth (scalar leaves, root field
-// wrappers, and list containers do not count; struct containers count).
+/// Computes Parquet/BigQuery RECORD depth. Scalar leaves, root field wrappers,
+/// and list containers do not count, while struct containers do.
 int parquet_schema_depth(const LogicalSchema &s);
 
 } // namespace sanitize

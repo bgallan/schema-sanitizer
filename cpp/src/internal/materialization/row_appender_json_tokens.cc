@@ -1,4 +1,6 @@
 // Materializes syntax-validated JSON object fields without reparsing the root.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/batch_appender_internal.hh"
 
@@ -23,7 +25,10 @@ namespace {
 
 class JsonTokenScratchReset final {
 public:
+  /// Arms a scope guard that clears validated JSON token scratch on exit.
   explicit JsonTokenScratchReset(JsonOnDemandDoc *doc) noexcept : doc_(doc) {}
+  /// Clears validated JSON token scratch before the next source row is
+  /// processed.
   ~JsonTokenScratchReset() noexcept {
     if (doc_) {
       doc_->Reset();
@@ -34,17 +39,22 @@ private:
   JsonOnDemandDoc *doc_ = nullptr;
 };
 
+/// Checks that a validated JSON token's offset and length remain inside its
+/// source row.
 [[nodiscard]] bool token_offset_is_valid(std::string_view raw,
                                          std::uint32_t offset) noexcept {
   return static_cast<std::size_t>(offset) <= raw.size();
 }
 
+/// Moves a token boundary left across trailing JSON whitespace without
+/// allocating.
 void trim_json_ws_back(std::string_view raw, std::size_t *offset) noexcept {
   while (*offset > 0 && json_scan::is_ws(raw[*offset - 1])) {
     --*offset;
   }
 }
 
+/// Returns a bounds-checked view of one validated JSON object-key token.
 sanitize::Result<std::string_view>
 validated_key_token(std::string_view raw,
                     const JsonValidatedFieldToken &token) {
@@ -68,6 +78,7 @@ validated_key_token(std::string_view raw,
   return raw.substr(key_begin, key_end - key_begin);
 }
 
+/// Returns a bounds-checked view of one validated JSON field-value token.
 sanitize::Result<std::string_view>
 validated_value_token(std::string_view raw,
                       const JsonValidatedFieldToken *tokens, std::size_t count,
@@ -95,6 +106,8 @@ validated_value_token(std::string_view raw,
   return raw.substr(value_begin, value_end - value_begin);
 }
 
+/// Decodes one validated JSON key into parser scratch only when it contains
+/// escapes.
 sanitize::Result<std::string_view>
 materialize_validated_key(JsonOnDemandDoc *doc, std::string_view raw,
                           std::size_t base_offset,
@@ -113,6 +126,8 @@ materialize_validated_key(JsonOnDemandDoc *doc, std::string_view raw,
   return parsed.as_string_view();
 }
 
+/// Parses a signed 64-bit JSON integer token with syntax and overflow
+/// validation.
 [[nodiscard]] bool parse_int64_token(std::string_view token,
                                      std::int64_t *out) noexcept {
   if (!out || token.empty()) {
@@ -123,6 +138,7 @@ materialize_validated_key(JsonOnDemandDoc *doc, std::string_view raw,
   return result.ec == std::errc{} && result.ptr == token.data() + token.size();
 }
 
+/// Parses a floating-point token and rejects malformed or overflowing input.
 [[nodiscard]] bool parse_float64_token(std::string_view token, double *out) {
   if (!out || token.empty()) {
     return false;
@@ -135,9 +151,8 @@ materialize_validated_key(JsonOnDemandDoc *doc, std::string_view raw,
   return sanitize::parse_ascii_float64_strict(token, out);
 }
 
-// Converts the exact lexical forms used by stable flat JSONL plans without
-// constructing a generic ValueView. Mismatches return false so the canonical
-// parser and conversion diagnostics remain the single compatibility fallback.
+/// Converts a plan-ordered scalar token directly, returning false for canonical
+/// fallback.
 [[nodiscard]] bool
 try_convert_plan_ordered_scalar_token(const sanitize::ColumnPlan &column,
                                       std::string_view token,
@@ -215,6 +230,8 @@ try_convert_plan_ordered_scalar_token(const sanitize::ColumnPlan &column,
   return false;
 }
 
+/// Attempts append plan ordered JSON tokens and cleanly declines when the
+/// bounded fast path is inapplicable.
 sanitize::Result<std::optional<AppendRowResult>>
 try_append_plan_ordered_json_tokens(BatchAppender *app, JsonOnDemandDoc *doc,
                                     std::string_view raw,
@@ -286,6 +303,7 @@ try_append_plan_ordered_json_tokens(BatchAppender *app, JsonOnDemandDoc *doc,
   return std::optional<AppendRowResult>(AppendRowResult{});
 }
 
+/// Reconstructs field views from validated key and value token boundaries.
 sanitize::Status
 materialize_validated_json_fields(JsonOnDemandDoc *doc,
                                   std::vector<sanitize::FieldRef> *fields,

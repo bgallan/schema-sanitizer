@@ -1,4 +1,8 @@
-"""JSON Lines sink for PyArrow record-batch streams."""
+"""JSON Lines sink for PyArrow record-batch streams.
+
+It caches native schema support, attaches requested metadata columns, and atomically publishes
+JSONL through the native stream writer.
+"""
 
 from __future__ import annotations
 
@@ -22,18 +26,6 @@ from .metadata_specs import (
 from .schema_decision_cache import SchemaDecisionCache
 
 _JSONL_SCHEMA_SUPPORT_CACHE = SchemaDecisionCache()
-_LAST_JSONL_STREAM_ROUTE = "none"
-
-
-def last_jsonl_stream_route() -> str:
-    """Return the route used by the most recent JSONL stream write."""
-    return _LAST_JSONL_STREAM_ROUTE
-
-
-def mark_jsonl_stream_route(route: str) -> None:
-    """Record the route used by a direct JSONL writer."""
-    global _LAST_JSONL_STREAM_ROUTE
-    _LAST_JSONL_STREAM_ROUTE = route
 
 
 def _schema_supports_native_jsonl(schema: Any, *, pa: Any) -> bool:
@@ -92,8 +84,6 @@ def write_jsonl_stream(
     threading_mode: str = "single",
 ) -> Any:
     """Write an Arrow batch stream to JSON Lines."""
-    global _LAST_JSONL_STREAM_ROUTE
-    _LAST_JSONL_STREAM_ROUTE = "none"
     pa = ensure_pyarrow(feature=feature)
     metadata = prepare_file_output_metadata_stream(
         stream,
@@ -118,7 +108,6 @@ def write_jsonl_stream(
             memory_limit_bytes=memory_limit_bytes,
             threading_mode=threading_mode,
         )
-        _LAST_JSONL_STREAM_ROUTE = "native"
         return stats
     finally:
         metadata.close()

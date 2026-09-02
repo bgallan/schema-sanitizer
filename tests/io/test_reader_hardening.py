@@ -1,4 +1,8 @@
-"""Regression tests for hostile XML, CSV, and JSON reader inputs."""
+"""Regression tests for hostile XML, CSV, and JSON reader inputs.
+
+It subjects XML, CSV, JSON, and Parquet readers to depth, entity, expansion,
+malformed-token, memory, privacy, and subprocess stress boundaries.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +12,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from conftest import require_native
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 import schema_sanitizer as ss
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 _GENERATED_COLUMNS = {
     "schema_registry",
@@ -68,6 +74,33 @@ def _capture_error(
     return type(caught.value), str(caught.value)
 
 
+@pytest.mark.parametrize("input_text_encoding", ["utf-8", "iso8859-1"])
+def test_local_reader_rejects_symbolic_link_input(
+    tmp_path: Path,
+    input_text_encoding: str,
+    require_native: None,
+) -> None:
+    """Native and transcoding readers reject the same symlink input."""
+    target = tmp_path / "target.csv"
+    target.write_text("value\n1\n", encoding="ascii")
+    source = tmp_path / "input.csv"
+    try:
+        source.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symbolic links are unavailable on this runner: {exc}")
+
+    with pytest.raises(
+        ss.SchemaSanitizerInvalidArgumentError,
+        match="symbolic links.*not accepted",
+    ):
+        ss.to_jsonl(
+            source,
+            tmp_path / "output.jsonl",
+            input_format="csv",
+            input_text_encoding=input_text_encoding,
+        )
+
+
 @pytest.mark.parametrize(
     ("xml_row_tag", "accepted", "rejected"),
     [
@@ -82,7 +115,6 @@ def test_xml_internal_depth_boundary_is_stable(
     rejected: bytes,
 ) -> None:
     """Depth 512 succeeds and depth 513 is rejected without recursion failure."""
-    require_native()
 
     _convert(
         tmp_path,
@@ -114,7 +146,6 @@ def test_xml_twenty_thousand_levels_fail_in_subprocess(
     tmp_path: Path, xml_row_tag: str | None
 ) -> None:
     """Extreme nesting returns a Python error rather than crashing the process."""
-    require_native()
 
     source = tmp_path / "deep.xml"
     output = tmp_path / "deep.jsonl"
@@ -146,7 +177,7 @@ else:
         check=False,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SCHEDULER_TIMEOUT_SECONDS,
         cwd=repo_root,
     )
 
@@ -162,7 +193,6 @@ def test_xml_rejects_invalid_entities_in_text_and_attributes(
     tmp_path: Path, xml_row_tag: str | None, entity: bytes
 ) -> None:
     """Entity validation is strict and shared by text and attributes."""
-    require_native()
 
     for payload in (
         b"<rows><row><value>" + entity + b"</value></row></rows>",
@@ -184,7 +214,6 @@ def test_xml_entity_split_across_stream_chunk_is_decoded_once(
     tmp_path: Path, multi_threading: bool
 ) -> None:
     """An entity spanning a row-scanner refill has the same decoded value."""
-    require_native()
 
     chunk_bytes = (1024 * 1024) // 64
     prefix = b"<rows><row><value>"
@@ -209,7 +238,6 @@ def test_xml_node_expansion_obeys_shared_operation_budget(
     tmp_path: Path, xml_row_tag: str | None, multi_threading: bool
 ) -> None:
     """Document trees stay bounded while streamed row trees release early."""
-    require_native()
 
     row_count = 1_000
     payload = ("<rows>" + ("<row><a/><b/><c/><d/></row>" * row_count) + "</rows>").encode()
@@ -251,7 +279,6 @@ def test_xml_node_expansion_obeys_shared_operation_budget(
 )
 def test_xml_strict_syntax_is_rejected_consistently(tmp_path: Path, payload: bytes) -> None:
     """Document and row-tag scanners reject malformed XML syntax."""
-    require_native()
 
     row_payload = b"<rows><row>" + payload + b"</row></rows>"
     for selected_payload, xml_row_tag in ((payload, None), (row_payload, "row")):
@@ -268,7 +295,6 @@ def test_xml_strict_syntax_is_rejected_consistently(tmp_path: Path, payload: byt
 
 def test_xml_rejects_trailing_document_content_in_both_modes(tmp_path: Path) -> None:
     """Non-whitespace bytes after the root are never silently ignored."""
-    require_native()
 
     for payload, xml_row_tag in (
         (b"<root/>trailing", None),
@@ -297,7 +323,6 @@ def test_csv_strict_quote_errors_match_across_threading_modes(
     tmp_path: Path, payload: bytes, offset_fragment: str
 ) -> None:
     """CSV quote failures are structured and preserve exact source offsets."""
-    require_native()
 
     errors = [
         _capture_error(
@@ -317,7 +342,6 @@ def test_csv_strict_quote_errors_match_across_threading_modes(
 
 def test_csv_valid_strict_controls(tmp_path: Path) -> None:
     """Embedded newlines, doubled quotes, empty fields, and delimiters remain valid."""
-    require_native()
 
     rows = _convert(
         tmp_path,
@@ -355,7 +379,6 @@ def test_json_rejects_malformed_values_on_all_text_paths(
     payload: bytes,
 ) -> None:
     """Optimized JSON paths validate escapes, Unicode, numbers, and tails."""
-    require_native()
 
     error_type, message = _capture_error(
         tmp_path,
@@ -371,7 +394,6 @@ def test_json_rejects_malformed_values_on_all_text_paths(
 
 def test_json_strict_projection_still_validates_unknown_fields(tmp_path: Path) -> None:
     """Malformed unprojected fields cannot bypass strict/lazy validation."""
-    require_native()
 
     seed = tmp_path / "seed.jsonl"
     seed_out = tmp_path / "seed-out.jsonl"
@@ -400,7 +422,6 @@ def test_json_strict_projection_still_validates_unknown_fields(tmp_path: Path) -
 @pytest.mark.parametrize("input_format", ["json", "jsonl"])
 def test_json_internal_depth_boundary_is_stable(tmp_path: Path, input_format: str) -> None:
     """Depth 512 succeeds and depth 513 fails without recursive crashes."""
-    require_native()
 
     accepted = _nested_json_object(512)
     rejected = _nested_json_object(513)
@@ -430,7 +451,6 @@ def test_json_internal_depth_boundary_is_stable(tmp_path: Path, input_format: st
 @pytest.mark.parametrize("multi_threading", [False, True])
 def test_json_surrogate_pair_crossing_chunk_boundary(tmp_path: Path, multi_threading: bool) -> None:
     """A valid surrogate pair remains valid across a scanner refill."""
-    require_native()
 
     chunk_bytes = (1024 * 1024) // 64
     prefix = b'{"value":"'
@@ -450,11 +470,10 @@ def test_json_surrogate_pair_crossing_chunk_boundary(tmp_path: Path, multi_threa
 
 
 @pytest.mark.parametrize("multi_threading", [False, True])
-def test_json_lines_error_policy_recovers_without_losing_offsets(
+def test_jsonl_error_policy_recovers_without_losing_offsets(
     tmp_path: Path, multi_threading: bool
 ) -> None:
     """JSONL malformed rows stop, skip, or emit null as requested."""
-    require_native()
 
     payload = b'{"a":1}\n{"a":"\\q"}\n{"a":3}\n'
     error_type, message = _capture_error(
@@ -494,7 +513,6 @@ def test_json_duplicate_keys_and_long_numbers_are_deterministic(
     tmp_path: Path, multi_threading: bool
 ) -> None:
     """Duplicate keys are first-wins and oversized numbers fail predictably."""
-    require_native()
 
     rows = _convert(
         tmp_path,
@@ -519,7 +537,6 @@ def test_json_duplicate_keys_and_long_numbers_are_deterministic(
 
 def test_parquet_footer_budget_precedes_global_hard_ceiling(tmp_path: Path) -> None:
     """A low operation budget rejects an oversized footer before reading it."""
-    require_native()
     from schema_sanitizer.adapters.parquet.status import (
         native_parquet_stream_preflight_info,
     )
@@ -539,7 +556,6 @@ def test_parquet_footer_budget_precedes_global_hard_ceiling(tmp_path: Path) -> N
 
 def test_parquet_page_budget_precedes_page_hard_ceiling(tmp_path: Path) -> None:
     """Page verification and decompression use the lower operation limit."""
-    require_native()
     from schema_sanitizer.adapters.parquet.status import (
         native_parquet_stream_preflight_info,
     )
@@ -581,7 +597,6 @@ def test_parquet_page_budget_precedes_page_hard_ceiling(tmp_path: Path) -> None:
 @pytest.mark.parametrize("codec", ["uncompressed", "snappy", "gzip"])
 def test_parquet_corrupt_supported_codec_payloads_fail_closed(tmp_path: Path, codec: str) -> None:
     """Corrupt payloads from every compiled native codec fail without a crash."""
-    require_native()
     from schema_sanitizer.adapters.parquet.status import (
         native_parquet_footer_info,
         native_parquet_stream_preflight_info,
@@ -624,7 +639,6 @@ def test_parquet_high_expansion_page_is_rejected_by_operation_budget(
     tmp_path: Path, codec: str
 ) -> None:
     """A highly compressible page is rejected before its expansion can escape the budget."""
-    require_native()
     from schema_sanitizer.adapters.parquet.status import (
         native_parquet_footer_info,
         native_parquet_stream_preflight_info,
@@ -668,7 +682,6 @@ def test_parquet_high_expansion_page_is_rejected_by_operation_budget(
 @pytest.mark.parametrize("codec", ["uncompressed", "snappy", "gzip"])
 def test_parquet_truncated_supported_codec_payloads_fail_closed(tmp_path: Path, codec: str) -> None:
     """Removing one payload byte from every native codec fails without a crash."""
-    require_native()
     from schema_sanitizer.adapters.parquet.status import (
         native_parquet_footer_info,
         native_parquet_stream_preflight_info,
@@ -712,7 +725,6 @@ def test_csv_duplicate_nonempty_headers_fail_deterministically(
     tmp_path: Path, multi_threading: bool
 ) -> None:
     """Duplicate source headers cannot silently collapse into one output field."""
-    require_native()
 
     error_type, message = _capture_error(
         tmp_path,
@@ -730,7 +742,6 @@ def test_xml_long_unmatched_ampersand_run_is_bounded(
     tmp_path: Path, xml_row_tag: str | None
 ) -> None:
     """A long malformed entity run terminates promptly without repeated rescans."""
-    require_native()
 
     source = tmp_path / "ampersands.xml"
     output = tmp_path / "ampersands.jsonl"
@@ -767,7 +778,7 @@ else:
         check=False,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SCHEDULER_TIMEOUT_SECONDS,
         cwd=repo_root,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
@@ -778,7 +789,6 @@ def test_xml_mixed_case_doctype_crossing_chunk_boundary_is_disabled(
     tmp_path: Path, xml_row_tag: str | None
 ) -> None:
     """DTD/entity rejection is case-insensitive and stable across scanner refills."""
-    require_native()
 
     chunk_bytes = (1024 * 1024) // 64
     payload = (
@@ -805,7 +815,6 @@ def test_csv_rejects_truncated_utf8_in_optimized_and_parsed_paths(
     tmp_path: Path, multi_threading: bool
 ) -> None:
     """CSV validates raw UTF-8 even when rows use direct/raw-only projection."""
-    require_native()
 
     error_type, message = _capture_error(
         tmp_path,
@@ -822,7 +831,6 @@ def test_csv_rejects_truncated_utf8_in_optimized_and_parsed_paths(
 
 def test_csv_utf8_bom_is_accepted_and_removed_from_header(tmp_path: Path) -> None:
     """A UTF-8 BOM remains supported while malformed UTF-8 is rejected."""
-    require_native()
 
     rows = _convert(
         tmp_path,
@@ -844,7 +852,6 @@ def test_csv_rejects_post_reconciliation_header_collisions(
     tmp_path: Path, field_name_policy: str, header: bytes
 ) -> None:
     """Distinct source names cannot collapse under the configured name policy."""
-    require_native()
 
     errors = [
         _capture_error(
@@ -865,7 +872,6 @@ def test_csv_rejects_post_reconciliation_header_collisions(
 
 def test_csv_preserve_policy_keeps_distinct_source_headers(tmp_path: Path) -> None:
     """Preserve mode accepts names that only normalized policies would merge."""
-    require_native()
 
     rows = _convert(
         tmp_path,
@@ -882,7 +888,6 @@ def test_csv_field_limit_is_derived_from_operation_budget(
     tmp_path: Path, multi_threading: bool
 ) -> None:
     """A field cannot consume the whole operation budget in any execution mode."""
-    require_native()
 
     payload = b"value\n" + (b"x" * (600 * 1024)) + b"\n"
     error_type, message = _capture_error(
@@ -903,7 +908,6 @@ def test_parquet_level_output_is_bounded_before_vector_allocation(
     tmp_path: Path,
 ) -> None:
     """A hostile page num_values cannot reserve level vectors before budgeting."""
-    require_native()
     from schema_sanitizer.adapters.parquet.status import (
         native_parquet_footer_info,
         native_parquet_stream_preflight_info,
@@ -983,7 +987,6 @@ def test_parquet_level_output_is_bounded_before_vector_allocation(
 
 def test_parquet_page_crc_is_validated_before_decode(tmp_path: Path) -> None:
     """An optional Parquet page CRC mismatch fails before value decoding."""
-    require_native()
     from schema_sanitizer.adapters.parquet.status import native_parquet_footer_info
 
     source = tmp_path / "crc-source.jsonl"
@@ -1044,7 +1047,6 @@ def test_xml_peak_charged_memory_stays_within_budget_and_releases(
     tmp_path: Path, multi_threading: bool
 ) -> None:
     """XML success and failure leave no operation-pool bytes charged."""
-    require_native()
     from schema_sanitizer.api_impl.execution_context import default_pool
 
     source = tmp_path / "bounded.xml"
@@ -1093,7 +1095,6 @@ def test_xml_committed_row_trees_release_before_batch_owner(
     tmp_path: Path, multi_threading: bool
 ) -> None:
     """A long row-tag stream stays below budget by releasing committed trees."""
-    require_native()
     from schema_sanitizer.api_impl.execution_context import default_pool
 
     source = tmp_path / "many-rows.xml"
@@ -1130,7 +1131,6 @@ def test_xml_unterminated_markup_is_bounded(
     tmp_path: Path, xml_row_tag: str | None, kind: str
 ) -> None:
     """Large unterminated scanner states fail promptly without refill rescans."""
-    require_native()
 
     source = tmp_path / "unterminated.xml"
     output = tmp_path / "unterminated.jsonl"
@@ -1175,7 +1175,7 @@ else:
         check=False,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=SCHEDULER_TIMEOUT_SECONDS,
         cwd=repo_root,
     )
     assert completed.returncode == 0, completed.stderr or completed.stdout
@@ -1183,7 +1183,6 @@ else:
 
 def test_xml_parallel_failure_cancels_workers_and_releases_budget(tmp_path: Path) -> None:
     """A row-tag parse failure drains worker-owned XML trees and pool charges."""
-    require_native()
     from schema_sanitizer.api_impl.execution_context import default_pool
 
     source = tmp_path / "parallel-failure.xml"
@@ -1214,7 +1213,6 @@ def test_xml_parallel_failure_cancels_workers_and_releases_budget(tmp_path: Path
 
 def test_jsonl_path_group_coordination_uses_operation_budget(tmp_path: Path) -> None:
     """Directory prefetch metadata and retained child batches share one pool."""
-    require_native()
     from schema_sanitizer.api_impl.execution_context import default_pool
 
     source = tmp_path / "jsonl-group"
@@ -1250,9 +1248,8 @@ def test_reader_errors_do_not_echo_sensitive_input_contents(
     tmp_path: Path, multi_threading: bool
 ) -> None:
     """Malformed payload values and XML names stay out of public exceptions."""
-    require_native()
 
-    secret = "private_customer_token_7f45c0"  # pragma: allowlist secret
+    secret = "private_payload_token_7f45c0"  # pragma: allowlist secret
     cases = (
         (
             f"<{secret}><child></{secret}_other>".encode(),

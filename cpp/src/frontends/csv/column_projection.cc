@@ -1,4 +1,6 @@
 // Owns exact-mode projection state and immutable union-mode source mappings.
+// The mapping keeps logical field order stable as physical headers change
+// between sources.
 
 #include "frontends/csv/column_projection.hh"
 

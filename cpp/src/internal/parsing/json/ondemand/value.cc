@@ -1,4 +1,6 @@
 // Implements on-demand JSON container views and value dispatch.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/json/ondemand/document.hh"
 
@@ -27,6 +29,8 @@ struct JsonOnDemandDoc::OdArray {
 
 namespace {
 
+/// Adapts an on-demand JSON object wrapper to the generic object visitor
+/// callback.
 sanitize::Status od_obj_for_each(const void *self, void *ctx,
                                  ValueView::ObjectEachFn fn) {
   const auto *obj = static_cast<const JsonOnDemandDoc::OdObject *>(self);
@@ -35,6 +39,8 @@ sanitize::Status od_obj_for_each(const void *self, void *ctx,
   return obj->doc->ForEachObjectFieldImpl(obj, ctx, fn);
 }
 
+/// Adapts an on-demand JSON array wrapper to the generic array visitor
+/// callback.
 sanitize::Status od_arr_for_each(const void *self, void *ctx,
                                  ValueView::ArrayEachFn fn) {
   const auto *arr = static_cast<const JsonOnDemandDoc::OdArray *>(self);

@@ -1,4 +1,7 @@
-// Typed option-field decoding for the stable SZOPT payload.
+// Decodes typed option fields from the stable SZOPT payload.
+// Length, enum, collection, schema, and scalar bounds are validated before
+// caller-owned option state is updated.
+
 #include "internal/planning/options_deserialization.hh"
 
 #include <algorithm>
@@ -33,7 +36,7 @@ struct OptionFieldReader {
                            Options *out);
 };
 
-// Reads an optional logical schema field from the options payload.
+/// Reads an optional logical schema field from the options payload.
 static sanitize::Result<std::optional<sanitize::LogicalSchema>>
 read_schema(std::string_view in, std::size_t *pos) {
   uint8_t has = 0;
@@ -57,7 +60,7 @@ read_schema(std::string_view in, std::size_t *pos) {
   return logical_schema;
 }
 
-// Scalar reads
+/// Reads a little-endian int32 option value.
 static bool read_value(std::string_view in, std::size_t *pos, int32_t *out) {
   uint32_t u = 0;
   if (!read_u32(in, pos, &u))
@@ -66,7 +69,7 @@ static bool read_value(std::string_view in, std::size_t *pos, int32_t *out) {
   return true;
 }
 
-// Reads a little-endian int64 option value.
+/// Reads a little-endian int64 option value.
 static bool read_value(std::string_view in, std::size_t *pos, int64_t *out) {
   if (!pos || !out || *pos > in.size() || in.size() - *pos < 8)
     return false;
@@ -79,13 +82,13 @@ static bool read_value(std::string_view in, std::size_t *pos, int64_t *out) {
   return true;
 }
 
-// Reads a length-prefixed string option value.
+/// Reads a length-prefixed string option value.
 static bool read_value(std::string_view in, std::size_t *pos,
                        std::string *out) {
   return read_string(in, pos, out);
 }
 
-// Reads a vector of length-prefixed string option values.
+/// Reads a vector of length-prefixed string option values.
 static bool read_value(std::string_view in, std::size_t *pos,
                        std::vector<std::string> *out) {
   std::uint32_t count = 0;
@@ -112,12 +115,14 @@ static bool read_value(std::string_view in, std::size_t *pos,
   return true;
 }
 
-// Returns whether a decoded integer belongs to an enum's wire domain.
+/// Returns whether a decoded integer belongs to an enum's wire domain.
 template <auto... Values> static bool enum_wire_value(int32_t value) {
   constexpr auto allowed = std::array{std::to_underlying(Values)...};
   return std::find(allowed.cbegin(), allowed.cend(), value) != allowed.cend();
 }
 
+/// Returns whether an integer belongs to the selected option enum's wire
+/// domain.
 template <class Enum> static bool valid_enum_value(int32_t value) {
   if constexpr (std::is_same_v<Enum, SchemaEvolutionMode>) {
     return enum_wire_value<SchemaEvolutionMode::kStrict,
@@ -136,7 +141,7 @@ template <class Enum> static bool valid_enum_value(int32_t value) {
   }
 }
 
-// Reads one typed option field from the stable binary options payload.
+/// Reads one typed option field from the stable binary options payload.
 template <class T>
 static sanitize::Status read_option_field(std::string_view bytes,
                                           std::size_t *pos, T *out,
@@ -198,7 +203,7 @@ static constexpr auto kOptionFieldReaders = std::to_array<OptionFieldReader>({
 
 } // namespace
 
-// Reads all catalog fields in stable wire-format order.
+/// Reads all catalog fields in stable wire-format order.
 sanitize::Status read_option_fields(std::string_view bytes, std::size_t *pos,
                                     Options *out) {
   for (const OptionFieldReader &field : kOptionFieldReaders) {

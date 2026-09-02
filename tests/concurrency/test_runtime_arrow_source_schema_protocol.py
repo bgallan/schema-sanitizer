@@ -1,14 +1,18 @@
-"""Tests Arrow-source schema discovery at the native provider boundary."""
+"""Test Arrow-source schema discovery at the native provider boundary.
+
+Probing should use the schema protocol without opening a stream when available, yet retain the
+stream-only fallback for providers that cannot expose schema independently.
+"""
 
 from __future__ import annotations
 
 import pytest
-from conftest import require_native
+
+pytestmark = pytest.mark.usefixtures("require_native")
 
 
 def test_arrow_source_probe_prefers_schema_protocol_without_opening_stream() -> None:
     """A schema-capable source must not open its data-bearing stream to probe."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.core_impl.execution import ExecutionContext
 
@@ -16,18 +20,18 @@ def test_arrow_source_probe_prefers_schema_protocol_without_opening_stream() -> 
         """Expose an Arrow schema while making stream access observable."""
 
         def __init__(self) -> None:
-            """Initialize protocol call counters."""
+            """Initialize the schema first source test double."""
             self.schema = pa.schema([("id", pa.int64())])
             self.schema_calls = 0
             self.stream_calls = 0
 
         def __arrow_c_schema__(self):
-            """Export the schema without allocating a reader."""
+            """Export the owned Arrow C Schema capsule."""
             self.schema_calls += 1
             return self.schema.__arrow_c_schema__()
 
         def __arrow_c_stream__(self, requested_schema=None):
-            """Reject data-stream access during a schema-only probe."""
+            """Export the owned Arrow C Stream capsule."""
             del requested_schema
             self.stream_calls += 1
             raise AssertionError("schema probe opened the Arrow data stream")
@@ -48,7 +52,6 @@ def test_arrow_source_probe_prefers_schema_protocol_without_opening_stream() -> 
 
 def test_arrow_source_probe_keeps_stream_only_protocol_fallback() -> None:
     """A source without the schema protocol must retain stream schema discovery."""
-    require_native()
     pa = pytest.importorskip("pyarrow")
     from schema_sanitizer.core_impl.execution import ExecutionContext
 
@@ -56,12 +59,12 @@ def test_arrow_source_probe_keeps_stream_only_protocol_fallback() -> None:
         """Expose only the original Arrow stream protocol."""
 
         def __init__(self) -> None:
-            """Retain the reader that owns the exported stream."""
+            """Initialize the stream only source test double."""
             self.reader = pa.table({"id": [1]}).to_reader()
             self.stream_calls = 0
 
         def __arrow_c_stream__(self, requested_schema=None):
-            """Export the data stream used for fallback schema discovery."""
+            """Export the owned Arrow C Stream capsule."""
             self.stream_calls += 1
             return self.reader.__arrow_c_stream__(requested_schema)
 

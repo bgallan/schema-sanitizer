@@ -1,4 +1,6 @@
-// Owns the CSV frontend lifecycle, batching, and vtable wiring.
+// Owns the CSV frontend lifecycle, batching, and vtable wiring. It frames
+// records, applies source projections, and returns budget-owned row batches in
+// order.
 
 #include "frontends/builtin_frontends.hh"
 #include "frontends/csv/frontend_internal.hh"
@@ -35,6 +37,9 @@ struct CsvParsedRow {
 };
 
 struct CsvParsedChunk {
+
+  /// Creates pool-backed cell and row metadata for one independently parsed CSV
+  /// packet.
   CsvParsedChunk(std::shared_ptr<void> pool, std::size_t block_bytes,
                  std::size_t row_count, std::size_t cell_hint)
       : pool_keepalive(std::move(pool)), pmr_pool(pool_keepalive),
@@ -54,6 +59,9 @@ struct CsvParsedChunk {
 };
 
 struct CsvBatchStorage {
+
+  /// Creates pool-backed CSV rows and retains every source view used by the
+  /// batch.
   CsvBatchStorage(std::shared_ptr<void> pool, std::size_t arena_block_bytes)
       : pool_keepalive(std::move(pool)), pmr_pool(pool_keepalive),
         source_arena(pool_keepalive.get(), arena_block_bytes),
@@ -71,6 +79,7 @@ struct CsvBatchStorage {
   const void *last_data_owner_ptr = nullptr;
   const void *last_source_name_owner_ptr = nullptr;
 
+  /// Retains data owner so row views remain valid for the full batch lifetime.
   void keep_data_owner(const std::shared_ptr<const void> &owner) {
     if (!owner || owner.get() == last_data_owner_ptr) {
       return;
@@ -79,6 +88,8 @@ struct CsvBatchStorage {
     keepalive.push_back(owner);
   }
 
+  /// Retains the source-name owner so exported row views remain valid for the
+  /// batch lifetime.
   void keep_source_name(const std::shared_ptr<const std::string> &owner) {
     if (!owner || owner.get() == last_source_name_owner_ptr) {
       return;
@@ -88,6 +99,8 @@ struct CsvBatchStorage {
   }
 };
 
+/// Creates the streaming CSV scanner and resolves delimiter, projection, and
+/// memory bounds.
 CsvFrontend::CsvFrontend(ChunkSourcePtr src, const Options &options,
                          CsvSourceProjectionSetPtr source_projections)
     : source_(std::move(src)), delimiter_(resolved_delimiter(options)),
@@ -112,10 +125,13 @@ CsvFrontend::CsvFrontend(ChunkSourcePtr src, const Options &options,
   reset_status_ = scanner_->Reset();
 }
 
+/// Updates the CSV column projection used by subsequent batches.
 void CsvFrontend::set_plan(const CompiledPlan *plan) noexcept {
   projection_.set_plan(plan);
 }
 
+/// Rebuilds the CSV scanner with allocations charged to the supplied memory
+/// pool.
 void CsvFrontend::set_memory_pool(std::shared_ptr<void> pool) noexcept {
   memory_pool_ = std::move(pool);
   try {
@@ -130,11 +146,14 @@ void CsvFrontend::set_memory_pool(std::shared_ptr<void> pool) noexcept {
   }
 }
 
+/// Retains the task arena used for parallel CSV row materialization.
 void CsvFrontend::set_task_arena(
     std::shared_ptr<OperationTaskArena> task_arena) noexcept {
   task_arena_ = std::move(task_arena);
 }
 
+/// Rewinds the CSV frontend to its initial input position and clears per-pass
+/// state.
 void CsvFrontend::reset() noexcept {
   if (scanner_) {
     reset_status_ = scanner_->Reset();
@@ -146,6 +165,7 @@ void CsvFrontend::reset() noexcept {
   last_header_source_ready_ = false;
 }
 
+/// Reads and materializes the next bounded row batch from the CSV frontend.
 sanitize::Result<RowBatch> CsvFrontend::next_batch(int64_t capacity) {
   RowBatch out;
   if (capacity <= 0) {
@@ -412,27 +432,35 @@ namespace {
 
 using csv_frontend_detail::CsvFrontend;
 
+/// Rewinds the CSV frontend to its initial input position and clears per-pass
+/// state.
 void csv_reset(void *self) noexcept {
   static_cast<CsvFrontend *>(self)->reset();
 }
 
+/// Forwards a compiled plan through the CSV frontend callback table.
 void csv_set_plan(void *self, const CompiledPlan *plan) noexcept {
   static_cast<CsvFrontend *>(self)->set_plan(plan);
 }
 
+/// Forwards memory-pool ownership through the CSV frontend callback table.
 void csv_set_memory_pool(void *self, std::shared_ptr<void> pool) noexcept {
   static_cast<CsvFrontend *>(self)->set_memory_pool(std::move(pool));
 }
 
+/// Forwards task-arena ownership through the CSV frontend callback table.
 void csv_set_task_arena(
     void *self, std::shared_ptr<OperationTaskArena> task_arena) noexcept {
   static_cast<CsvFrontend *>(self)->set_task_arena(std::move(task_arena));
 }
 
+/// Reads and materializes the next bounded row batch from the CSV frontend.
 sanitize::Result<RowBatch> csv_next_batch(void *self, int64_t capacity) {
   return static_cast<CsvFrontend *>(self)->next_batch(capacity);
 }
 
+/// Destroys the heap-owned CSV frontend state after its final callback
+/// completes.
 void csv_destroy(void *self) noexcept {
   delete static_cast<CsvFrontend *>(self);
 }

@@ -56,7 +56,29 @@ project(
   HOMEPAGE_URL "https://github.com/bgallan/schema-sanitizer"
   LANGUAGES C CXX)
 
-find_package(Threads REQUIRED)
+# Persist the SDK actually selected by CMake's Visual Studio generator. Release
+# and sanitizer certification reads this generated value instead of relying on
+# optional, human-readable configure output.
+if(CMAKE_GENERATOR MATCHES "^Visual Studio ")
+  if(NOT CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)
+    message(FATAL_ERROR "The Visual Studio generator selected no Windows SDK")
+  endif()
+  set(SCHEMA_SANITIZER_WINDOWS_SDK_VERSION
+      "${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}"
+      CACHE INTERNAL "Windows SDK selected by the Visual Studio generator"
+            FORCE)
+endif()
+
+# MSVC's standard-library threading support needs no pthread discovery or link
+# flags. Define the conventional imported interface directly on that toolchain;
+# every other compiler retains CMake's required platform probe.
+if(MSVC)
+  if(NOT TARGET Threads::Threads)
+    add_library(Threads::Threads INTERFACE IMPORTED)
+  endif()
+else()
+  find_package(Threads REQUIRED)
+endif()
 
 option(SCHEMA_SANITIZER_ENABLE_LTO
        "Enable IPO/LTO in Release builds when supported" ON)
@@ -65,13 +87,14 @@ option(SCHEMA_SANITIZER_ENABLE_WARNINGS
 option(SCHEMA_SANITIZER_REPRODUCIBLE
        "Enable reproducible build flags (path mapping where supported)" ON)
 set(SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES
-    "4"
+    "auto"
     CACHE STRING
-          "Maximum concurrent MSVC compiler processes for project targets")
-if(NOT SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES MATCHES "^[1-9][0-9]*$")
+          "Concurrent MSVC compiler processes: auto or a positive integer")
+if(NOT SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES STREQUAL "auto"
+   AND NOT SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES MATCHES "^[1-9][0-9]*$")
   message(
     FATAL_ERROR
-      "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES must be a positive integer (got '${SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES}')"
+      "SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES must be 'auto' or a positive integer (got '${SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES}')"
   )
 endif()
 
@@ -92,6 +115,9 @@ option(SCHEMA_SANITIZER_ENABLE_CLANG_TIDY
 set(SCHEMA_SANITIZER_CLANG_TIDY_CHECKS
     "clang-analyzer-*"
     CACHE STRING "clang-tidy checks used when clang-tidy is enabled")
+option(SCHEMA_SANITIZER_ENABLE_PCH
+       "Use target-private precompiled headers for production Release builds"
+       OFF)
 
 # Optional (Linux): link libstdc++/libgcc statically for our shared libraries.
 # This is OFF by default because manylinux images/toolchains may not ship static
@@ -115,6 +141,39 @@ set(SCHEMA_SANITIZER_COVERAGE_PROFILE_PATTERN
     "schema-sanitizer-%p.profraw"
     CACHE STRING
           "LLVM raw profile path pattern embedded in instrumented targets")
+
+# PCH is a release-wheel compilation optimization, not part of the language or
+# dependency contract. Diagnostic builds deliberately parse every translation
+# unit from its declared includes so sanitizer, coverage, and include-hygiene
+# results cannot depend on a precompiled prefix.
+if(SCHEMA_SANITIZER_ENABLE_PCH)
+  if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
+    message(
+      FATAL_ERROR
+        "SCHEMA_SANITIZER_ENABLE_PCH is incompatible with sanitizer builds")
+  endif()
+  if(SCHEMA_SANITIZER_ENABLE_COVERAGE)
+    message(
+      FATAL_ERROR
+        "SCHEMA_SANITIZER_ENABLE_PCH is incompatible with coverage builds")
+  endif()
+  if(SCHEMA_SANITIZER_ENABLE_CLANG_TIDY)
+    message(
+      FATAL_ERROR
+        "SCHEMA_SANITIZER_ENABLE_PCH is incompatible with clang-tidy/include-hygiene builds"
+    )
+  endif()
+  get_property(_schema_sanitizer_multi_config GLOBAL
+               PROPERTY GENERATOR_IS_MULTI_CONFIG)
+  if(NOT _schema_sanitizer_multi_config AND NOT CMAKE_BUILD_TYPE STREQUAL
+                                            "Release")
+    message(
+      FATAL_ERROR
+        "SCHEMA_SANITIZER_ENABLE_PCH requires CMAKE_BUILD_TYPE=Release for single-config generators"
+    )
+  endif()
+  unset(_schema_sanitizer_multi_config)
+endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/SchemaSanitizerTargetOptions.cmake")
 
@@ -155,17 +214,25 @@ if(SCHEMA_SANITIZER_ZLIB_PROVIDER_RESOLVED MATCHES "^bundled-" AND TARGET
 endif()
 
 # ---- Python discovery -------------------------------------------------------
-# Python is required to build the ABI3 extension module.
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development.SABIModule)
+# Python is required to build the ABI3 extension module. ASan builds also own a
+# sanitizer-first launcher, so their interpreter and embed library must be
+# resolved together rather than accidentally mixing Python installations.
+if(SCHEMA_SANITIZER_SANITIZER MATCHES "^asan")
+  find_package(Python3 REQUIRED COMPONENTS Interpreter Development.SABIModule
+                                           Development.Embed)
+else()
+  find_package(Python3 REQUIRED COMPONENTS Interpreter Development.SABIModule)
+endif()
 
 add_custom_target(
   schema_sanitizer_check_cpp_documentation
   COMMAND
     ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_LIST_DIR}/meta/ci/native/check_cpp_documentation.py
-    --compile-commands ${CMAKE_BINARY_DIR}/compile_commands.json
+    --build-root ${CMAKE_BINARY_DIR} --compile-commands
+    ${CMAKE_BINARY_DIR}/compile_commands.json
   WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
-  COMMENT "Checking C/C++ callable documentation with clang-doc"
+  COMMENT "Checking C/C++ file and callable documentation with Clang ASTs"
   VERBATIM)
 
 message(STATUS "Python executable: ${Python3_EXECUTABLE}")
@@ -181,6 +248,24 @@ python3_add_library(${_schema_sanitizer_pymod_target} MODULE USE_SABI 3.11
 set_target_properties(
   ${_schema_sanitizer_pymod_target} PROPERTIES CXX_VISIBILITY_PRESET hidden
                                                VISIBILITY_INLINES_HIDDEN YES)
+
+# Sanitizer smokes load the just-built module directly from the certified build
+# root. Multi-config generators otherwise hide it below a configuration
+# subdirectory on Windows, making the loader depend on generator-specific paths.
+if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
+  set_target_properties(
+    ${_schema_sanitizer_pymod_target}
+    PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+               RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  foreach(_schema_sanitizer_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(
+      ${_schema_sanitizer_pymod_target}
+      PROPERTIES "LIBRARY_OUTPUT_DIRECTORY_${_schema_sanitizer_config}"
+                 "${CMAKE_BINARY_DIR}"
+                 "RUNTIME_OUTPUT_DIRECTORY_${_schema_sanitizer_config}"
+                 "${CMAKE_BINARY_DIR}")
+  endforeach()
+endif()
 
 add_library(sanitize_core STATIC)
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/SchemaSanitizerSources.cmake")
@@ -209,6 +294,13 @@ foreach(_schema_sanitizer_target sanitize_core
                                                                  cpp/thirdparty)
 endforeach()
 
+# The core and ABI module intentionally own different PCHs. In particular, the
+# core never inherits Python.h, while the module PCH is compiled with the same
+# target-owned Py_LIMITED_API definition as every ABI3 translation unit.
+schema_sanitizer_enable_release_pch(sanitize_core core)
+schema_sanitizer_enable_release_pch(${_schema_sanitizer_pymod_target}
+                                    python_abi3)
+
 # Link
 target_link_libraries(sanitize_core PUBLIC Threads::Threads)
 target_link_libraries(${_schema_sanitizer_pymod_target} PRIVATE sanitize_core)
@@ -226,11 +318,21 @@ if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
     cpp/src/internal/json_encoding/token_writer.cc)
   target_compile_features(schema_sanitizer_sanitized_ordered_executor
                           PRIVATE cxx_std_23)
+  target_compile_definitions(
+    schema_sanitizer_sanitized_ordered_executor
+    PRIVATE SCHEMA_SANITIZER_TEST_CPU_CAPACITY_OVERRIDE=1)
   set_target_properties(
     schema_sanitizer_sanitized_ordered_executor
     PROPERTIES CXX_EXTENSIONS OFF
                CXX_SCAN_FOR_MODULES OFF
-               INTERPROCEDURAL_OPTIMIZATION OFF)
+               INTERPROCEDURAL_OPTIMIZATION OFF
+               RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  foreach(_schema_sanitizer_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(
+      schema_sanitizer_sanitized_ordered_executor
+      PROPERTIES "RUNTIME_OUTPUT_DIRECTORY_${_schema_sanitizer_config}"
+                 "${CMAKE_BINARY_DIR}")
+  endforeach()
   target_include_directories(schema_sanitizer_sanitized_ordered_executor
                              PRIVATE cpp/src)
   target_link_libraries(schema_sanitizer_sanitized_ordered_executor
@@ -241,21 +343,57 @@ if(NOT SCHEMA_SANITIZER_SANITIZER STREQUAL "none")
   schema_sanitizer_enable_repro(schema_sanitizer_sanitized_ordered_executor)
   schema_sanitizer_add_sanitizer(schema_sanitizer_sanitized_ordered_executor)
   set(_schema_sanitizer_sanitized_executor_rounds 100)
-  # Keep compiling the probe with MSVC ASan, but do not register it for
-  # execution there. The Windows ASan runtime can stall indefinitely while
-  # starting or tearing down this deeply threaded process, outside the probe's
-  # own watchdog. Windows still executes every ASan fuzzer; this repeated
-  # concurrency gate runs under macOS ASan/UBSan and Linux TSan.
+  # Keep compiling the probe with MSVC ASan, but do not register its deeply
+  # threaded repeated case with CTest. CI invokes one bounded Windows case
+  # through the external process-tree watchdog; the repeated concurrency gate
+  # remains a macOS ASan/UBSan and Linux TSan contract.
   if(NOT (MSVC AND SCHEMA_SANITIZER_SANITIZER STREQUAL "asan"))
-    add_test(NAME schema_sanitizer_sanitized_ordered_executor
-             COMMAND schema_sanitizer_sanitized_ordered_executor --rounds
-                     ${_schema_sanitizer_sanitized_executor_rounds})
+    add_test(
+      NAME schema_sanitizer_sanitized_ordered_executor
+      COMMAND schema_sanitizer_sanitized_ordered_executor --fixed-cpu-capacity
+              3 --rounds ${_schema_sanitizer_sanitized_executor_rounds})
+    add_test(NAME schema_sanitizer_sanitized_ordered_executor_fixed_four
+             COMMAND schema_sanitizer_sanitized_ordered_executor
+                     --fixed-cpu-capacity 4 --case lane_stealing)
   endif()
   if(SCHEMA_SANITIZER_SANITIZER STREQUAL "tsan")
-    add_test(NAME schema_sanitizer_tsan_ordered_executor
-             COMMAND schema_sanitizer_sanitized_ordered_executor --rounds
-                     ${_schema_sanitizer_sanitized_executor_rounds})
+    add_test(
+      NAME schema_sanitizer_tsan_ordered_executor
+      COMMAND schema_sanitizer_sanitized_ordered_executor --fixed-cpu-capacity
+              3 --rounds ${_schema_sanitizer_sanitized_executor_rounds})
+    add_test(NAME schema_sanitizer_tsan_ordered_executor_fixed_four
+             COMMAND schema_sanitizer_sanitized_ordered_executor
+                     --fixed-cpu-capacity 4 --case lane_stealing)
   endif()
+endif()
+
+# ASan must initialize before CPython loads an instrumented extension. Build a
+# sanitizer-first interpreter launcher on every ASan platform so CI exercises
+# the complete ABI module instead of limiting non-Linux coverage to standalone
+# parser executables.
+if(SCHEMA_SANITIZER_SANITIZER MATCHES "^asan")
+  add_executable(schema_sanitizer_sanitizer_python_launcher
+                 meta/ci/sanitizers/asan_python_launcher.cc)
+  target_compile_features(schema_sanitizer_sanitizer_python_launcher
+                          PRIVATE cxx_std_17)
+  set_target_properties(
+    schema_sanitizer_sanitizer_python_launcher
+    PROPERTIES CXX_EXTENSIONS OFF
+               CXX_SCAN_FOR_MODULES OFF
+               INTERPROCEDURAL_OPTIMIZATION OFF
+               RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  foreach(_schema_sanitizer_config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set_target_properties(
+      schema_sanitizer_sanitizer_python_launcher
+      PROPERTIES "RUNTIME_OUTPUT_DIRECTORY_${_schema_sanitizer_config}"
+                 "${CMAKE_BINARY_DIR}")
+  endforeach()
+  target_link_libraries(schema_sanitizer_sanitizer_python_launcher
+                        PRIVATE Python3::Python)
+  schema_sanitizer_enable_warnings(schema_sanitizer_sanitizer_python_launcher)
+  schema_sanitizer_enable_repro(schema_sanitizer_sanitizer_python_launcher)
+  schema_sanitizer_add_sanitizer(schema_sanitizer_sanitizer_python_launcher)
+  schema_sanitizer_stage_msvc_asan_runtime("${CMAKE_BINARY_DIR}")
 endif()
 
 if(SCHEMA_SANITIZER_ZLIB_TARGET)
@@ -305,6 +443,9 @@ if(SCHEMA_SANITIZER_BUILD_FUZZERS)
     endforeach()
     target_include_directories(${target} PRIVATE cpp/src cpp/thirdparty)
     target_link_libraries(${target} PRIVATE sanitize_core)
+    if(WIN32 AND _schema_sanitizer_fuzz_engine STREQUAL "standalone")
+      target_link_libraries(${target} PRIVATE Psapi)
+    endif()
     schema_sanitizer_enable_warnings(${target})
     schema_sanitizer_enable_msvc_parallel_compile(${target})
     schema_sanitizer_enable_repro(${target})

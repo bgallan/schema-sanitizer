@@ -1,10 +1,13 @@
 // Drives top-level JSON stream and array traversal.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #include "internal/parsing/streaming/json/scanner.hh"
 
 namespace sanitize::internal {
 namespace {
 
+/// Reports whether a byte is legal JSON whitespace in streaming framing logic.
 bool json_stream_is_ws(unsigned char c) {
   return c == ' ' || c == '\n' || c == '\r' || c == '\t';
 }

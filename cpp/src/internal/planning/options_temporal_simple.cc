@@ -1,4 +1,6 @@
 // Implements simple temporal regex fast paths for prepared options.
+// The helpers normalize private planning state without leaking wire or layout
+// details into public APIs.
 
 #include "internal/planning/options_temporal_simple.hh"
 

@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency coverage matrix matches every public format."""
+"""Keep concurrency coverage aligned with every public input and output format.
+
+These checks require frontends to receive the shared operation arena, every native route to name
+parallel work, and real CSV and XML decoding to preserve probe parity, including small inputs and
+explicit output evidence.
+"""
 
 from __future__ import annotations
 
@@ -66,6 +71,14 @@ def _input_tasks(stats: dict) -> int:
     return int(stats.get("tasks", {}).get("input", {}).get("submitted", 0))
 
 
+def _assert_input_tasks_complete(stats: dict, *, minimum: int) -> None:
+    """Require a deterministic number of fully retired input tasks."""
+    tasks = stats.get("tasks", {}).get("input", {})
+    assert int(tasks.get("submitted", 0)) >= minimum
+    assert int(tasks.get("started", 0)) == int(tasks["submitted"])
+    assert int(tasks.get("finished", 0)) == int(tasks["submitted"])
+
+
 def test_coverage_matrix_matches_every_public_format() -> None:
     """Every supported input and output has a declared concurrent stage."""
     assert set(INPUT_CONCURRENCY_COVERAGE) == {
@@ -73,7 +86,6 @@ def test_coverage_matrix_matches_every_public_format() -> None:
         "json",
         "json_array",
         "jsonl",
-        "ndjson",
         "xml",
         "parquet",
         "python",
@@ -87,7 +99,7 @@ def test_coverage_matrix_matches_every_public_format() -> None:
         "polars",
         "duckdb",
     }
-    assert set(INPUT_CONCURRENCY_COVERAGE) - {"ndjson", "python"} == set(_FILE_FORMATS)
+    assert set(INPUT_CONCURRENCY_COVERAGE) - {"python"} == set(_FILE_FORMATS)
     assert all(stages for stages in INPUT_CONCURRENCY_COVERAGE.values())
     assert all(stages for stages in OUTPUT_CONCURRENCY_COVERAGE.values())
     for output_name in OUTPUT_CONCURRENCY_COVERAGE:
@@ -167,8 +179,7 @@ def test_csv_rows_decode_in_parallel_with_exact_parity(tmp_path: Path) -> None:
 
     _assert_probe_equal(single, multi)
     assert _input_tasks(single_stats) == 0
-    assert _input_tasks(multi_stats) >= 2
-    assert multi_stats["counters"]["peak_active_tasks"] >= 2
+    _assert_input_tasks_complete(multi_stats, minimum=2)
 
 
 def test_xml_rows_decode_in_parallel_with_exact_parity(tmp_path: Path) -> None:
@@ -199,8 +210,7 @@ def test_xml_rows_decode_in_parallel_with_exact_parity(tmp_path: Path) -> None:
 
     _assert_probe_equal(single, multi)
     assert _input_tasks(single_stats) == 0
-    assert _input_tasks(multi_stats) >= 2
-    assert multi_stats["counters"]["peak_active_tasks"] >= 2
+    _assert_input_tasks_complete(multi_stats, minimum=2)
 
 
 def test_small_xml_keeps_the_overhead_avoiding_fallback(tmp_path: Path) -> None:

@@ -1,11 +1,15 @@
-"""Remote directory validation and prepared-input assembly."""
+"""Remote directory validation and prepared-input assembly.
+
+It verifies that a provider and format support native directory execution, then attaches
+the remote manifest to a prepared input.
+"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from ...input_impl.prepared import NativeDirectoryManifestCarrier, PreparedPublicInput
-from ...input_impl.selection import native_input_format, unsupported_native_directory_ingestion
+from ...input_impl.selection import unsupported_native_directory_ingestion
 from ...remote_impl.packetization import remote_staging_packet_policy
 from ...sources.models import RemoteFile
 from .directory_preparation import (
@@ -74,7 +78,7 @@ def remote_native_directory_prepared_from_files(
     setattr(carrier, "remote_native_multisource_manifest", manifest)
     return PreparedPublicInput(
         carrier,
-        native_input_format(input_format),
+        input_format,
         "stream",
         carrier,
         xml_row_tag=manifest.xml_row_tag,

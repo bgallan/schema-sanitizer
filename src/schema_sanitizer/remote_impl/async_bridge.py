@@ -1,4 +1,8 @@
-"""Bounded synchronous bridge for coroutines invoked from an active loop."""
+"""Bounded synchronous bridge for coroutines invoked from an active loop.
+
+It runs a coroutine on a bounded bridge runner when the caller already owns an event loop and
+retains failed runners for governed cleanup.
+"""
 
 from __future__ import annotations
 
@@ -25,7 +29,7 @@ from ..core_impl.fork_safety import ensure_runtime_fork_safe
 from ..core_impl.governed_thread import (
     RetirementAwareThread,
     defer_governed_thread_retirement,
-    start_governed_runtime_thread,
+    start_governed_thread,
 )
 from ..core_impl.process_resources import acquire_project_threads
 from ..core_impl.resource_lifecycle import _cleanup_with_note
@@ -37,11 +41,6 @@ from ..core_impl.retry_scheduler import (
 from ..core_impl.runtime_registry import reserve_runtime_service
 from ..core_impl.safe_errors import add_bounded_note
 from ..core_impl.terminal_hosts import TerminalHostMarkers
-
-# Compatibility seam for deterministic thread-start fault injection. Production
-# still defaults to the retirement-aware host so successful joins reap deferred
-# permit ownership.
-Thread = RetirementAwareThread
 
 _DEFAULT_ASYNC_BRIDGE_TIMEOUT_SECONDS = 300.0
 _FAILED_BRIDGE_RUNNERS = TerminalHostMarkers(128, category="async_bridge_terminal")
@@ -64,12 +63,14 @@ def _retain_failed_bridge_runner(runner: "_BridgeRunner") -> bool:
 
 
 def _discard_failed_bridge_runner(runner: "_BridgeRunner") -> None:
+    """Discard failed bridge runner."""
     with _FAILED_BRIDGE_RUNNERS_LOCK:
         _FAILED_BRIDGE_RUNNER_OWNERS.pop(id(runner), None)
         _FAILED_BRIDGE_RUNNERS.discard(runner)
 
 
 def _retry_failed_bridge_runner_token(token: int) -> None:
+    """Retry failed bridge runner token."""
     with _FAILED_BRIDGE_RUNNERS_LOCK:
         runner = _FAILED_BRIDGE_RUNNER_OWNERS.get(token)
     if runner is not None:
@@ -119,7 +120,7 @@ class _BridgeRunner:
         self._terminal_loop: asyncio.AbstractEventLoop | None = None
         self._terminal_tasks: tuple[asyncio.Task[Any], ...] = ()
         self._terminal_non_cooperative = False
-        self._thread = Thread(
+        self._thread = RetirementAwareThread(
             target=self._run,
             name="schema-sanitizer-async",
             daemon=True,
@@ -140,6 +141,7 @@ class _BridgeRunner:
             raise
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this bridge runner."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -158,7 +160,7 @@ class _BridgeRunner:
         started = False
         try:
             registration = self._runtime_registration
-            start_governed_runtime_thread(registration, self._thread)
+            start_governed_thread(self._thread, registration=registration)
             started = True
         except BaseException as exc:
             if not started:
@@ -263,6 +265,7 @@ class _BridgeRunner:
             _retain_failed_bridge_runner(self)
 
             def retry_runner(token: int = token) -> None:
+                """Retry cleanup of a bridge runner that failed to terminate."""
                 _retry_failed_bridge_runner_token(token)
 
             scheduled = schedule_retry(
@@ -511,6 +514,7 @@ def run_sync(coro: Any, *, threading_mode: str = "single") -> Any:
 
 
 def _failed_bridge_runner_snapshot() -> object:
+    """Return a bounded snapshot of failed bridge runner."""
     return _FAILED_BRIDGE_RUNNERS.snapshot()
 
 
@@ -525,6 +529,7 @@ __all__ = ["run_sync"]
 
 
 def _reset_failed_bridge_registry_after_fork() -> None:
+    """Reset failed bridge registry after fork."""
     global _FAILED_BRIDGE_RUNNERS_LOCK, _FAILED_BRIDGE_RUNNER_OWNERS
     _FAILED_BRIDGE_RUNNERS_LOCK = Lock()
     _FAILED_BRIDGE_RUNNER_OWNERS = {}

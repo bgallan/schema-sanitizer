@@ -1,4 +1,7 @@
 // Provides schema-dominant packet estimates for wide fixed-cost CSV output.
+// The helpers bound parallel text encoding memory while committing prepared
+// fragments in source order.
+
 #pragma once
 
 #include "internal/output/text_output_estimator.hh"
@@ -11,14 +14,14 @@
 
 namespace sanitize::internal::text_output_estimator {
 
-// Returns true when CSV encoding cost is bounded entirely by schema metadata.
-// Variable-width strings/binary, nested values, dictionaries, and maps remain
-// row-dependent and therefore keep the canonical estimator.
+/// Reports whether schema metadata completely bounds a scalar's CSV encoding
+/// cost.
 [[nodiscard]] inline bool
 fixed_cost_csv_scalar_kind(jsonl::JsonlKind kind) noexcept {
   return fixed_cost_jsonl_scalar_kind(kind);
 }
 
+/// Returns the schema-derived maximum CSV bytes for one fixed-cost scalar.
 [[nodiscard]] inline std::int64_t
 fixed_csv_scalar_output_upper_bound(const jsonl::JsonlField &field,
                                     std::int64_t cap) noexcept {
@@ -54,11 +57,8 @@ struct CsvFixedEstimatePlan final {
   bool eligible = false;
 };
 
-// Build a bounded hybrid plan. Public file outputs append a small variable
-// metadata tail (registry, drifts, source path, ingestion time), so requiring
-// every field to be fixed-cost would miss the actual end-to-end route. A wide
-// schema is eligible when at least `minimum_fixed_fields` are fixed and no more
-// than one eighth of the schema (with a floor of four) remains row-dependent.
+/// Builds a hybrid estimate plan for wide schemas with a bounded dynamic-field
+/// tail.
 [[nodiscard]] inline CsvFixedEstimatePlan
 make_csv_fixed_estimate_plan(const jsonl::JsonlField &root,
                              std::size_t minimum_fixed_fields = 24) {
@@ -89,10 +89,11 @@ make_csv_fixed_estimate_plan(const jsonl::JsonlField &root,
   return plan;
 }
 
-// Estimate a row by reusing the schema-only contribution of fixed columns and
-// inspecting only the bounded variable tail. Nulls can only reduce fixed output
-// bytes, so the plan remains conservative for every batch. A fully fixed schema
-// is O(1) per row; public outputs with four metadata fields are O(4), not O(N).
+/// Estimates a row by reusing the schema-only contribution of fixed columns and
+/// inspecting only the bounded variable tail.
+/// Nulls can only reduce fixed output bytes, so the plan remains conservative
+/// for every batch. A fully fixed schema is O(1) per row.
+/// The public outputs with four metadata fields are O(4), not O(N).
 [[nodiscard]] inline std::int64_t estimate_csv_row_bytes_from_plan(
     const CsvFixedEstimatePlan &plan, const jsonl::JsonlField &root,
     const ArrowArray &array, std::int64_t row, std::int64_t cap) noexcept {
@@ -115,17 +116,6 @@ make_csv_fixed_estimate_plan(const jsonl::JsonlField &root,
                        cap);
   }
   return multiply_capped(total, 2, cap);
-}
-
-// Compatibility helper for source-level contracts and all-fixed users.
-[[nodiscard]] inline std::int64_t
-estimate_wide_fixed_csv_row_upper_bound(const jsonl::JsonlField &root) {
-  const auto plan = make_csv_fixed_estimate_plan(root);
-  if (!plan.eligible || !plan.dynamic_fields.empty()) {
-    return 0;
-  }
-  return multiply_capped(plan.fixed_base_bytes, 2,
-                         std::numeric_limits<std::int64_t>::max());
 }
 
 } // namespace sanitize::internal::text_output_estimator

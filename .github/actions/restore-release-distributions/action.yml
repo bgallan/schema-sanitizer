@@ -1,0 +1,96 @@
+---
+name: Restore validated release distributions
+description: >-
+  Restore the transient release artifact or reconstruct it from the retained,
+  manifest-bound Linux wheel bundle after successful-run cleanup.
+runs:
+  using: composite
+  steps:
+    - name: Reset release restoration paths
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- release release-bundle
+    - name: Download the transient release distribution
+      id: download-release-distributions
+      continue-on-error: true
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        name: release-distributions
+        path: release
+    - name: Reset a partial transient release download
+      id: reset-release-distributions
+      if: ${{ always() && steps.download-release-distributions.outcome == 'failure' }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- release
+    - name: Retry the transient release distribution
+      id: retry-release-distributions
+      if: ${{ always() && steps.download-release-distributions.outcome == 'failure' && steps.reset-release-distributions.outcome == 'success' }}
+      continue-on-error: true
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        name: release-distributions
+        path: release
+    - name: Reset transient state before retained-bundle fallback
+      id: reset-before-retained-release
+      if: ${{ always() && steps.download-release-distributions.outcome == 'failure' && steps.retry-release-distributions.outcome == 'failure' }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- release release-bundle
+    - name: Download the retained Linux wheel bundle
+      id: download-retained-release
+      if: ${{ always() && steps.reset-before-retained-release.outcome == 'success' }}
+      continue-on-error: true
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        name: dist-wheels-linux-x86_64
+        path: release-bundle
+    - name: Reset a partial retained wheel-bundle download
+      id: reset-retained-release
+      if: ${{ always() && steps.download-retained-release.outcome == 'failure' }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        rm -rf -- release-bundle
+    - name: Retry the retained Linux wheel bundle
+      id: retry-retained-release
+      if: ${{ always() && steps.download-retained-release.outcome == 'failure' && steps.reset-retained-release.outcome == 'success' }}
+      continue-on-error: true
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      with:
+        name: dist-wheels-linux-x86_64
+        path: release-bundle
+    - name: Reconstruct release distributions from the retained bundle
+      if: ${{ always() && steps.download-release-distributions.outcome == 'failure' && steps.retry-release-distributions.outcome == 'failure' && (steps.download-retained-release.outcome == 'success' || steps.retry-retained-release.outcome == 'success') }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        python meta/ci/release/certified_wheel_bundle.py restore-release \
+          --bundle release-bundle \
+          --output-root release \
+          --github-sha "${GITHUB_SHA}" \
+          --github-run-id "${GITHUB_RUN_ID}" \
+          --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+    - name: Require a restored release distribution
+      env:
+        FIRST_RELEASE_OUTCOME: ${{ steps.download-release-distributions.outcome }}
+        RETAINED_RELEASE_OUTCOME: ${{ steps.download-retained-release.outcome }}
+        RETRY_RELEASE_OUTCOME: ${{ steps.retry-release-distributions.outcome }}
+        RETRY_RETAINED_RELEASE_OUTCOME: ${{ steps.retry-retained-release.outcome }}
+      shell: bash
+      run: |-
+        set -euo pipefail
+        if [[ "${FIRST_RELEASE_OUTCOME}" != 'success' && \
+          "${RETRY_RELEASE_OUTCOME}" != 'success' && \
+          "${RETAINED_RELEASE_OUTCOME}" != 'success' && \
+          "${RETRY_RETAINED_RELEASE_OUTCOME}" != 'success' ]]; then
+          echo 'Release distributions are unavailable from transient and retained artifacts' >&2
+          exit 2
+        fi
+        if [[ ! -d release || -L release ]]; then
+          echo 'Restored release distribution root is missing or unsafe' >&2
+          exit 2
+        fi

@@ -1,4 +1,8 @@
-"""Typed objects returned by the native ABI."""
+"""Normalize typed results returned by the native ABI.
+
+Wrappers decode ingestion, probe, and sink results together with diagnostics JSON, logical schema
+payloads, and capsule ownership into stable Python values.
+"""
 
 from __future__ import annotations
 
@@ -56,8 +60,9 @@ class IngestDiagnostics:
                 try:
                     self._diag_json = str(_native.diagnostics_json(self._diagnostics_capsule))
                     self._obj = None
-                except Exception:
-                    pass
+                # Retain the last valid diagnostic snapshot.
+                except Exception as ignored_error:
+                    del ignored_error
             return self._diag_json
 
     def close(self) -> None:
@@ -71,8 +76,9 @@ class IngestDiagnostics:
             try:
                 self._diag_json = str(_native.diagnostics_json(capsule))
                 self._obj = None
-            except Exception:
-                pass
+            # Retain the last valid diagnostic snapshot.
+            except Exception as ignored_error:
+                del ignored_error
             self._diagnostics_capsule = None
             ticket = getattr(self, "_finalizer_ticket", None)
             capsule_owner = getattr(self, "_finalizer_capsule", None)
@@ -331,7 +337,7 @@ class SinkOutput:
 
     @property
     def diagnostics(self) -> IngestDiagnostics:
-        """Return sink diagnostics."""
+        """Return diagnostics reported by the native sink result."""
         diagnostics = self._diagnostics
         if diagnostics is None:
             raise RuntimeError("sink diagnostics have already been detached")

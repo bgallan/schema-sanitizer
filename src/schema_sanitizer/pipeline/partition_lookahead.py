@@ -1,4 +1,8 @@
-"""Bounded one-partition source preparation for multi-mode pipelines."""
+"""Bounded one-partition source preparation for multi-mode pipelines.
+
+It prepares at most one future partition in multi mode while preserving result order,
+dynamic-option semantics, and deterministic resource cleanup.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +26,6 @@ from ..core_impl.execution_policy import (
 from ..core_impl.finalization import runtime_is_finalizing
 from ..core_impl.finalizer_escrow import ReservedFinalizerEscrow
 from ..core_impl.memory_budget import (
-    CompositeParallelAdmission,
     acquire_stage_concurrency_admission,
     normalize_memory_limit,
 )
@@ -40,7 +43,6 @@ from ..input_impl.prepared import PreparedPublicInput
 from .partition_lookahead_worker import ThreadPoolExecutor as _DaemonThreadPoolExecutor
 from .types import PartitionRunPlan
 
-_LOOKAHEAD_COMPAT_INIT_LOCK = Lock()
 _LOOKAHEAD_FINALIZER_ESCROW: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(
     1024, static_kind="partition_lookahead"
 )
@@ -117,6 +119,7 @@ def drain_partition_lookahead_finalizers() -> int:
     progressed = 0
 
     def process(ticket: int, owner: object) -> None:
+        """Process one retained work item."""
         nonlocal progressed
         if isinstance(owner, RootedFinalizerAuthority):
             owner.ticket = ticket
@@ -150,16 +153,8 @@ def partition_lookahead_finalizer_snapshot() -> tuple[int, int]:
     )
 
 
-def adaptive_concurrency_target(
-    desired: int, *, per_slot_bytes: int, reserve_bytes: int | None = None
-) -> int:
-    """Compatibility injection point with zero-slot helper semantics."""
-    return _adaptive_parallel_slots(
-        desired, per_slot_bytes=per_slot_bytes, reserve_bytes=reserve_bytes
-    )
-
-
 def _release_parallel_admission(future: Future[Any]) -> None:
+    """Release the parallel-stage admission retained by lookahead."""
     admission = getattr(future, "_schema_sanitizer_parallel_admission", None)
     if admission is None:
         return
@@ -171,18 +166,6 @@ def _release_parallel_admission(future: Future[Any]) -> None:
         admission.close()
     except BaseException:
         pass
-
-
-class ThreadPoolExecutor(_DaemonThreadPoolExecutor):
-    """Compatibility wrapper that preserves thread-governor fault injection."""
-
-    def __init__(self, *, max_workers: int, thread_name_prefix: str) -> None:
-        """Create the daemon worker using the live module-level permit hook."""
-        super().__init__(
-            max_workers=max_workers,
-            thread_name_prefix=thread_name_prefix,
-            permit_factory=acquire_project_threads,
-        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -311,7 +294,7 @@ class PartitionSourceLookahead:
                 pass
             raise
         # Initialize every primary owner before later construction can fail.
-        self._executor: ThreadPoolExecutor | None = None
+        self._executor: _DaemonThreadPoolExecutor | None = None
         self._future: Future[PreparedOrDeferred] | None = None
         self._future_context: OperationExecutionContext | None = None
         self._runtime_registration: RuntimeServiceRegistration | None = None
@@ -331,9 +314,10 @@ class PartitionSourceLookahead:
         self.enabled = not policy.is_single and policy.effective_workers > 1
         if self.enabled:
             try:
-                self._executor = ThreadPoolExecutor(
+                self._executor = _DaemonThreadPoolExecutor(
                     max_workers=1,
                     thread_name_prefix="schema-sanitizer-partition-lookahead",
+                    permit_factory=acquire_project_threads,
                 )
             except SchemaSanitizerResourceError:
                 # Lookahead is an optimization. When the process-wide thread
@@ -348,6 +332,7 @@ class PartitionSourceLookahead:
         self._protocol_violations = 0
         self._consumer_inflight = False
         self._close_started = False
+        self._close_timeout_seconds = 30.0
         self._late_close_registered = False
         self._runtime_registration = register_runtime_service(
             self, kind="partition_lookahead", close_name="_runtime_shutdown"
@@ -365,29 +350,13 @@ class PartitionSourceLookahead:
         owner.arg3 = getattr(self, "_runtime_registration", None)
 
     def _lifecycle_condition(self) -> Condition:
-        """Return a compatibility-safe lifecycle condition."""
-        condition = getattr(self, "_close_condition", None)
-        if condition is not None:
-            return condition
-        with _LOOKAHEAD_COMPAT_INIT_LOCK:
-            close_lock = getattr(self, "_close_lock", None)
-            if close_lock is None:
-                close_lock = Lock()
-                self._close_lock = close_lock
-            condition = getattr(self, "_close_condition", None)
-            if condition is None:
-                condition = Condition(close_lock)
-                self._close_condition = condition
-                self._close_in_progress = False
-                self._submissions_inflight = 0
-                self._protocol_violations = 0
-                self._consumer_inflight = False
-        return condition
+        """Return the lifecycle condition created with the controller."""
+        return self._close_condition
 
     def _finish_submission_locked(self) -> None:
         """Release one lifecycle claim without hiding a double completion."""
         if self._submissions_inflight <= 0:
-            self._protocol_violations = getattr(self, "_protocol_violations", 0) + 1
+            self._protocol_violations += 1
             return
         self._submissions_inflight -= 1
 
@@ -396,11 +365,11 @@ class PartitionSourceLookahead:
         condition = self._lifecycle_condition()
         with condition:
             retry = (
-                getattr(self, "_close_started", False)
-                and not getattr(self, "_close_in_progress", False)
-                and not getattr(self, "_closed", False)
-                and getattr(self, "_submissions_inflight", 0) == 0
-                and getattr(self, "_protocol_violations", 0) == 0
+                self._close_started
+                and not self._close_in_progress
+                and not self._closed
+                and self._submissions_inflight == 0
+                and self._protocol_violations == 0
             )
         if retry:
             try:
@@ -417,7 +386,7 @@ class PartitionSourceLookahead:
         with condition:
             if not self.enabled:
                 raise RuntimeError("partition source lookahead is disabled")
-            if getattr(self, "_close_started", False):
+            if self._close_started:
                 raise RuntimeError("partition source lookahead is closing")
             next_submissions = self._submissions_inflight + 1
             self._submissions_inflight = next_submissions
@@ -466,37 +435,25 @@ class PartitionSourceLookahead:
         try:
             options = self._current_options()
             helper_bytes = max(8 << 20, self._memory_limit_bytes // 8)
-            target = adaptive_concurrency_target(2, per_slot_bytes=helper_bytes)
+            target = _adaptive_parallel_slots(2, per_slot_bytes=helper_bytes)
             if target < 2:
                 return
-            # The real daemon executor already owns one exact project-thread
-            # permit. Borrow that physical helper slot first, then attach
-            # resident bytes; no production stage may retain memory while
-            # waiting for execution capacity. Private compatibility executors
-            # used by tests do not expose a physical permit and therefore skip
-            # the pass48 admission object rather than acquiring an unrelated
-            # global permit behind the double's back.
-            admission: CompositeParallelAdmission | None = None
-            if isinstance(executor, _DaemonThreadPoolExecutor):
-                execution_lease = executor._thread_lease
-                if execution_lease is None:
-                    return
-                admission = acquire_stage_concurrency_admission(
-                    target,
-                    per_slot_bytes=helper_bytes,
-                    stage="partition_lookahead_admission",
-                    execution_lease=execution_lease,
-                    require_memory=True,
-                    # ``trigger()`` runs at a local conversion boundary where
-                    # no ContextVar ledger is necessarily activated. The armed
-                    # parent context is the authoritative operation owner, so
-                    # bind the speculative stage to its exact shared ledger
-                    # rather than silently disabling lookahead.
-                    memory_ledger=parent_context.memory_ledger,
-                )
-                if admission.slots < 2:
-                    admission.close()
-                    return
+            # Borrow the daemon executor's physical helper slot first, then
+            # attach resident bytes so no stage waits while retaining memory.
+            execution_lease = executor._thread_lease
+            if execution_lease is None:
+                return
+            admission = acquire_stage_concurrency_admission(
+                target,
+                per_slot_bytes=helper_bytes,
+                stage="partition_lookahead_admission",
+                execution_lease=execution_lease,
+                require_memory=True,
+                memory_ledger=parent_context.memory_ledger,
+            )
+            if admission.slots < 2:
+                admission.close()
+                return
             child_context = parent_context.fork()
             try:
                 future = executor.submit(self._prepare, plan, child_context, options)
@@ -507,9 +464,8 @@ class PartitionSourceLookahead:
                     label="partition lookahead admission rollback also failed",
                 )
                 raise
-            if admission is not None:
-                setattr(future, "_schema_sanitizer_parallel_admission", admission)
-                future.add_done_callback(_release_parallel_admission)
+            setattr(future, "_schema_sanitizer_parallel_admission", admission)
+            future.add_done_callback(_release_parallel_admission)
         except Exception as exc:
             primary = exc
             disable = True
@@ -570,9 +526,9 @@ class PartitionSourceLookahead:
         with condition:
             if not self.enabled:
                 raise RuntimeError("partition source lookahead is disabled")
-            if getattr(self, "_close_started", False):
+            if self._close_started:
                 raise RuntimeError("partition source lookahead is closing")
-            if getattr(self, "_consumer_inflight", False):
+            if self._consumer_inflight:
                 raise RuntimeError("partition lookahead result is already being consumed")
             # Materialize the next counter before publishing either lifecycle
             # latch. A MemoryError in PyLong growth therefore leaves no phantom
@@ -787,6 +743,7 @@ class PartitionSourceLookahead:
             pass
 
     def _release_finalizer_ticket(self) -> None:
+        """Acknowledge and retire lookahead finalizer authority."""
         ticket = getattr(self, "_finalizer_ticket", -1)
         owner = getattr(self, "_finalizer_owner", None)
         if type(ticket) is int and ticket >= 0:
@@ -808,7 +765,7 @@ class PartitionSourceLookahead:
         if os.getpid() != self._pid:
             return
         condition = self._lifecycle_condition()
-        deadline = monotonic() + float(getattr(self, "_close_timeout_seconds", 30.0))
+        deadline = monotonic() + self._close_timeout_seconds
         with condition:
             while self._close_in_progress:
                 remaining = deadline - monotonic()
@@ -829,7 +786,7 @@ class PartitionSourceLookahead:
                     raise RuntimeError(
                         "partition lookahead admissions exceeded their close deadline"
                     )
-            if getattr(self, "_protocol_violations", 0):
+            if self._protocol_violations:
                 self._close_in_progress = False
                 condition.notify_all()
                 raise RuntimeError("partition lookahead lifecycle protocol violation")
@@ -946,13 +903,15 @@ class PartitionSourceLookahead:
             self._release_finalizer_ticket()
 
     def _runtime_shutdown(self, *, deadline_seconds: float) -> bool:
+        """Shut down the process-local runtime during teardown."""
         normalized = normalize_duration(
             deadline_seconds,
             name="partition lookahead shutdown deadline",
             allow_zero=True,
         )
-        assert normalized is not None
-        previous = getattr(self, "_close_timeout_seconds", 30.0)
+        if normalized is None:
+            raise AssertionError("validated lookahead shutdown deadline cannot be absent")
+        previous = self._close_timeout_seconds
         self._close_timeout_seconds = min(previous, normalized)
         try:
             self.close()
@@ -1009,6 +968,7 @@ class PartitionSourceLookahead:
 
 
 def _reset_partition_lookahead_finalizers_after_fork() -> None:
+    """Reset partition lookahead finalizers after fork."""
     global _LOOKAHEAD_FINALIZER_OVERFLOWS, _LOOKAHEAD_FINALIZER_OVERFLOWED
     _LOOKAHEAD_FINALIZER_ESCROW.reset_after_fork()
     _LOOKAHEAD_FINALIZER_OVERFLOWS = 0

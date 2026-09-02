@@ -1,4 +1,9 @@
-// Returns the number of bytes required for one RLE level value.
+// Encodes Parquet data and dictionary page headers with definition-level
+// metadata. This fragment is included by the consolidated writer to isolate
+// format-specific implementation details.
+
+/// Returns the minimum bit width needed to represent a repetition or definition
+/// level.
 std::uint8_t level_bit_width(std::int16_t max_level) {
   std::uint8_t width = 0;
   while ((std::int16_t{1} << width) <= max_level) {
@@ -7,7 +12,7 @@ std::uint8_t level_bit_width(std::int16_t max_level) {
   return width;
 }
 
-// Appends one RLE run for repetition or definition levels.
+/// Appends one RLE run for repetition or definition levels.
 void append_rle_run(std::string &out, std::int64_t run_length,
                     std::uint16_t value, std::uint8_t bit_width) {
   append_varint(out, static_cast<std::uint64_t>(run_length) << 1U);
@@ -17,7 +22,7 @@ void append_rle_run(std::string &out, std::int64_t run_length,
   }
 }
 
-// Encodes Parquet RLE levels with a 4-byte length prefix.
+/// Encodes Parquet RLE levels with a 4-byte length prefix.
 std::string encode_levels(const std::vector<std::int16_t> &levels,
                           std::int16_t max_level) {
   const auto bit_width = level_bit_width(max_level);
@@ -44,7 +49,7 @@ std::string encode_levels(const std::vector<std::int16_t> &levels,
   return out;
 }
 
-// Encodes a Parquet data page header.
+/// Encodes a Parquet data page header.
 std::string encode_data_page_header(std::int32_t num_values,
                                     std::int32_t uncompressed_size,
                                     std::int32_t compressed_size,
@@ -64,6 +69,8 @@ std::string encode_data_page_header(std::int32_t num_values,
   return out;
 }
 
+/// Encodes a dictionary page header with its payload sizes and dictionary entry
+/// count.
 std::string encode_dictionary_page_header(std::int32_t num_values,
                                           std::int32_t uncompressed_size,
                                           std::int32_t compressed_size) {

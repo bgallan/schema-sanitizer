@@ -1,4 +1,6 @@
 // Reduces packet-local inference evidence in canonical row order.
+// The code keeps bounded shape discovery and scalar evidence consistent across
+// serial and parallel scans.
 
 #include "internal/inference/parallel_evidence.hh"
 
@@ -15,6 +17,8 @@ namespace {
 
 using EvidenceKind = InferenceEvidenceNode::Kind;
 
+/// Checks packet evidence indexes, subtree bounds, and node-kind invariants
+/// before reduction.
 sanitize::Status validate_node(const InferenceEvidencePacket &packet,
                                std::size_t index,
                                std::size_t row_end) noexcept {
@@ -36,6 +40,7 @@ sanitize::Status validate_node(const InferenceEvidencePacket &packet,
   return sanitize::Status::OK();
 }
 
+/// Reports whether shape evidence records an observed empty object or array.
 [[nodiscard]] bool is_empty_container(const InferenceEvidenceNode &node,
                                       std::size_t index) noexcept {
   return node.empty_container(index);
@@ -47,6 +52,8 @@ sanitize::Status scan_shape_value(InferenceContext *ctx,
                                   IngestDiagnostics *diagnostics, PathId path,
                                   bool *out_has_evidence);
 
+/// Scans named shape with explicit depth and memory limits while accumulating
+/// source-ordered evidence.
 sanitize::Status scan_named_shape(InferenceContext *ctx,
                                   const InferenceEvidencePacket &packet,
                                   std::size_t index, std::size_t row_end,
@@ -70,6 +77,8 @@ sanitize::Status scan_named_shape(InferenceContext *ctx,
                           out_has_evidence);
 }
 
+/// Scans shape object with explicit depth and memory limits while accumulating
+/// source-ordered evidence.
 sanitize::Status scan_shape_object(InferenceContext *ctx,
                                    const InferenceEvidencePacket &packet,
                                    std::size_t index, std::size_t row_end,
@@ -103,6 +112,8 @@ sanitize::Status scan_shape_object(InferenceContext *ctx,
   return sanitize::Status::OK();
 }
 
+/// Scans shape array with explicit depth and memory limits while accumulating
+/// source-ordered evidence.
 sanitize::Status scan_shape_array(InferenceContext *ctx,
                                   const InferenceEvidencePacket &packet,
                                   std::size_t index, std::size_t row_end,
@@ -130,6 +141,8 @@ sanitize::Status scan_shape_array(InferenceContext *ctx,
   return sanitize::Status::OK();
 }
 
+/// Scans shape value with explicit depth and memory limits while accumulating
+/// source-ordered evidence.
 sanitize::Status scan_shape_value(InferenceContext *ctx,
                                   const InferenceEvidencePacket &packet,
                                   std::size_t index, std::size_t row_end,
@@ -170,6 +183,8 @@ update_stats_value(InferenceContext *ctx, StatsNode *stats,
                    PathId path, StrId default_key_id, bool *out_has_evidence);
 
 template <bool Validate>
+/// Updates named stats from one observation while retaining existing inferred
+/// shape constraints.
 sanitize::Status
 update_named_stats(InferenceContext *ctx, StatsNode *parent,
                    const InferenceEvidencePacket &packet, std::size_t index,
@@ -198,6 +213,8 @@ update_named_stats(InferenceContext *ctx, StatsNode *parent,
 }
 
 template <bool Validate>
+/// Updates object stats from one observation while retaining existing inferred
+/// shape constraints.
 sanitize::Status
 update_object_stats(InferenceContext *ctx, StatsNode *stats,
                     const InferenceEvidencePacket &packet, std::size_t index,
@@ -234,6 +251,8 @@ update_object_stats(InferenceContext *ctx, StatsNode *stats,
 }
 
 template <bool Validate>
+/// Updates array stats from one observation while retaining existing inferred
+/// shape constraints.
 sanitize::Status
 update_array_stats(InferenceContext *ctx, StatsNode *element_stats,
                    const InferenceEvidencePacket &packet, std::size_t index,
@@ -262,6 +281,8 @@ update_array_stats(InferenceContext *ctx, StatsNode *element_stats,
 }
 
 template <bool Validate>
+/// Updates stats value from one observation while retaining existing inferred
+/// shape constraints.
 sanitize::Status
 update_stats_value(InferenceContext *ctx, StatsNode *stats,
                    const InferenceEvidencePacket &packet, std::size_t index,
@@ -369,6 +390,8 @@ update_stats_value(InferenceContext *ctx, StatsNode *stats,
   return sanitize::Status::OK();
 }
 
+/// Reduces one packet's shape evidence into global inference state in source
+/// order.
 sanitize::Status reduce_shape_row(InferenceContext *ctx,
                                   const InferenceEvidencePacket &packet,
                                   const InferenceEvidenceRow &row,
@@ -397,10 +420,8 @@ sanitize::Status reduce_shape_row(InferenceContext *ctx,
   return sanitize::Status::OK();
 }
 
-// The shape pass is authoritative. At four or more effective workers the
-// packet opts into a compile-time-specialized statistics traversal that does
-// not repeat its node/key/span checks. Lower concurrency retains the original
-// validated traversal because the extra branches benchmark better there.
+/// Reduces one evidence row into scalar statistics, optionally repeating
+/// structural validation for lower-concurrency traversal.
 template <bool Validate>
 sanitize::Status reduce_stats_row(InferenceContext *ctx,
                                   const InferenceEvidencePacket &packet,

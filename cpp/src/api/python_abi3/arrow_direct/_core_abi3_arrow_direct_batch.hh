@@ -1,4 +1,6 @@
-// Declares Arrow direct RowBatch construction helpers.
+// Declares Arrow direct RowBatch construction helpers. These routines keep
+// Arrow schema interpretation and buffer ownership explicit at the ABI
+// boundary.
 
 #pragma once
 
@@ -13,8 +15,8 @@
 
 namespace core_abi3_internal {
 
-// Builds stable RowRef and FieldRef storage for one bounded slice of an Arrow
-// C Data batch while sharing ownership of the original buffers.
+/// Builds stable row and field references for a bounded Arrow C Data batch
+/// slice. The returned batch shares ownership of the original buffers.
 sanitize::Result<sanitize::RowBatch>
 build_arrow_direct_row_batch(std::shared_ptr<ArrowArrayStorage> array_owner,
                              const std::vector<ArrowInputNode> &fields,

@@ -1,4 +1,6 @@
-// Shared JSON number rendering for ABI3 JSON encoders.
+// Declares shared JSON number rendering for ABI3 JSON encoders. The routines
+// preserve JSON value semantics while enforcing bounded native ownership and
+// Python errors.
 
 #pragma once
 

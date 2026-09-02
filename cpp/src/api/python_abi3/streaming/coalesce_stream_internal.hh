@@ -1,4 +1,7 @@
-// Internal model and phase boundaries for Arrow C stream batch coalescing.
+// Declares the internal model and phase boundaries for Arrow C stream batch
+// coalescing. The phases validate schemas, append slices, and export one owned
+// Arrow array under budget.
+
 #pragma once
 
 #include "internal/abi/python_abi3/base.hh"

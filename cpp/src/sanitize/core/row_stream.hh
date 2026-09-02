@@ -1,4 +1,6 @@
-// Defines frontend row streams and ownership handles.
+// Defines frontend row streams, batches, and backing-storage ownership handles.
+// Rows can carry parsed fields or validated raw slices while releasers and
+// shared owners keep their source memory valid through materialization.
 
 #pragma once
 
@@ -25,7 +27,9 @@ class OperationTaskArena;
 // after materialization has copied the row into the analytical output.
 class RowBatchReleaser {
 public:
+  /// Enables polymorphic release of frontend-owned row backing state.
   virtual ~RowBatchReleaser() = default;
+  /// Releases backing storage for `count` rows beginning at `begin`.
   virtual void ReleaseRows(std::size_t begin, std::size_t count) noexcept = 0;
 };
 
@@ -112,26 +116,26 @@ struct FrontendVTable {
 
 class FrontendHandle {
 public:
-  // Creates an empty frontend handle.
+  /// Creates an empty frontend handle.
   FrontendHandle() = default;
-  // Creates a frontend handle from an implementation and vtable.
+  /// Creates a frontend handle from an implementation and vtable.
   FrontendHandle(void *self, const FrontendVTable *vt) : self_(self), vt_(vt) {}
-  // Destroys the FrontendHandle.
+  /// Releases the erased frontend implementation through its vtable.
   ~FrontendHandle() { destroy(); }
 
-  // Disables copying frontend handles.
+  /// Disables copying frontend handles.
   FrontendHandle(const FrontendHandle &) = delete;
-  // Disables copy assignment.
+  /// Disables copy assignment.
   FrontendHandle &operator=(const FrontendHandle &) = delete;
 
-  // Moves a frontend handle.
+  /// Moves a frontend handle.
   FrontendHandle(FrontendHandle &&other) noexcept
       : self_(other.self_), vt_(other.vt_) {
     other.self_ = nullptr;
     other.vt_ = nullptr;
   }
 
-  // Replaces this handle with another frontend handle.
+  /// Replaces this handle with another frontend handle.
   FrontendHandle &operator=(FrontendHandle &&other) noexcept {
     if (this != &other) {
       destroy();
@@ -143,38 +147,38 @@ public:
     return *this;
   }
 
-  // Returns whether the object contains a value.
+  /// Reports whether the handle contains an implementation and its vtable.
   explicit operator bool() const noexcept { return self_ && vt_; }
 
-  // Rewinds the underlying frontend.
+  /// Rewinds the underlying frontend.
   void reset() noexcept {
     if (!self_ || !vt_)
       return;
     vt_->reset(self_);
   }
 
-  // Passes the compiled materialization plan to the frontend.
+  /// Passes the compiled materialization plan to the frontend.
   void set_plan(const CompiledPlan *plan) noexcept {
     if (!self_ || !vt_)
       return;
     vt_->set_plan(self_, plan);
   }
 
-  // Selects the internal row representation used by capable frontends.
+  /// Selects the internal row representation used by capable frontends.
   void set_materialization_mode(FrontendMaterializationMode mode) noexcept {
     if (self_ && vt_ && vt_->set_materialization_mode) {
       vt_->set_materialization_mode(self_, mode);
     }
   }
 
-  // Installs the operation-scoped tracked allocation pool when supported.
+  /// Installs the operation-scoped tracked allocation pool when supported.
   void set_memory_pool(std::shared_ptr<void> pool) noexcept {
     if (self_ && vt_ && vt_->set_memory_pool) {
       vt_->set_memory_pool(self_, std::move(pool));
     }
   }
 
-  // Installs the operation-scoped shared worker arena when supported.
+  /// Installs the operation-scoped shared worker arena when supported.
   void set_task_arena(
       std::shared_ptr<internal::OperationTaskArena> task_arena) noexcept {
     if (self_ && vt_ && vt_->set_task_arena) {
@@ -182,7 +186,7 @@ public:
     }
   }
 
-  // Returns the next batch.
+  /// Requests the next capacity-bounded row batch from the frontend.
   sanitize::Result<RowBatch> next_batch(int64_t capacity) {
     if (!self_ || !vt_)
       return sanitize::Status::Invalid("FrontendHandle: null frontend");
@@ -190,7 +194,7 @@ public:
   }
 
 private:
-  // Destroys the object state.
+  /// Releases the current implementation and clears the erased handle.
   void destroy() noexcept {
     if (self_ && vt_) {
       vt_->destroy(self_);

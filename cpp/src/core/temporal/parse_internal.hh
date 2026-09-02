@@ -1,4 +1,6 @@
-// Shared fixed-width parsing helpers for temporal primitives.
+// Provides shared fixed-width digit parsing for temporal primitives.
+// The inline helpers validate input bounds and ASCII digits before committing
+// two- or four-digit numeric fields to caller-owned output.
 
 #pragma once
 
@@ -7,8 +9,10 @@
 
 namespace sanitize::temporal_internal {
 
+/// Returns whether one byte is an ASCII decimal digit.
 inline bool is_digit(char c) noexcept { return c >= '0' && c <= '9'; }
 
+/// Parses exactly two decimal digits at the requested input offset.
 inline bool parse_2d(std::string_view s, std::size_t pos, int *out) {
   if (pos + 1 >= s.size())
     return false;
@@ -20,6 +24,7 @@ inline bool parse_2d(std::string_view s, std::size_t pos, int *out) {
   return true;
 }
 
+/// Parses exactly four decimal digits at the requested input offset.
 inline bool parse_4d(std::string_view s, std::size_t pos, int *out) {
   if (pos + 3 >= s.size())
     return false;

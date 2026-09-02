@@ -1,4 +1,7 @@
 // Estimates conservative encoded row sizes for bounded text-output packets.
+// The helpers bound parallel text encoding memory while committing prepared
+// fragments in source order.
+
 #pragma once
 
 #include "internal/json_output/schema/model.hh"
@@ -14,6 +17,7 @@ namespace jsonl = sanitize::internal::jsonl_stream_writer;
 
 inline constexpr std::int64_t kMaximumEstimateDepth = 64;
 
+/// Adds two size estimates and clamps the result to the caller's cap.
 [[nodiscard]] inline std::int64_t
 add_capped(std::int64_t left, std::int64_t right, std::int64_t cap) noexcept {
   if (left >= cap || right >= cap - left) {
@@ -22,6 +26,8 @@ add_capped(std::int64_t left, std::int64_t right, std::int64_t cap) noexcept {
   return left + right;
 }
 
+/// Multiplies two output-size estimates and clamps the result to the caller's
+/// cap.
 [[nodiscard]] inline std::int64_t multiply_capped(std::int64_t value,
                                                   std::int64_t factor,
                                                   std::int64_t cap) noexcept {
@@ -34,12 +40,15 @@ add_capped(std::int64_t left, std::int64_t right, std::int64_t cap) noexcept {
   return value * factor;
 }
 
+/// Reads one bit from a non-null Arrow validity bitmap.
 [[nodiscard]] inline bool validity_bit_is_set(const std::uint8_t *bitmap,
                                               std::int64_t index) noexcept {
   return (bitmap[index >> 3] & static_cast<std::uint8_t>(1u << (index & 7))) !=
          0;
 }
 
+/// Tests Arrow validity at the logical index, treating an absent bitmap as all
+/// valid.
 [[nodiscard]] inline bool array_is_null(const ArrowArray &array,
                                         std::int64_t row) noexcept {
   if (array.null_count == 0 || !array.buffers || !array.buffers[0]) {
@@ -50,6 +59,7 @@ add_capped(std::int64_t left, std::int64_t right, std::int64_t cap) noexcept {
 }
 
 template <typename OffsetT>
+/// Returns the checked payload span described by Arrow variable-width offsets.
 [[nodiscard]] inline std::int64_t
 variable_width_bytes(const ArrowArray &array, std::int64_t row,
                      std::int64_t cap) noexcept {
@@ -70,6 +80,8 @@ variable_width_bytes(const ArrowArray &array, std::int64_t row,
   return static_cast<std::int64_t>(width);
 }
 
+/// Reads one signed or unsigned dictionary index using the field's declared
+/// physical width.
 [[nodiscard]] inline std::int64_t
 dictionary_index_at(const ArrowArray &array, jsonl::JsonlKind kind,
                     std::int64_t row) noexcept {
@@ -105,6 +117,8 @@ dictionary_index_at(const ArrowArray &array, jsonl::JsonlKind kind,
   }
 }
 
+/// Estimates the encoded bytes for one Arrow value without exceeding the
+/// caller's cap.
 [[nodiscard]] inline std::int64_t
 estimate_value_bytes(const jsonl::JsonlField &field, const ArrowArray &array,
                      std::int64_t row, std::int64_t cap,
@@ -266,12 +280,15 @@ estimate_value_bytes(const jsonl::JsonlField &field, const ArrowArray &array,
   return cap;
 }
 
+/// Estimates the encoded bytes for one JSON Lines row without exceeding the
+/// caller's cap.
 [[nodiscard]] inline std::int64_t
 estimate_jsonl_row_bytes(const jsonl::JsonlField &root, const ArrowArray &array,
                          std::int64_t row, std::int64_t cap) noexcept {
   return add_capped(estimate_value_bytes(root, array, row, cap), 1, cap);
 }
 
+/// Reports whether an Arrow scalar has a schema-only JSON output size bound.
 [[nodiscard]] inline bool
 fixed_cost_jsonl_scalar_kind(jsonl::JsonlKind kind) noexcept {
   using Kind = jsonl::JsonlKind;
@@ -308,6 +325,7 @@ fixed_cost_jsonl_scalar_kind(jsonl::JsonlKind kind) noexcept {
   }
 }
 
+/// Returns the schema-derived maximum JSON bytes for one fixed-cost scalar.
 [[nodiscard]] inline std::int64_t
 fixed_jsonl_scalar_output_upper_bound(const jsonl::JsonlField &field,
                                       std::int64_t cap) noexcept {
@@ -354,10 +372,8 @@ fixed_jsonl_scalar_output_upper_bound(const jsonl::JsonlField &field,
   }
 }
 
-// Returns a schema-only conservative row bound for flat fixed-cost JSONL.
-// The result equals estimate_jsonl_row_bytes() for every non-null row, so
-// packet boundaries remain unchanged while coordinator planning becomes O(1)
-// per row instead of O(column-count).
+/// Returns a conservative schema-only JSON Lines row bound for flat fixed-cost
+/// fields.
 [[nodiscard]] inline std::int64_t estimate_wide_fixed_jsonl_row_upper_bound(
     const jsonl::JsonlField &root) noexcept {
   const auto cap = std::numeric_limits<std::int64_t>::max();
@@ -381,8 +397,8 @@ fixed_jsonl_scalar_output_upper_bound(const jsonl::JsonlField &field,
   return total;
 }
 
-// The schema-only bound intentionally skips null-aware row inspection. Use it
-// only when every top-level fixed-width child reports an exact zero null count.
+/// Reports whether a wide fixed-cost batch has no root or top-level child
+/// nulls.
 [[nodiscard]] inline bool
 wide_fixed_jsonl_batch_has_no_nulls(const jsonl::JsonlField &root,
                                     const ArrowArray &array) noexcept {
@@ -399,6 +415,8 @@ wide_fixed_jsonl_batch_has_no_nulls(const jsonl::JsonlField &root,
   return true;
 }
 
+/// Reports whether an Arrow field can use the allocation-free direct CSV scalar
+/// formatter.
 [[nodiscard]] inline bool
 direct_csv_scalar_kind(jsonl::JsonlKind kind) noexcept {
   using Kind = jsonl::JsonlKind;
@@ -421,6 +439,8 @@ direct_csv_scalar_kind(jsonl::JsonlKind kind) noexcept {
   }
 }
 
+/// Estimates the escaped bytes for one CSV cell without exceeding the caller's
+/// cap.
 [[nodiscard]] inline std::int64_t
 estimate_csv_cell_bytes(const jsonl::JsonlField &field, const ArrowArray &array,
                         std::int64_t row, std::int64_t cap) noexcept {
@@ -446,6 +466,8 @@ estimate_csv_cell_bytes(const jsonl::JsonlField &field, const ArrowArray &array,
   return multiply_capped(estimate_value_bytes(field, array, row, cap), 2, cap);
 }
 
+/// Estimates the encoded bytes for one CSV row without exceeding the caller's
+/// cap.
 [[nodiscard]] inline std::int64_t
 estimate_csv_row_bytes(const jsonl::JsonlField &root, const ArrowArray &array,
                        std::int64_t row, std::int64_t cap) noexcept {

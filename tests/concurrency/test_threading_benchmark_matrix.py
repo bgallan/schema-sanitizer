@@ -1,4 +1,8 @@
-"""Tests for the multidimensional threading benchmark orchestrator."""
+"""Validate the multidimensional threading benchmark matrix and its compact CI profile.
+
+The standard plan must vary every required local dimension, add CPU-quota cases when supported,
+reject child cross-mode mismatches, and remain small and portable enough for continuous testing.
+"""
 
 from __future__ import annotations
 
@@ -31,17 +35,31 @@ def test_matrix_rejects_child_cross_mode_mismatch(monkeypatch, tmp_path: Path) -
     """A child benchmark mismatch must fail the complete matrix."""
     case = matrix._cases("ci")[0]
 
-    def fake_run(command: list[str], *, check: bool, stdout: object) -> None:
+    def fake_run(command: list[str], *, check: bool, stdout: object, timeout: float) -> None:
         """Write one deliberately non-equivalent child report."""
         assert check is True
         assert stdout is not None
+        assert timeout == 3_600
         output = Path(command[command.index("--output") + 1])
         output.write_text(
-            json.dumps({"cases": {"bad": {"equivalent": False}}}),
+            json.dumps(
+                {
+                    "dimensions": matrix._case_dimensions(
+                        case,
+                        rows=8,
+                        warmups=0,
+                        repeats=1,
+                        selection="parquet",
+                        pipeline_shape="all",
+                        pipeline_format="all",
+                    ),
+                    "cases": {"bad": {"equivalent": False}},
+                }
+            ),
             encoding="utf-8",
         )
 
-    monkeypatch.setattr(matrix.subprocess, "run", fake_run)
+    monkeypatch.setattr(matrix, "run_command", fake_run)
     try:
         matrix._run_case(
             case,
@@ -49,6 +67,8 @@ def test_matrix_rejects_child_cross_mode_mismatch(monkeypatch, tmp_path: Path) -
             warmups=0,
             repeats=1,
             selection="parquet",
+            pipeline_shape="all",
+            pipeline_format="all",
             directory=tmp_path,
         )
     except RuntimeError as exc:

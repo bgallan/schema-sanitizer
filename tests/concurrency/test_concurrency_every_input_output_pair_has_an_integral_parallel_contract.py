@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency every input output pair has an integral parallel contract."""
+"""Require an integral parallel contract for every public input and output pairing.
+
+Python sequences must be encoded only once across replays, one-shot generators must seek without
+reiteration, and the shared single-encode route must reach every native output format.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,6 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl import python_rows
@@ -81,10 +84,10 @@ def _read_all(reader: PythonRowsJsonlByteReader, chunk_bytes: int = 16_381) -> b
 
 
 def test_every_input_output_pair_has_an_integral_parallel_contract() -> None:
-    """All eight inputs combine explicitly with all seven outputs."""
+    """All seven inputs combine explicitly with all seven outputs."""
     pairs = concurrency_pair_guarantees()
     assert set(pairs) == set(INPUT_CONCURRENCY_COVERAGE)
-    assert sum(len(outputs) for outputs in pairs.values()) == 56
+    assert sum(len(outputs) for outputs in pairs.values()) == 49
     for input_name, outputs in pairs.items():
         assert set(outputs) == set(OUTPUT_CONCURRENCY_COVERAGE)
         for contract in outputs.values():
@@ -100,9 +103,9 @@ def test_every_input_output_pair_has_an_integral_parallel_contract() -> None:
 
 def test_sequence_rows_are_encoded_once_across_repeated_replays(
     monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
 ) -> None:
-    """A reusable sequence no longer pays a second native object walk."""
-    require_native()
+    """A reusable sequence pays for one native object walk."""
     original = python_rows.PYTHON_ROWS_JSONL_BYTES
     encoded_ranges: list[tuple[int, int]] = []
 
@@ -128,9 +131,8 @@ def test_sequence_rows_are_encoded_once_across_repeated_replays(
     assert sum(stop - start for start, stop in encoded_ranges) == len(rows)
 
 
-def test_generator_seek_is_progressive_and_never_reiterates() -> None:
+def test_generator_seek_is_progressive_and_never_reiterates(require_native: None) -> None:
     """Schema replay starts immediately instead of draining the generator first."""
-    require_native()
     yielded = 0
 
     def source() -> Iterator[dict[str, int]]:
@@ -174,9 +176,9 @@ def test_single_encode_route_reaches_every_native_output(
     converter_name: str,
     suffix: str,
     extra: dict[str, str],
+    require_native: None,
 ) -> None:
     """The common one-pass Python source route feeds every native sink."""
-    require_native()
     original = python_rows.PYTHON_ROWS_JSONL_BYTES
     encoded_rows = 0
 

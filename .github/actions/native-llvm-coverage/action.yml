@@ -4,29 +4,45 @@ description: Build an LLVM-instrumented extension and publish native coverage.
 runs:
   using: composite
   steps:
-    - name: Install LLVM 18 coverage toolchain
+    - name: Require the runner-provided LLVM 18 coverage toolchain
       shell: bash
       run: |
-        sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
-          -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-        sudo apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 \
-          -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
-          install -y clang-18 llvm-18
-        clang-18 --version
-        llvm-profdata-18 --version
-        llvm-cov-18 --version
-    - name: Install instrumented package
+        set -euo pipefail
+        for executable in clang-18 clang++-18 llvm-profdata-18 llvm-cov-18; do
+          [[ "$(command -v "${executable}")" == "/usr/bin/${executable}" ]]
+        done
+        [[ "$(clang-18 -dumpfullversion -dumpversion)" == '18.1.3' ]]
+        [[ "$(clang++-18 -dumpfullversion -dumpversion)" == '18.1.3' ]]
+        llvm-profdata-18 --version | grep -F 'LLVM version 18.1.3'
+        llvm-cov-18 --version | grep -F 'LLVM version 18.1.3'
+    - name: Install native coverage prerequisites
+      env:
+        PIP_BUILD_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
       shell: bash
       run: |
-        python -m pip install pip==26.1.2 ninja==1.13.0 cmake==4.3.4 \
-          scikit-build-core==0.11.6
-        python -m pip install pytest==9.1.1 pyarrow==25.0.1 polars==1.43.2
+        set -euo pipefail
+        python meta/ci/quality/ensure_pinned_pip.py
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/build-tools.txt \
+          --packages ninja cmake scikit-build-core
+        python -m meta.ci.quality.install_locked_requirements \
+          --lock meta/ci/requirements/platform-tests.txt --all
+        python -m pip check
+    - name: Build and install instrumented package
+      env:
+        PIP_CONSTRAINT: ${{ github.workspace }}/meta/ci/requirements/build-tools.txt
+      shell: bash
+      run: |
+        set -euo pipefail
+        rm -rf -- coverage-native .work/build
         mkdir -p coverage-native/raw
         python -m pip install --no-build-isolation -v \
           --config-settings=install.strip=false \
           --config-settings=cmake.define.CMAKE_C_COMPILER=clang-18 \
           --config-settings=cmake.define.CMAKE_CXX_COMPILER=clang++-18 \
           --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_LTO=OFF \
+          --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_PCH=OFF \
           --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_COVERAGE=ON \
           --config-settings=cmake.define.SCHEMA_SANITIZER_REQUIRE_ZLIB=ON \
           --config-settings=cmake.define.SCHEMA_SANITIZER_ENABLE_WERROR=ON \
@@ -35,46 +51,17 @@ runs:
     - name: Run native coverage suites
       shell: bash
       run: |
-        mkdir -p coverage-native/raw/regular
-        pytest -q \
-          tests/io/test_api.py \
-          tests/io/test_input_xml_and_public_api.py \
-          tests/sinks/test_sinks_csv_jsonl.py \
-          tests/pipeline/test_csv_header_modes.py \
-          tests/pipeline/test_csv_union_projection.py
-        mv coverage-native/raw/schema-sanitizer-*.profraw \
-          coverage-native/raw/regular/
-        mkdir -p coverage-native/raw/adversarial
-        pytest -q \
-          tests/io/test_contracts.py \
-          tests/concurrency/test_runtime_stream_materialization_and_registry_probes.py \
-          tests/concurrency/test_runtime_registry_round_trips_and_result_materialization.py \
-          tests/concurrency/test_runtime_resource_close_and_finalization.py \
-          tests/sinks/test_streaming_writer_lifecycle.py \
-          tests/remote/test_async_remote_scheduler.py \
-          tests/quality/test_high_risk_coverage_gaps.py \
-          tests/parquet/test_parquet_native_recursive_fuzz_runtime.py
-        mv coverage-native/raw/schema-sanitizer-*.profraw \
-          coverage-native/raw/adversarial/
-        mkdir -p coverage-native/raw/integration
-        pytest -q \
-          tests/io/test_input_remote_file_and_directory_staging.py \
-          tests/io/test_input_remote_directory_discovery.py \
-          tests/io/test_input_remote_lazy_json_plans.py \
-          tests/remote/test_cloud_emulator_configuration.py \
-          tests/remote/test_bigquery_integration.py \
-          tests/pipeline/test_modified_time_csv_discovery.py \
-          tests/pipeline/test_modified_time_csv_planning.py \
-          tests/pipeline/test_source_manifest_inputs.py \
-          tests/pipeline/test_modified_time_csv_schema.py \
-          tests/pipeline/test_example_08_orchestration.py \
-          tests/pipeline/test_example_08_fake_cloud.py \
-          tests/pipeline/test_modified_time_csv_contracts.py
-        mv coverage-native/raw/schema-sanitizer-*.profraw \
-          coverage-native/raw/integration/
+        set -euo pipefail
+        for suite in regular adversarial integration; do
+          mkdir -p "coverage-native/raw/${suite}"
+          python meta/ci/quality/run_coverage_suite.py native "${suite}"
+          mv coverage-native/raw/schema-sanitizer-*.profraw \
+            "coverage-native/raw/${suite}/"
+        done
     - name: Render LLVM reports
       shell: bash
-      run: |
+      run: |-
+        set -euo pipefail
         EXTENSION=$(python - <<'PY'
         import schema_sanitizer._core_abi3 as core
         print(core.__file__)
@@ -84,35 +71,64 @@ runs:
           llvm-profdata-18 merge -sparse coverage-native/raw/${suite}/*.profraw \
             -o coverage-native/${suite}.profdata
           llvm-cov-18 report "${EXTENSION}" \
+            -compilation-dir="${GITHUB_WORKSPACE}" \
             -instr-profile=coverage-native/${suite}.profdata \
             > coverage-native/${suite}-summary.txt
         done
         llvm-profdata-18 merge -sparse coverage-native/raw/*/*.profraw \
           -o coverage-native/combined.profdata
-        llvm-cov-18 show "${EXTENSION}" \
+        render_diagnostics=coverage-native/llvm-cov-render.stderr
+        if ! llvm-cov-18 show "${EXTENSION}" \
+          -compilation-dir="${GITHUB_WORKSPACE}" \
           -instr-profile=coverage-native/combined.profdata \
           -format=html \
           -show-branches=count \
-          -output-dir=coverage-native/html
+          -output-dir=coverage-native/html \
+          2>"${render_diagnostics}"; then
+          cat "${render_diagnostics}" >&2
+          exit 1
+        fi
+        if [[ -s "${render_diagnostics}" ]]; then
+          cat "${render_diagnostics}" >&2
+          exit 1
+        fi
+        rm -- "${render_diagnostics}"
+        test -s coverage-native/html/index.html
         llvm-cov-18 report "${EXTENSION}" \
+          -compilation-dir="${GITHUB_WORKSPACE}" \
           -instr-profile=coverage-native/combined.profdata \
           > coverage-native/combined-summary.txt
+        llvm-cov-18 export "${EXTENSION}" \
+          -compilation-dir="${GITHUB_WORKSPACE}" \
+          -instr-profile=coverage-native/combined.profdata \
+          -summary-only \
+          > coverage-native/combined-summary.json
+        python meta/ci/native/check_llvm_coverage.py create \
+          --report coverage-native/combined-summary.json \
+          --certificate coverage-native/native-coverage-certificate.json \
+          --github-sha "${GITHUB_SHA}" \
+          --github-run-id "${GITHUB_RUN_ID}" \
+          --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
         cat coverage-native/combined-summary.txt
-    - name: Upload native LLVM coverage
-      id: upload-native-llvm-coverage
+        cat coverage-native/native-coverage-certificate.json
+    - name: Upload the native coverage certificate
+      id: upload-native-coverage-certificate
       continue-on-error: true
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
-        name: native-llvm-coverage
-        path: coverage-native/
+        name: native-coverage-certificate
+        path: coverage-native/native-coverage-certificate.json
         if-no-files-found: error
-        retention-days: 14
-    - name: Retry native LLVM coverage upload after a transport failure
-      if: ${{ always() && steps.upload-native-llvm-coverage.outcome == 'failure' }}
+        retention-days: 7
+        compression-level: 0
+        overwrite: true
+    - name: Retry the native coverage certificate upload
+      if: ${{ always() && steps.upload-native-coverage-certificate.outcome == 'failure' }}
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
       with:
-        name: native-llvm-coverage
-        path: coverage-native/
+        name: native-coverage-certificate
+        path: coverage-native/native-coverage-certificate.json
         if-no-files-found: error
-        retention-days: 14
+        retention-days: 7
+        compression-level: 0
         overwrite: true

@@ -1,4 +1,6 @@
-// Declares bump-arena allocation for short-lived parser data.
+// Declares stable bump-arena allocation for short-lived parser data. The
+// arena accounts both payload blocks and metadata through one native
+// memory pool.
 
 #pragma once
 
@@ -21,31 +23,33 @@ namespace sanitize::internal {
 // be accounted and controlled consistently.
 class BumpArena {
 public:
-  // Creates an arena backed by the configured memory pool.
+  /// Creates an arena backed by the configured memory pool.
   explicit BumpArena(void *pool_handle = nullptr,
                      std::size_t block_size = (1u << 20));
-  // Destroys the BumpArena.
+  /// Returns every remaining backing block to the configured pool.
   ~BumpArena();
 
-  // Disables copy construction.
+  /// Disables copy construction because the arena uniquely owns its blocks.
   BumpArena(const BumpArena &) = delete;
-  // Disables copy assignment.
+  /// Disables copy assignment because the arena uniquely owns its blocks.
   BumpArena &operator=(const BumpArena &) = delete;
-  // Disables move construction.
+  /// Disables moves so previously returned addresses remain tied to
+  /// this arena.
   BumpArena(BumpArena &&) = delete;
-  // Disables move assignment.
+  /// Disables move assignment to preserve stable allocation ownership.
   BumpArena &operator=(BumpArena &&) = delete;
 
-  // Reset allocations (keeps blocks for reuse).
+  /// Clears used storage, retaining ordinary blocks for
+  /// subsequent allocations.
   void reset() noexcept;
 
-  // Allocate n bytes aligned to `align`.
+  /// Returns stable storage for `n` bytes at the requested alignment.
   void *alloc(std::size_t n, std::size_t align = alignof(std::max_align_t));
 
-  // Copies a string into stable arena storage.
+  /// Copies a string into stable arena storage.
   std::string_view append(std::string_view s);
 
-  // Returns the operation pool used by arena payload and metadata allocations.
+  /// Returns the operation pool used by payload and metadata allocations.
   [[nodiscard]] void *pool() const noexcept { return pool_handle_; }
 
 private:
@@ -55,7 +59,7 @@ private:
     std::size_t used = 0;
   };
 
-  // Adds a backing block large enough for the requested byte count.
+  /// Adds a backing block large enough for the requested byte count.
   void add_block(std::size_t want);
 
   void *pool_handle_ = nullptr;

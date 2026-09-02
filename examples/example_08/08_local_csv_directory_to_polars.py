@@ -1,4 +1,8 @@
-"""Validate example 08 against a local directory of heterogeneous CSV files."""
+"""Validate example 08 against a local directory of heterogeneous CSV files.
+
+The entry point validates local paths and runs the infrastructure-free version of the
+analytical workflow.
+"""
 
 from __future__ import annotations
 

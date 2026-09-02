@@ -1,4 +1,6 @@
 // Builds the Arrow C stream for a prepared ingestion plan.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/stream.hh"
 

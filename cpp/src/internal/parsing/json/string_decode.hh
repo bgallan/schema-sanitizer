@@ -1,4 +1,6 @@
 // Declares JSON escape decoding into caller-provided buffers.
+// The parser validates bounded input while preserving offsets, zero-copy views,
+// and deterministic diagnostics.
 
 #pragma once
 
@@ -20,7 +22,8 @@ struct DecodeErrors {
   std::string_view invalid_escape;
 };
 
-// Decodes json string slice.
+/// Decodes one JSON string slice into caller storage with absolute-offset
+/// diagnostics.
 sanitize::Result<std::string_view>
 decode_json_string_slice(char *out, const char *begin, const char *end,
                          std::string_view full_text, std::size_t base_offset,

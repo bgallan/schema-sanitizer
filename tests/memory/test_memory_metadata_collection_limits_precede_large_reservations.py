@@ -1,4 +1,6 @@
-"""Regression coverage for memory metadata collection limits precede large reservations."""
+"""Enforces metadata collection limits ahead of batch allocation, root or child generation,
+native row iteration, and serializer scratch. Impossible offsets or span counts fail
+before materialization, while large transient buffers are wiped and released."""
 
 from __future__ import annotations
 
@@ -6,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from conftest import require_native
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -83,20 +84,19 @@ def test_serializers_wipe_and_release_large_transient_buffers() -> None:
     assert "write statistics overflow" in ordered
 
 
-def test_native_row_span_count_is_rejected_before_iteration() -> None:
+def test_native_row_span_count_is_rejected_before_iteration(require_native: None) -> None:
     """A synthetic huge sequence must fail by count without reading any element."""
-    require_native()
     from schema_sanitizer.core_impl.native_runtime import native_core
 
     class HugeSequence:
         """Helper class used by this regression."""
 
         def __len__(self) -> int:
-            """Helper used by this regression."""
+            """Return the number of values tracked by the huge sequence test double."""
             return 1_000_001
 
         def __getitem__(self, index: int) -> Any:
-            """Helper used by this regression."""
+            """Return the requested value from the huge sequence test double."""
             raise AssertionError(f"element {index} must not be read")
 
     with pytest.raises(ValueError, match="row-span entry count"):
@@ -105,9 +105,9 @@ def test_native_row_span_count_is_rejected_before_iteration() -> None:
 
 def test_native_generated_metadata_batch_budget_rejects_before_materialization(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Repeated metadata cannot allocate beyond the configured batch budget."""
-    require_native()
     from schema_sanitizer.core_impl.execution import ExecutionContext
     from schema_sanitizer.core_impl.native_symbols import (
         JSONL_STREAM_WRITE_WITH_METADATA,

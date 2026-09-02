@@ -65,7 +65,7 @@ execution policy, schema registry, and detected schema changes.
 
 ## [What it does](#index)
 
-- Reads CSV, JSON, JSON arrays, JSONL/NDJSON, XML, Parquet, and Python
+- Reads CSV, JSON, JSON arrays, JSONL, XML, Parquet, and Python
   dictionary iterables.
 - Processes individual files, non-recursive directories, and remote objects.
 - Produces PyArrow, pandas, Polars, DuckDB, CSV, JSONL, or Parquet.
@@ -151,6 +151,9 @@ python -m pip install -e ".[dev]"
 pytest -q
 pre-commit run --all-files
 ```
+
+The first pre-commit run provisions its exact hash-verified tools below
+`.work/pre-commit-tools`; it does not install them into the active environment.
 
 See the [development guide](docs/project/development.md) for native builds, focused
 tests, benchmarks, and CI.

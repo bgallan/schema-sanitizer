@@ -1,10 +1,13 @@
-// Shared native path-source helpers for Python ABI3 wrappers.
+// Declares native path-source plans, grouped inputs, and Python ABI3 helper
+// contracts. The data models preserve source order and explicit ownership
+// across multi-file operations.
 
 #pragma once
 
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
+#include "internal/abi/python_abi3/native_state.hh"
 
 #include <cstddef>
 #include <memory>
@@ -68,6 +71,8 @@ struct ParsedPathSources {
   std::vector<PathSourceSpec> owned;
   const std::vector<PathSourceSpec> *borrowed = nullptr;
 
+  /// Returns the referenced path-source descriptor after bounds validation by
+  /// the caller.
   [[nodiscard]] const std::vector<PathSourceSpec> &get() const noexcept {
     return borrowed ? *borrowed : owned;
   }
@@ -116,12 +121,12 @@ void merge_path_source_diagnostics(sanitize::IngestDiagnostics &out,
                                    const sanitize::IngestDiagnostics &child);
 
 sanitize::Result<sanitize::PreparedIngest>
-prepare_path_source_ingest(schema_sanitizer_context *ctx,
+prepare_path_source_ingest(NativeContext *ctx,
                            const sanitize::PreparedOptionsPtr &prepared,
                            const PathSourceSpec &source);
 
 sanitize::Result<PathSourceRegistryProbeResult> merge_path_source_schemas(
-    schema_sanitizer_context *ctx, const std::vector<PathSourceSpec> &sources,
+    NativeContext *ctx, const std::vector<PathSourceSpec> &sources,
     const sanitize::PreparedOptionsPtr &prepared, const char *registry_json,
     const char *field_name_policy, bool skip_invalid_json_sources = false,
     const sanitize::LogicalSchema *previous_schema = nullptr,

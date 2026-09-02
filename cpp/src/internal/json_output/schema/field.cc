@@ -1,4 +1,6 @@
 // Parses Arrow C schemas into the compact native writer model.
+// The code validates Arrow layouts and emits deterministic JSON with correct
+// null and logical-type semantics.
 
 #include "internal/json_output/schema/model.hh"
 
@@ -18,6 +20,8 @@ constexpr std::int64_t kMaxJsonlSchemaDepth = 64;
 constexpr std::int64_t kMaxJsonlSchemaChildren = 65'536;
 constexpr std::int64_t kMaxJsonlSchemaNodes = 1'000'000;
 
+/// Parses decimal format and rejects incomplete, malformed, or numerically
+/// overflowing input.
 bool parse_decimal_format(std::string_view format, JsonlField *field) {
   if (!field) {
     return false;
@@ -33,6 +37,8 @@ bool parse_decimal_format(std::string_view format, JsonlField *field) {
   return true;
 }
 
+/// Parses fixed size list format and rejects incomplete, malformed, or
+/// numerically overflowing input.
 bool parse_fixed_size_list_format(std::string_view format, JsonlField *field) {
   if (!format.starts_with("+w:") || !field) {
     return false;
@@ -48,6 +54,8 @@ bool parse_fixed_size_list_format(std::string_view format, JsonlField *field) {
   return true;
 }
 
+/// Parses fixed size binary format and rejects incomplete, malformed, or
+/// numerically overflowing input.
 bool parse_fixed_size_binary_format(std::string_view format,
                                     JsonlField *field) {
   if (!format.starts_with("w:") || !field) {
@@ -64,6 +72,8 @@ bool parse_fixed_size_binary_format(std::string_view format,
   return true;
 }
 
+/// Builds member prefixes from validated internal state and returns ownership
+/// only after completion.
 void build_member_prefixes(JsonlField *field) {
   if (!field || field->kind != JsonlKind::kStruct) {
     return;
@@ -83,6 +93,8 @@ void build_member_prefixes(JsonlField *field) {
 
 } // namespace
 
+/// Recursively converts one Arrow schema node into the compact native writer
+/// model.
 sanitize::Result<JsonlField> parse_schema_field_impl(const ArrowSchema &schema,
                                                      std::int64_t depth,
                                                      std::int64_t *nodes) {

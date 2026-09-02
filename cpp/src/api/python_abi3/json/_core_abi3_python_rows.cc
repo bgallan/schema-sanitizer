@@ -1,10 +1,11 @@
 /*
- * Python ABI3 row-sequence to JSONL serialization.
+ * Implements Python ABI3 serialization of row sequences to JSONL.
  *
  * The Python-row analytical input route still ingests JSON Lines internally,
  * but this wrapper batches Python-object serialization in native code so the
  * hot loop does not cross the Python/native boundary once per source row.
  */
+
 #include "api/python_abi3/json/_core_abi3_json_tools.hh"
 
 #include <algorithm>
@@ -16,6 +17,7 @@
 namespace core_abi3_internal {
 namespace {
 
+/// Validates and appends one dictionary row as a complete JSONL record.
 bool append_python_row(std::string *out, PyObject *item, Py_ssize_t row_index) {
   if (!PyDict_Check(item)) {
     PyErr_Format(PyExc_TypeError,
@@ -33,6 +35,8 @@ bool append_python_row(std::string *out, PyObject *item, Py_ssize_t row_index) {
   return true;
 }
 
+/// Packages iterator batch as a Python result while transferring native
+/// ownership safely.
 PyObject *pack_iterator_batch(std::string out, Py_ssize_t next_index,
                               bool exhausted) {
   PyObject *tuple = PyTuple_New(3);
@@ -53,6 +57,8 @@ PyObject *pack_iterator_batch(std::string out, Py_ssize_t next_index,
 
 } // namespace
 
+/// Encodes a bounded slice of a Python row sequence and returns bytes plus the
+/// next index.
 PyObject *py_python_rows_jsonl_bytes(PyObject *, PyObject *args) {
   PyObject *rows = nullptr;
   Py_ssize_t start_index = 0;
@@ -137,6 +143,8 @@ PyObject *py_python_rows_jsonl_bytes(PyObject *, PyObject *args) {
   return tuple;
 }
 
+/// Consumes a bounded iterator chunk and returns JSONL bytes, position, and
+/// exhaustion.
 PyObject *py_python_iter_rows_jsonl_bytes(PyObject *, PyObject *args) {
   PyObject *iterator = nullptr;
   Py_ssize_t start_index = 0;

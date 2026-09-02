@@ -1,4 +1,8 @@
-"""Normalization helpers shared by schema-registry tests."""
+"""Normalize schema-registry diagnostics for deterministic assertions.
+
+The helper validates native detection timestamps before removing them from otherwise exact drift
+comparisons.
+"""
 
 from __future__ import annotations
 

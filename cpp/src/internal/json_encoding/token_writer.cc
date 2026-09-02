@@ -1,4 +1,6 @@
 // Implements small JSON object/string writers for internal diagnostic payloads.
+// The helpers produce deterministic escaped tokens without introducing a
+// general-purpose JSON dependency.
 
 #include "internal/json_encoding/token_writer.hh"
 
@@ -19,11 +21,13 @@ namespace sanitize::internal::json_encoding {
 
 namespace {
 
+/// Reports whether a byte must use an escape sequence inside a JSON string.
 [[nodiscard]] constexpr bool requires_json_escape(unsigned char byte) noexcept {
   return byte < 0x20 || byte == '"' || byte == '\\';
 }
 
 template <class String>
+/// Appends the canonical JSON escape sequence for one control or special byte.
 void append_escaped_byte(String &out, unsigned char byte) {
   static constexpr std::string_view kHex = "0123456789abcdef";
   switch (byte) {
@@ -59,6 +63,7 @@ void append_escaped_byte(String &out, unsigned char byte) {
 } // namespace
 
 template <class String>
+/// Quotes and escapes a byte string into the internal JSON token buffer.
 void append_string_impl(String &out, std::string_view value) {
   out.push_back('"');
   std::size_t run_start = 0;
@@ -83,6 +88,8 @@ void append_string(std::string &out, std::string_view value) {
   append_string_impl(out, value);
 }
 
+/// Quotes and escapes a byte string into a polymorphic-resource JSON token
+/// buffer.
 void append_string(std::pmr::string &out, std::string_view value) {
   append_string_impl(out, value);
 }

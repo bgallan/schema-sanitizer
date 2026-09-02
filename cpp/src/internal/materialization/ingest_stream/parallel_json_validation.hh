@@ -1,4 +1,6 @@
 // Defines bounded worker-side JSONL validation and token capture.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 
@@ -23,16 +25,16 @@ struct JsonValidationTask {
 
 class ParallelJsonRowValidator final {
 public:
-  // Creates private parser state for each effective worker while retaining the
-  // operation memory pool as the owner of packet token storage.
+  /// Creates worker-local JSON parsers whose packet tokens remain
+  /// operation-pool owned.
   [[nodiscard]] static sanitize::Result<
       std::shared_ptr<ParallelJsonRowValidator>>
   Make(std::shared_ptr<void> operation_memory_pool,
        std::shared_ptr<const sanitize::CompiledPlan> plan,
        sanitize::OnErrorPolicy on_error, const ExecutionPolicy &policy);
 
-  // Validates every row before returning the packet. A failure is the first
-  // scanner/parser error inside this contiguous packet.
+  /// Validates every row and returns the packet or its first scanner or parser
+  /// error.
   [[nodiscard]] sanitize::Result<OwnedRowPacket>
   Validate(JsonValidationTask &&task, std::size_t worker_index,
            sanitize::internal::StopToken stop);
@@ -40,6 +42,8 @@ public:
 private:
   struct WorkerState;
 
+  /// Captures the validation plan, error policy, and operation-scoped worker
+  /// memory.
   ParallelJsonRowValidator(std::shared_ptr<void> operation_memory_pool,
                            std::shared_ptr<const sanitize::CompiledPlan> plan,
                            sanitize::OnErrorPolicy on_error) noexcept;

@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency integer boundaries preserve exact single multi output."""
+"""Compare integer boundary serialization across single- and multi-worker output.
+
+Signed and unsigned edge values must remain exact, and both execution modes must share one
+canonical pair-and-digit formatter rather than diverging at numeric boundaries.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,6 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 import schema_sanitizer as ss
 
@@ -17,9 +20,9 @@ _MEMORY_LIMIT = 128 * 1024 * 1024
 
 def test_integer_boundaries_preserve_exact_single_multi_output(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Pair-digit formatting preserves signs and exact int64 boundaries."""
-    require_native()
     boundaries = (-(2**63), -101, -100, -99, -10, -9, -1, 0, 1, 9, 10, 99, 100, 101, 2**63 - 1)
     rows: list[dict[str, int]] = []
     for row in range(4_096):

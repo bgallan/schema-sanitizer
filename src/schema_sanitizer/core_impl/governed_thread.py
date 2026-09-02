@@ -1,4 +1,8 @@
-"""Shared transaction helpers for governed runtime thread ownership."""
+"""Manage runtime threads through exact governed ownership transactions.
+
+Threads start only after permit and registry reservations; terminated leases become retryable
+retirement debt until safe reaping commits their release.
+"""
 
 from __future__ import annotations
 
@@ -139,6 +143,7 @@ class RetirementAwareThread(Thread):
     """Thread whose successful join is also a safe retirement-debt reap point."""
 
     def join(self, timeout: float | None = None) -> None:
+        """Wait for the governed thread to finish."""
         super().join(timeout=timeout)
         if not self.is_alive():
             reap_governed_thread_retirements()
@@ -155,9 +160,10 @@ def governed_thread_retirement_snapshot() -> tuple[int, int]:
 
 
 def _reset_governed_thread_retirements_after_fork() -> None:
+    """Reset governed thread retirements after fork."""
     global _RETIREMENT_OVERFLOWS, _RETIREMENT_OVERFLOWED, _RETIREMENT_DEBT_COUNT
     # The module is quarantine-only after fork; do not allocate replacement
-    # locks/banks in the child. Direct test calls only clear the preallocated slots.
+    # locks or banks in the child.
     with _RETIREMENT_LOCK:
         for slot in _RETIREMENT_DEBTS:
             slot.thread = None
@@ -169,42 +175,19 @@ def _reset_governed_thread_retirements_after_fork() -> None:
         _RETIREMENT_OVERFLOWED = False
 
 
-def _native_physical_thread_api() -> Any | None:
-    """Return the shared native physical-thread permit API when available.
+def _native_physical_thread_api() -> Any:
+    """Return the canonical shared physical-thread permit API."""
+    from .native_runtime import native_core
 
-    Source-only/unit-test environments can intentionally omit the extension.
-    Binary runtime builds expose this API and therefore share one authoritative
-    physical-start counter with C++ ``std::thread`` workers.
-    """
-    try:
-        from .native_runtime import native_core
-    except BaseException:
-        return None
-    required = (
-        "process_physical_thread_permits_acquire",
-        "process_physical_thread_permits_release",
-        "process_physical_thread_mark_running",
-        "process_physical_thread_mark_stopped",
-    )
-    if not all(callable(getattr(native_core, name, None)) for name in required):
-        return None
     return native_core
 
 
-def _acquire_native_physical_thread_permit(thread: object) -> Any | None:
-    # Narrow test/control doubles are intentionally not treated as physical
-    # hosts. Production runtime services always use an actual threading.Thread
-    # (or RetirementAwareThread), whose exit can own the exact release point.
+def _acquire_native_physical_thread_permit(thread: object) -> Any:
+    """Acquire native physical thread permit."""
     if not isinstance(thread, Thread):
-        return None
+        raise TypeError("governed runtime host must be a threading.Thread")
     native = _native_physical_thread_api()
-    if native is None:
-        return None
     raw_granted = native.process_physical_thread_permits_acquire(1, 1)
-    if raw_granted is None:
-        # Compatibility with source-only/partial native test doubles. A real
-        # Pass54 ABI always returns an integer grant.
-        return None
     granted = int(raw_granted)
     if granted != 1:
         raise SchemaSanitizerResourceError(
@@ -218,9 +201,8 @@ def _acquire_native_physical_thread_permit(thread: object) -> Any | None:
     return native
 
 
-def _release_native_physical_thread_permit(native: Any | None) -> None:
-    if native is None:
-        return
+def _release_native_physical_thread_permit(native: Any) -> None:
+    """Release native physical thread permit."""
     native.process_physical_thread_permits_release(1)
 
 
@@ -234,70 +216,52 @@ def start_governed_thread(thread: Thread, *, registration: Any = None) -> None:
     capability. This closes the former Python↔C++ admission race.
     """
     reap_governed_thread_retirements()
-    if not callable(getattr(thread, "start", None)):
-        raise TypeError("governed runtime host requires a startable thread")
-
     native = _acquire_native_physical_thread_permit(thread)
-    original_run = thread.run if native is not None else None
+    original_run = thread.run
     start_committed = False
 
-    if native is not None:
-
-        def _run_with_physical_permit() -> Any:
-            running_marked = False
+    def _run_with_physical_permit() -> Any:
+        """Run with physical permit."""
+        running_marked = False
+        try:
             try:
+                native.process_physical_thread_mark_running()
+                running_marked = True
+            except BaseException:
+                # Physical start is already committed. Instrumentation must
+                # never prevent the authorized host from executing.
+                running_marked = False
+            return original_run()
+        finally:
+            if running_marked:
                 try:
-                    native.process_physical_thread_mark_running()
-                    running_marked = True
-                except BaseException:
-                    # Physical start is already committed. Instrumentation must
-                    # never prevent the authorized host from executing.
-                    running_marked = False
-                assert original_run is not None
-                return original_run()
-            finally:
-                if running_marked:
-                    try:
-                        native.process_physical_thread_mark_stopped()
-                    except BaseException:
-                        pass
-                try:
-                    native.process_physical_thread_permits_release(1)
-                except BaseException:
-                    # The native release operation is noexcept internally; a
-                    # Python-level failure here must not strand thread teardown.
-                    pass
-                try:
-                    assert original_run is not None
-                    thread.run = original_run  # type: ignore[method-assign]
+                    native.process_physical_thread_mark_stopped()
                 except BaseException:
                     pass
+            try:
+                native.process_physical_thread_permits_release(1)
+            except BaseException:
+                # The native release operation is noexcept internally; a
+                # Python-level failure here must not strand thread teardown.
+                pass
+            try:
+                thread.run = original_run  # type: ignore[method-assign]
+            except BaseException:
+                pass
 
-        thread.run = _run_with_physical_permit  # type: ignore[method-assign]
+    thread.run = _run_with_physical_permit  # type: ignore[method-assign]
 
     try:
         if registration is None:
             thread.start()
             start_committed = True
             return
-        start_thread = getattr(registration, "start_thread", None)
-        if callable(start_thread):
-            start_thread(thread)
-            start_committed = True
-            return
-        thread.start()
+        registration.start_thread(thread)
         start_committed = True
-        activate = getattr(registration, "activate", None)
-        if not callable(activate):
-            raise TypeError("runtime registration must expose start_thread or activate")
-        activate()
     except BaseException:
         # Before a successful Thread.start(), no host can consume the permit.
-        # Restore the original entry point before returning the capability. If
-        # start committed and a later compatibility ``activate`` failed, the
-        # wrapper owns the release and ``is_alive`` prevents double return.
-        if native is not None and not start_committed:
-            assert original_run is not None
+        # Restore the original entry point before returning the capability.
+        if not start_committed:
             try:
                 thread.run = original_run  # type: ignore[method-assign]
             finally:
@@ -306,11 +270,6 @@ def start_governed_thread(thread: Thread, *, registration: Any = None) -> None:
                 except BaseException:
                     pass
         raise
-
-
-def start_governed_runtime_thread(registration: Any, thread: Thread) -> None:
-    """Compatibility wrapper for registry-backed governed hosts."""
-    start_governed_thread(thread, registration=registration)
 
 
 def rollback_unstarted_runtime_thread(
@@ -387,6 +346,5 @@ __all__ = [
     "RetirementAwareThread",
     "retire_governed_runtime_thread",
     "rollback_unstarted_runtime_thread",
-    "start_governed_runtime_thread",
     "start_governed_thread",
 ]

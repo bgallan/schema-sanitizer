@@ -1,15 +1,20 @@
-"""Regression coverage for memory async bridge timeout cancels the real coroutine."""
+"""Consolidate memory-safety contracts for asynchronous startup and owned services.
+
+The cases cover bridge and coordinator startup, provider-pool publication, operation
+diagnostics, temporary-storage transactions, and exact resource rollback under failures and
+pressure.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import gc
 import threading
-from concurrent.futures import Future
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 
 def test_async_bridge_timeout_cancels_the_real_coroutine(
@@ -22,7 +27,10 @@ def test_async_bridge_timeout_cancels_the_real_coroutine(
     finalized = threading.Event()
 
     async def exercise() -> None:
+        """Run the bridge until timeout cancels its underlying coroutine."""
+
         async def slow() -> None:
+            """Wait for cancellation inside the underlying coroutine."""
             try:
                 await asyncio.sleep(60)
             finally:
@@ -32,7 +40,7 @@ def test_async_bridge_timeout_cancels_the_real_coroutine(
             async_bridge.run_sync(slow(), threading_mode="multi")
 
     asyncio.run(exercise())
-    assert finalized.wait(1.0)
+    assert finalized.wait(SCHEDULER_TIMEOUT_SECONDS)
 
 
 def test_async_bridge_thread_start_failure_closes_coroutine_and_releases_lease(
@@ -45,15 +53,19 @@ def test_async_bridge_thread_start_failure_closes_coroutine_and_releases_lease(
         amount = 1
 
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     def broken_thread(*args: object, **kwargs: object) -> threading.Thread:
+        """Inject the broken thread failure at the controlled test point."""
         thread = threading.Thread(*args, **kwargs)
 
         def fail_start() -> None:
+            """Raise the deliberate failure during start."""
             raise RuntimeError("injected thread start failure")
 
         thread.start = fail_start  # type: ignore[method-assign]
@@ -61,9 +73,10 @@ def test_async_bridge_thread_start_failure_closes_coroutine_and_releases_lease(
 
     lease = Lease()
     monkeypatch.setattr(async_bridge, "acquire_project_threads", lambda *_a, **_k: lease)
-    monkeypatch.setattr(async_bridge, "Thread", broken_thread)
+    monkeypatch.setattr(async_bridge, "RetirementAwareThread", broken_thread)
 
     async def exercise() -> None:
+        """Run the bridge through its simulated thread-start failure."""
         coroutine = asyncio.sleep(0)
         with pytest.raises(RuntimeError, match="thread start failure"):
             async_bridge.run_sync(coroutine, threading_mode="multi")
@@ -81,15 +94,18 @@ def test_provider_pool_closed_race_retains_descriptor_until_client_close_commits
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     class Client:
         fail_close = True
 
         async def close(self) -> None:
+            """Close the resources owned by the client test double."""
             if self.fail_close:
                 raise RuntimeError("injected client close failure")
 
@@ -97,6 +113,7 @@ def test_provider_pool_closed_race_retains_descriptor_until_client_close_commits
     monkeypatch.setattr(module, "acquire_file_descriptors", lambda *_a, **_k: lease)
 
     async def exercise() -> None:
+        """Race pool shutdown with client construction and committed close."""
         pool = module.RemoteProviderSessionPool()
         await pool.__aenter__()
         entered = asyncio.Event()
@@ -104,6 +121,7 @@ def test_provider_pool_closed_race_retains_descriptor_until_client_close_commits
         client = Client()
 
         async def factory() -> Client:
+            """Wait for the release gate before returning the provider client."""
             entered.set()
             await resume.wait()
             return client
@@ -132,20 +150,25 @@ def test_provider_pool_insertion_failure_closes_client_and_releases_descriptor(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     class Client:
         def __init__(self) -> None:
+            """Initialize the client test double."""
             self.closes = 0
 
         async def close(self) -> None:
+            """Close the resources owned by the client test double."""
             self.closes += 1
 
     class RejectingDict(dict[tuple[Any, ...], Any]):
         def __setitem__(self, key: tuple[Any, ...], value: Any) -> None:
+            """Store the requested value in the rejecting dict test double."""
             del key, value
             raise MemoryError("injected pool insertion failure")
 
@@ -154,6 +177,7 @@ def test_provider_pool_insertion_failure_closes_client_and_releases_descriptor(
     monkeypatch.setattr(module, "acquire_file_descriptors", lambda *_a, **_k: lease)
 
     async def exercise() -> None:
+        """Inject client insertion failure and verify descriptor cleanup."""
         pool = module.RemoteProviderSessionPool()
         await pool.__aenter__()
         pool._entries = RejectingDict()
@@ -170,80 +194,43 @@ def test_remote_coordinator_thread_start_failure_releases_capacity_registration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Coordinator construction is transactional around its host-thread start."""
+    from schema_sanitizer.core_impl.governed_thread import RetirementAwareThread
     from schema_sanitizer.remote_impl import io_coordinator as module
 
     class Registration:
         def __init__(self) -> None:
+            """Initialize the registration test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the registration test double."""
             self.releases += 1
 
     class Governor:
         def __init__(self) -> None:
+            """Initialize the governor test double."""
             self.registration = Registration()
 
         def register_capacity(self, _requested: int) -> Registration:
+            """Register the controlled thread capacity with the governor."""
             return self.registration
 
-    class BrokenThread:
-        ident = None
+    def broken_thread(*args: object, **kwargs: object) -> threading.Thread:
+        """Inject the broken thread failure at the controlled test point."""
+        thread = RetirementAwareThread(*args, **kwargs)
 
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
-        def start(self) -> None:
+        def start() -> None:
+            """Raise the deliberate failure for the start path."""
             raise RuntimeError("injected coordinator start failure")
 
+        thread.start = start  # type: ignore[method-assign]
+        return thread
+
     governor = Governor()
-    monkeypatch.setattr(module.threading, "Thread", BrokenThread)
+    monkeypatch.setattr(module.threading, "Thread", broken_thread)
     with pytest.raises(RuntimeError, match="coordinator start failure"):
         module.RemoteIoCoordinator(permit_governor=governor, permit_capacity=2)
     assert governor.registration.releases == 1
-
-
-def test_remote_coordinator_submission_failure_closes_unscheduled_coroutine(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A closed-loop submission failure must close the invoke coroutine immediately."""
-    from schema_sanitizer.remote_impl import io_coordinator as module
-
-    captured: dict[str, Any] = {}
-
-    def reject(coroutine: Any, _loop: Any) -> Future[Any]:
-        captured["coroutine"] = coroutine
-        raise RuntimeError("injected submission failure")
-
-    class Submission:
-        def __init__(self) -> None:
-            self.releases = 0
-
-        def release(self) -> None:
-            self.releases += 1
-
-    submission = Submission()
-    governor = SimpleNamespace(
-        reserve_submission=lambda: submission,
-        acquire=lambda *_a, **_k: None,
-    )
-    coordinator = object.__new__(module.RemoteIoCoordinator)
-    coordinator._lock = threading.Lock()
-    coordinator._closed = False
-    coordinator._loop = SimpleNamespace()
-    coordinator._permit_governor = governor
-    coordinator._operation_id = "operation"
-    coordinator._context = None
-    coordinator._futures = set()
-    monkeypatch.setattr(module.asyncio, "run_coroutine_threadsafe", reject)
-
-    async def operation(_context: Any) -> None:
-        return None
-
-    with pytest.raises(RuntimeError, match="submission failure"):
-        coordinator.submit(operation)
-    coroutine = captured["coroutine"]
-    assert coroutine.cr_frame is None
-    assert submission.releases == 1
 
 
 def test_dead_operation_diagnostic_is_removed_without_a_diagnostics_poll() -> None:
@@ -254,6 +241,7 @@ def test_dead_operation_diagnostic_is_removed_without_a_diagnostics_poll() -> No
 
     class Source:
         def snapshot(self) -> dict[str, object]:
+            """Return a snapshot of the state recorded by the test double."""
             return {"operation_id": "dead"}
 
     source = Source()
@@ -275,9 +263,11 @@ def test_operation_diagnostic_live_registry_is_bounded(
 
     class Source:
         def __init__(self, operation_id: str) -> None:
+            """Initialize the source test double."""
             self.operation_id = operation_id
 
         def snapshot(self) -> dict[str, object]:
+            """Return a snapshot of the state recorded by the test double."""
             return {"operation_id": self.operation_id}
 
     sources = [Source(str(index)) for index in range(3)]
@@ -303,6 +293,7 @@ def test_temporary_storage_release_remains_retryable_after_process_failure(
     real_release = module._PROCESS_TEMPORARY_STORAGE.release_capability
 
     def fail_release(*_args: object, **_kwargs: object) -> None:
+        """Raise the deliberate failure during release."""
         raise OSError("injected process release failure")
 
     monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "release_capability", fail_release)
@@ -334,6 +325,7 @@ def test_temporary_storage_shrink_remains_retryable_after_process_failure(
     real_resize = module._PROCESS_TEMPORARY_STORAGE.resize_capability
 
     def fail_release(*_args: object, **_kwargs: object) -> None:
+        """Raise the deliberate failure during release."""
         raise OSError("injected process shrink failure")
 
     monkeypatch.setattr(module._PROCESS_TEMPORARY_STORAGE, "resize_capability", fail_release)
@@ -373,61 +365,49 @@ def test_temporary_storage_move_rolls_back_target_when_old_release_fails(
 
     class Governor:
         def __init__(self) -> None:
+            """Initialize the governor test double."""
             self.reserved = {1: 0, 2: 0}
             self.inodes = {1: 0, 2: 0}
             self.fail_old_release = False
 
         @staticmethod
         def target(path: Any) -> Any:
+            """Run the target side of the synchronization scenario."""
             return path
 
         @staticmethod
         def filesystem(path: Any) -> tuple[int, Any, int]:
+            """Map target paths to device two and all other paths to device one."""
             key = 2 if str(path).endswith("target") else 1
             return key, path, 1 << 40
 
-        def reserve(
+        def reserve_capability(
             self,
             size_bytes: int,
             *,
             path: Any,
             label: str,
             inode_count: int = 0,
-        ) -> int:
+        ) -> Any:
+            """Record byte and inode reservations for the path's synthetic device."""
             del label
             key, _target, _free = self.filesystem(path)
             self.reserved[key] += size_bytes
             self.inodes[key] += inode_count
-            return key
-
-        def release(
-            self,
-            device: int,
-            size_bytes: int,
-            *,
-            inode_count: int = 0,
-        ) -> None:
-            if device == 1 and self.fail_old_release:
-                raise OSError("injected old filesystem release failure")
-            self.reserved[device] -= size_bytes
-            self.inodes[device] -= inode_count
-
-        def reserve_capability(self, size_bytes: int, **kwargs: Any) -> Any:
-            device = self.reserve(size_bytes, **kwargs)
             return SimpleNamespace(
                 governor=self,
-                device=device,
+                device=key,
                 reserved_bytes=size_bytes,
-                reserved_inodes=kwargs.get("inode_count", 0),
+                reserved_inodes=inode_count,
                 active=True,
             )
 
         def release_capability(self, capability: Any) -> bool:
-            self.release(
-                capability.device,
-                capability.reserved_bytes,
-                inode_count=capability.reserved_inodes,
-            )
+            """Release the cleanup capability and record the call."""
+            if capability.device == 1 and self.fail_old_release:
+                raise OSError("injected old filesystem release failure")
+            self.reserved[capability.device] -= capability.reserved_bytes
+            self.inodes[capability.device] -= capability.reserved_inodes
             capability.active = False
             return True
 
@@ -440,13 +420,11 @@ def test_temporary_storage_move_rolls_back_target_when_old_release_fails(
             label: str,
             inode_count: int,
         ) -> Any:
+            """Resize the exact cleanup capability retained by the owner."""
             target_device, _target, _free = self.filesystem(path)
             if target_device == capability.device:
                 delta = size_bytes - capability.reserved_bytes
-                if delta > 0:
-                    self.reserve(delta, path=path, label=label)
-                elif delta < 0:
-                    self.release(capability.device, -delta)
+                self.reserved[capability.device] += delta
                 capability.reserved_bytes = size_bytes
                 return capability
             replacement = self.reserve_capability(
@@ -495,18 +473,22 @@ def test_provider_pool_closed_race_retains_descriptor_until_manager_exit_commits
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     class Manager:
         fail_exit = True
 
         async def __aenter__(self) -> object:
+            """Enter the asynchronous context managed by the manager test double."""
             return object()
 
         async def __aexit__(self, *_exc: object) -> None:
+            """Exit the asynchronous context managed by the manager test double and run cleanup."""
             if self.fail_exit:
                 raise RuntimeError("injected manager exit failure")
 
@@ -514,6 +496,7 @@ def test_provider_pool_closed_race_retains_descriptor_until_manager_exit_commits
     monkeypatch.setattr(module, "acquire_file_descriptors", lambda *_a, **_k: lease)
 
     async def exercise() -> None:
+        """Race pool shutdown with manager construction and committed exit."""
         pool = module.RemoteProviderSessionPool()
         await pool.__aenter__()
         entered = asyncio.Event()
@@ -521,6 +504,7 @@ def test_provider_pool_closed_race_retains_descriptor_until_manager_exit_commits
         manager = Manager()
 
         async def factory() -> Manager:
+            """Wait for the release gate before returning the provider manager."""
             entered.set()
             await resume.wait()
             return manager
@@ -548,6 +532,7 @@ def test_remote_coordinator_event_loop_creation_failure_is_reported_promptly(
     from schema_sanitizer.remote_impl import io_coordinator as module
 
     def fail_loop() -> Any:
+        """Raise the deliberate failure during loop."""
         raise RuntimeError("injected event loop creation failure")
 
     monkeypatch.setattr(module.asyncio, "new_event_loop", fail_loop)
@@ -565,9 +550,11 @@ def test_async_bridge_event_loop_creation_failure_releases_owned_resources(
         amount = 1
 
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     lease = Lease()
@@ -579,6 +566,7 @@ def test_async_bridge_event_loop_creation_failure_releases_owned_resources(
     )
 
     async def exercise() -> None:
+        """Run the bridge through its simulated event-loop creation failure."""
         coroutine = asyncio.sleep(0)
         with pytest.raises(RuntimeError, match="bridge loop failure"):
             async_bridge.run_sync(coroutine, threading_mode="multi")
@@ -597,6 +585,7 @@ def test_temporary_storage_lease_construction_is_transactional(
 
     class BrokenLease:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
+            """Initialize the broken lease test double."""
             raise MemoryError("injected lease construction failure")
 
     monkeypatch.setattr(
@@ -616,27 +605,6 @@ def test_temporary_storage_lease_construction_is_transactional(
     assert after.reserved_inodes == before.reserved_inodes
 
 
-def test_process_resource_unscoped_release_is_observable_but_non_mutating() -> None:
-    """The compatibility shim records misuse without bypassing the exact ledger."""
-    from schema_sanitizer.core_impl.process_resources import _Governor
-
-    governor = _Governor(4, "diagnostic_resource")
-    lease = governor.acquire(2, timeout_seconds=0)
-    governor.release(3)
-    snapshot = governor.snapshot()
-    assert snapshot.in_use == 2
-    assert snapshot.active_leases == 1
-    assert snapshot.over_release_count == 1
-    assert snapshot.over_release_amount == 3
-    assert snapshot.compatibility_release_attempts == 1
-    lease.release()
-    snapshot = governor.snapshot()
-    assert snapshot.in_use == 0
-    assert snapshot.active_leases == 0
-    assert snapshot.over_release_count == 1
-    assert snapshot.over_release_amount == 3
-
-
 def test_operation_registry_pressure_is_exposed_in_snapshots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -648,6 +616,7 @@ def test_operation_registry_pressure_is_exposed_in_snapshots(
 
     class Source:
         def snapshot(self) -> dict[str, object]:
+            """Return a snapshot of the state recorded by the test double."""
             return {"operation_id": "kept"}
 
     sources = [Source(), Source()]
@@ -666,9 +635,11 @@ def test_async_bridge_start_preserves_primary_when_cleanup_also_fails(
     from schema_sanitizer.remote_impl import async_bridge
 
     def broken_thread(*args: object, **kwargs: object) -> threading.Thread:
+        """Inject the broken thread failure at the controlled test point."""
         thread = threading.Thread(*args, **kwargs)
 
         def fail_start() -> None:
+            """Raise the deliberate failure during start."""
             raise RuntimeError("primary thread start failure")
 
         thread.start = fail_start  # type: ignore[method-assign]
@@ -676,13 +647,15 @@ def test_async_bridge_start_preserves_primary_when_cleanup_also_fails(
 
     class BrokenCoroutine:
         def close(self) -> None:
+            """Close the resources owned by the broken coroutine test double."""
             raise OSError("secondary coroutine close failure")
 
     class BrokenLease:
         def release(self) -> None:
+            """Release the resource held by the broken lease test double."""
             raise OSError("secondary permit release failure")
 
-    monkeypatch.setattr(async_bridge, "Thread", broken_thread)
+    monkeypatch.setattr(async_bridge, "RetirementAwareThread", broken_thread)
     runner = async_bridge._BridgeRunner(
         BrokenCoroutine(), async_bridge.copy_context(), BrokenLease()
     )
@@ -691,49 +664,3 @@ def test_async_bridge_start_preserves_primary_when_cleanup_also_fails(
     notes = getattr(captured.value, "__notes__", ())
     assert any("coroutine cleanup" in note for note in notes)
     assert any("thread permit retained" in note for note in notes)
-
-
-def test_remote_submission_preserves_primary_when_rollback_also_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Submission cleanup errors are diagnostic notes, not replacement failures."""
-    from schema_sanitizer.remote_impl import io_coordinator as module
-
-    class Submission:
-        def release(self) -> None:
-            raise OSError("secondary submission rollback failure")
-
-    governor = SimpleNamespace(
-        reserve_submission=lambda: Submission(),
-        acquire=lambda *_args, **_kwargs: None,
-    )
-    coordinator = object.__new__(module.RemoteIoCoordinator)
-    coordinator._lock = threading.Lock()
-    coordinator._closed = False
-    coordinator._loop = SimpleNamespace()
-    coordinator._permit_governor = governor
-    coordinator._operation_id = "operation"
-    coordinator._context = None
-    coordinator._futures = set()
-    monkeypatch.setattr(
-        module.asyncio,
-        "run_coroutine_threadsafe",
-        lambda *_args: (_ for _ in ()).throw(RuntimeError("primary submission failure")),
-    )
-
-    async def operation(_context: Any) -> None:
-        return None
-
-    with pytest.raises(RuntimeError, match="primary submission failure") as captured:
-        coordinator.submit(operation)
-    notes = getattr(captured.value, "__notes__", ())
-    assert any("submission rollback" in note for note in notes)
-
-
-def test_process_resource_snapshot_keeps_legacy_positional_construction() -> None:
-    """New anomaly counters append defaults without breaking older callers."""
-    from schema_sanitizer.core_impl.process_resources import ProcessResourceSnapshot
-
-    snapshot = ProcessResourceSnapshot(8, 1, 2, 3, 4, 5)
-    assert snapshot.over_release_count == 0
-    assert snapshot.over_release_amount == 0

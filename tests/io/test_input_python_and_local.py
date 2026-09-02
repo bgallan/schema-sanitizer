@@ -1,12 +1,31 @@
-"""Python and local input contract tests."""
+"""Python and local input contract tests.
 
-# ruff: noqa: F405
+It covers replayable Python rows, generators and spool limits, native row encoding,
+local paths, in-memory payloads, and rejection of unsupported values.
+"""
 
 from __future__ import annotations
 
+import io
+import json
+import signal
 from collections.abc import Iterator
+from pathlib import Path
 
-from _support.input_contract import *  # noqa: F403
+import pytest
+from conftest import (
+    read_test_csv,
+    read_test_json,
+    read_test_json_folder,
+    read_test_jsonl,
+    read_test_parquet,
+    read_test_python,
+    read_test_xml,
+    read_test_xml_folder,
+)
+
+import schema_sanitizer as ss
+from schema_sanitizer.core_impl.execution import PythonRowsJsonlByteReader
 
 
 def test_list_of_dicts_is_supported() -> None:
@@ -16,12 +35,10 @@ def test_list_of_dicts_is_supported() -> None:
     result = read_test_python([{"a": 1}, {"a": 2}])
 
     assert result.clean_data.to_pylist() == [{"a": 1}, {"a": 2}]
-    assert last_python_rows_route() == "native_batch"
 
 
-def test_python_rows_jsonl_reader_is_replayable_and_chunked() -> None:
-    """Verify Python rows are exposed to native ingestion as replayable chunks."""
-    require_native()
+def test_python_rows_jsonl_reader_is_replayable_and_chunked(require_native: None) -> None:
+    """Verify python rows JSONL reader is replayable and chunked."""
     reader = PythonRowsJsonlByteReader([{"a": 1}, {"a": "ñ"}])
 
     first = reader.read(7)
@@ -33,9 +50,8 @@ def test_python_rows_jsonl_reader_is_replayable_and_chunked() -> None:
     assert reader.read(1024) == first + second
 
 
-def test_python_rows_generator_is_spooled_and_replayable() -> None:
-    """Verify one-shot iterables are replayed without retaining all row objects."""
-    require_native()
+def test_python_rows_generator_is_spooled_and_replayable(require_native: None) -> None:
+    """Verify python rows generator is spooled and replayable."""
     iterations = 0
 
     def rows() -> Iterator[dict[str, int]]:
@@ -55,9 +71,8 @@ def test_python_rows_generator_is_spooled_and_replayable() -> None:
     assert iterations == 1
 
 
-def test_python_rows_generator_spools_incrementally() -> None:
+def test_python_rows_generator_spools_incrementally(require_native: None) -> None:
     """A small first read must not consume an entire one-shot iterable."""
-    require_native()
     yielded = 0
 
     def rows() -> Iterator[dict[str, int]]:
@@ -83,27 +98,26 @@ def test_python_rows_generator_spools_incrementally() -> None:
     reader.close()
 
 
-def test_python_rows_jsonl_reader_rejects_unsupported_values_without_fallback() -> None:
-    """Verify Python row ingestion fails instead of using Python JSON fallback."""
-    require_native()
+def test_python_rows_jsonl_reader_rejects_unsupported_values_without_fallback(
+    require_native: None,
+) -> None:
+    """Verify python rows JSONL reader rejects unsupported values without fallback."""
     reader = PythonRowsJsonlByteReader([{"bad": object()}])
 
     with pytest.raises(RuntimeError, match="Native Python row JSONL encoding failed"):
         reader.read(1024)
 
 
-def test_python_rows_reject_non_mapping_rows_in_native_loop() -> None:
-    """Verify row-shape validation runs in the native serialization loop."""
-    require_native()
+def test_python_rows_reject_non_mapping_rows_in_native_loop(require_native: None) -> None:
+    """Verify python rows reject non mapping rows in native loop."""
     reader = PythonRowsJsonlByteReader([{"a": 1}, 2])
 
     with pytest.raises(TypeError, match="row 1 is not a dict"):
         reader.read(1024)
 
 
-def test_native_python_row_encoder_matches_reader_payload() -> None:
-    """Verify the native Python row encoder can feed the row reader."""
-    require_native()
+def test_native_python_row_encoder_matches_reader_payload(require_native: None) -> None:
+    """Verify native python row encoder matches reader payload."""
     from schema_sanitizer.core_impl.native_runtime import native_core as _native
 
     payload = _native.python_row_json_bytes({"b": [True, None], "a": "ñ"})
@@ -111,9 +125,8 @@ def test_native_python_row_encoder_matches_reader_payload() -> None:
     assert payload == '{"b":[true,null],"a":"ñ"}'.encode()
 
 
-def test_native_python_rows_batch_encoder_returns_next_index() -> None:
-    """Verify the native Python row batch encoder returns JSONL and progress."""
-    require_native()
+def test_native_python_rows_batch_encoder_returns_next_index(require_native: None) -> None:
+    """Verify native python rows batch encoder returns next index."""
     from schema_sanitizer.core_impl.native_runtime import native_core as _native
 
     payload, next_index = _native.python_rows_jsonl_bytes(
@@ -130,9 +143,8 @@ def test_native_python_rows_batch_encoder_returns_next_index() -> None:
     not hasattr(signal, "setitimer") or not hasattr(signal, "SIGALRM"),
     reason="requires POSIX interval timers",
 )
-def test_native_python_rows_batch_encoder_checks_pending_signals() -> None:
-    """Verify long native row encoding polls Python signal handlers."""
-    require_native()
+def test_native_python_rows_batch_encoder_checks_pending_signals(require_native: None) -> None:
+    """Verify native python rows batch encoder checks pending signals."""
     from schema_sanitizer.core_impl.native_runtime import native_core as _native
 
     old_handler = signal.getsignal(signal.SIGALRM)
@@ -157,7 +169,7 @@ def test_native_python_rows_batch_encoder_checks_pending_signals() -> None:
 
 
 def test_local_csv_path_is_supported(tmp_path) -> None:
-    """Verify local csv path is supported."""
+    """Verify local CSV path is supported."""
     pytest.importorskip("pyarrow")
     path = tmp_path / "data.csv"
     path.write_text("a,b\n1,2\n", encoding="utf-8")
@@ -167,16 +179,14 @@ def test_local_csv_path_is_supported(tmp_path) -> None:
     assert result.clean_data.to_pylist() == [{"a": "1", "b": "2"}]
 
 
-def test_format_specific_readers_are_supported(tmp_path) -> None:
+def test_format_specific_readers_are_supported(tmp_path, require_native: None) -> None:
     """Verify format specific readers are supported."""
     pytest.importorskip("pyarrow")
-    require_native()
 
     csv_path = tmp_path / "data.csv"
     json_path = tmp_path / "data.json"
     json_folder = tmp_path / "json-folder"
     jsonl_path = tmp_path / "data.jsonl"
-    ndjson_path = tmp_path / "data.ndjson"
     xml_path = tmp_path / "data.xml"
     xml_folder = tmp_path / "xml-folder"
     csv_path.write_text("a;b\n1;yes\n", encoding="utf-8")
@@ -184,7 +194,6 @@ def test_format_specific_readers_are_supported(tmp_path) -> None:
     json_folder.mkdir()
     (json_folder / "row.json").write_text('{"a": 1}', encoding="utf-8")
     jsonl_path.write_text('{"a": 1}\n', encoding="utf-8")
-    ndjson_path.write_text('{"a": 1}\n', encoding="utf-8")
     xml_path.write_text("<rows><row><a>1</a></row></rows>", encoding="utf-8")
     xml_folder.mkdir()
     (xml_folder / "row.xml").write_text("<row><a>1</a></row>", encoding="utf-8")
@@ -194,7 +203,6 @@ def test_format_specific_readers_are_supported(tmp_path) -> None:
     assert read_test_json(json_path).clean_data.to_pylist() == [{"a": 1}]
     assert read_test_json_folder(json_folder).clean_data.to_pylist() == [{"a": 1}]
     assert read_test_jsonl(jsonl_path).clean_data.to_pylist() == [{"a": 1}]
-    assert read_test_jsonl(ndjson_path).clean_data.to_pylist() == [{"a": 1}]
     assert read_test_xml(xml_path, xml_row_tag="row").clean_data.to_pylist() == [{"a": "1"}]
     assert read_test_xml_folder(xml_folder).clean_data.to_pylist() == [{"a": "1"}]
     assert read_test_python([{"a": "yes"}], true_tokens=("yes",)).clean_data.to_pylist() == [
@@ -202,11 +210,10 @@ def test_format_specific_readers_are_supported(tmp_path) -> None:
     ]
 
 
-def test_read_parquet_is_supported(tmp_path) -> None:
-    """Verify read parquet is supported."""
+def test_read_parquet_is_supported(tmp_path, require_native: None) -> None:
+    """Verify read Parquet is supported."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
-    require_native()
 
     path = tmp_path / "data.parquet"
     pq.write_table(pa.table({"a": [1]}), path)
@@ -214,10 +221,9 @@ def test_read_parquet_is_supported(tmp_path) -> None:
     assert read_test_parquet(path).clean_data.to_pylist() == [{"a": 1}]
 
 
-def test_read_json_folder_compacts_non_recursive_json_files(tmp_path) -> None:
-    """Verify read json folder compacts direct json children only."""
+def test_read_json_folder_compacts_non_recursive_json_files(tmp_path, require_native: None) -> None:
+    """Verify read JSON folder compacts non recursive JSON files."""
     pytest.importorskip("pyarrow")
-    require_native()
 
     folder = tmp_path / "events"
     nested = folder / "nested"
@@ -233,14 +239,9 @@ def test_read_json_folder_compacts_non_recursive_json_files(tmp_path) -> None:
     assert result.clean_data.to_pylist() == [{"id": 1}, {"id": 2}]
 
 
-def test_read_json_folder_uses_native_path_sources(tmp_path) -> None:
-    """Verify low-level table reads use native path sources."""
+def test_read_json_folder_uses_native_path_sources(tmp_path, require_native: None) -> None:
+    """Verify read JSON folder uses native path sources."""
     pytest.importorskip("pyarrow")
-    require_native()
-    from schema_sanitizer.core_impl.execution import last_sink_source_route
-    from schema_sanitizer.input_impl.source_plan import (
-        last_native_multisource_route,
-    )
 
     folder = tmp_path / "events"
     folder.mkdir()
@@ -250,12 +251,87 @@ def test_read_json_folder_uses_native_path_sources(tmp_path) -> None:
     result = read_test_json_folder(folder)
 
     assert result.clean_data.to_pylist() == [{"id": 1}, {"id": 2}]
-    assert last_sink_source_route() == "path_sources"
-    assert last_native_multisource_route() == "cxx_path_sources"
+    assert result.stats["input_source_route"] == "path_sources"
+    assert result.stats["input_plan_route"] == "native_manifest_paths"
+
+
+def test_input_route_diagnostics_are_owned_by_each_result(
+    tmp_path: Path, require_native: None
+) -> None:
+    """A later directory read cannot overwrite an earlier JSONL result's routes."""
+    pytest.importorskip("pyarrow")
+    jsonl_path = tmp_path / "events.jsonl"
+    jsonl_path.write_text('{"id":1}\n', encoding="utf-8")
+    folder = tmp_path / "events"
+    folder.mkdir()
+    (folder / "a.json").write_text('{"id":2}', encoding="utf-8")
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    parquet_path = tmp_path / "events.parquet"
+    pq.write_table(pa.table({"id": [3]}), parquet_path)
+
+    jsonl_result = ss.to_pyarrow(jsonl_path, input_format="jsonl")
+    directory_result = ss.to_pyarrow(folder, input_format="json", input_mode="directory")
+    parquet_result = ss.to_jsonl(
+        parquet_path,
+        tmp_path / "parquet.jsonl",
+        input_format="parquet",
+    )
+
+    assert jsonl_result.stats["input_source_route"] == "path"
+    assert jsonl_result.stats["input_plan_route"] == ""
+    assert jsonl_result.stats["parquet_input_route"] == ""
+    assert directory_result.stats["input_source_route"] == "path_sources"
+    assert directory_result.stats["input_plan_route"] == "native_manifest_paths"
+    assert directory_result.stats["parquet_input_route"] == ""
+    assert parquet_result.stats["input_source_route"] == "arrow"
+    assert parquet_result.stats["parquet_input_route"] == "native_registry"
+
+
+@pytest.mark.parametrize(
+    ("writer_name", "suffix"),
+    (("to_jsonl", ".jsonl"), ("to_csv", ".csv"), ("to_parquet", ".parquet")),
+)
+def test_single_file_writers_report_their_result_owned_input_route(
+    tmp_path: Path,
+    require_native: None,
+    writer_name: str,
+    suffix: str,
+) -> None:
+    """Every normal public writer reports its successful input source on its result."""
+    source = tmp_path / "events.jsonl"
+    source.write_text('{"id":1}\n', encoding="utf-8")
+
+    result = getattr(ss, writer_name)(
+        source,
+        tmp_path / f"output{suffix}",
+        input_format="jsonl",
+    )
+
+    assert result.stats["input_source_route"] == "path"
+    assert result.stats["input_plan_route"] == ""
+    assert result.stats["parquet_input_route"] == ""
+    assert result.stats["parquet_input_fallback_reason"] == ""
+
+
+def test_python_row_writer_reports_its_result_owned_input_route(
+    tmp_path: Path, require_native: None
+) -> None:
+    """A Python-row writer reports its selected source without global state."""
+    result = ss.to_jsonl(
+        [{"id": 1}],
+        tmp_path / "output.jsonl",
+        input_format="python",
+    )
+
+    assert result.stats["input_source_route"] == "python"
+    assert result.stats["input_plan_route"] == ""
+    assert result.stats["parquet_input_route"] == ""
+    assert result.stats["parquet_input_fallback_reason"] == ""
 
 
 def test_folder_listing_accepts_suffixes_without_leading_dot(tmp_path) -> None:
-    """Verify shared folder listing normalizes dotted and bare suffixes equally."""
+    """Verify folder listing accepts suffixes without leading dot."""
     from schema_sanitizer.input_impl.directory_inputs import folder_files
 
     folder = tmp_path / "events"
@@ -268,9 +344,8 @@ def test_folder_listing_accepts_suffixes_without_leading_dot(tmp_path) -> None:
     assert [file.name for file in files] == ["a.json"]
 
 
-def test_native_json_compactor_returns_compact_utf8_bytes(tmp_path) -> None:
-    """Verify the native JSON compactor used by registry normalization."""
-    require_native()
+def test_native_json_compactor_returns_compact_utf8_bytes(tmp_path, require_native: None) -> None:
+    """Verify native JSON compactor returns compact utf8 bytes."""
     from schema_sanitizer.core_impl.native_runtime import native_core as _native
 
     payload = _native.json_compact_bytes('{"b": [true, null], "a": "ñ"}'.encode())
@@ -279,9 +354,8 @@ def test_native_json_compactor_returns_compact_utf8_bytes(tmp_path) -> None:
     assert payload == '{"b":[true,null],"a":"ñ"}'.encode()
 
 
-def test_native_json_array_to_jsonl_bytes() -> None:
-    """Verify native JSON array splitting returns compact JSONL object rows."""
-    require_native()
+def test_native_json_array_to_jsonl_bytes(require_native: None) -> None:
+    """Verify native JSON array to JSONL bytes."""
     from schema_sanitizer.core_impl.native_runtime import native_core as _native
 
     payload = b'[\n {"b": [true, null], "a": "\xc3\xb1"}, {"c": 3}\n]'
@@ -294,9 +368,8 @@ def test_native_json_array_to_jsonl_bytes() -> None:
         _native.json_array_to_jsonl_bytes(b'[{"ok":true}, 1]')
 
 
-def test_native_json_array_files_to_jsonl_bytes(tmp_path) -> None:
-    """Verify native local JSON-array file batching returns JSONL rows."""
-    require_native()
+def test_native_json_array_files_to_jsonl_bytes(tmp_path, require_native: None) -> None:
+    """Verify native JSON array files to JSONL bytes."""
     from schema_sanitizer.core_impl.native_runtime import native_core as _native
 
     first = tmp_path / "a.json"
@@ -314,10 +387,9 @@ def test_native_json_array_files_to_jsonl_bytes(tmp_path) -> None:
         _native.json_array_files_to_jsonl_bytes([bad], -1)
 
 
-def test_read_json_folder_supports_file_uri(tmp_path) -> None:
-    """Verify read json folder can list children through file URIs."""
+def test_read_json_folder_supports_file_uri(tmp_path, require_native: None) -> None:
+    """Verify read JSON folder supports file URI."""
     pytest.importorskip("pyarrow")
-    require_native()
 
     folder = tmp_path / "events"
     nested = folder / "nested"
@@ -333,10 +405,11 @@ def test_read_json_folder_supports_file_uri(tmp_path) -> None:
     assert result.clean_data.to_pylist() == [{"id": 1}, {"id": 2}]
 
 
-def test_read_json_folder_supports_native_non_utf8_directory_input(tmp_path) -> None:
-    """Verify JSON directory input can use native path-source transcoding."""
+def test_read_json_folder_supports_native_non_utf8_directory_input(
+    tmp_path, require_native: None
+) -> None:
+    """Verify read JSON folder supports native non utf8 directory input."""
     pytest.importorskip("pyarrow")
-    require_native()
 
     folder = tmp_path / "latin1"
     folder.mkdir()
@@ -348,7 +421,7 @@ def test_read_json_folder_supports_native_non_utf8_directory_input(tmp_path) -> 
 
 
 def test_read_json_folder_rejects_missing_or_empty_folder(tmp_path) -> None:
-    """Verify read json folder rejects invalid folder inputs."""
+    """Verify read JSON folder rejects missing or empty folder."""
     with pytest.raises(NotADirectoryError):
         read_test_json_folder(tmp_path / "missing")
 
@@ -359,7 +432,7 @@ def test_read_json_folder_rejects_missing_or_empty_folder(tmp_path) -> None:
 
 
 def test_read_json_folder_reports_invalid_json_file(tmp_path) -> None:
-    """Verify read json folder reports invalid source file path."""
+    """Verify read JSON folder reports invalid JSON file."""
     pytest.importorskip("pyarrow")
     folder = tmp_path / "bad"
     folder.mkdir()
@@ -371,7 +444,7 @@ def test_read_json_folder_reports_invalid_json_file(tmp_path) -> None:
 
 
 def test_read_json_folder_memory_limit_rejects_large_document(tmp_path) -> None:
-    """Verify read json folder respects configured document-row memory limits."""
+    """Verify read JSON folder memory limit rejects large document."""
     folder = tmp_path / "large"
     folder.mkdir()
     (folder / "row.json").write_text(
@@ -390,7 +463,7 @@ def test_read_json_folder_memory_limit_rejects_large_document(tmp_path) -> None:
 
 
 def test_read_json_folder_memory_limit_bounds_unknown_size_remote_child(monkeypatch) -> None:
-    """Verify remote folder staging rejects oversized children with unknown size."""
+    """Verify read JSON folder memory limit bounds unknown size remote child."""
     pytest.importorskip("pyarrow")
     from contextlib import contextmanager
 
@@ -434,13 +507,9 @@ def test_read_json_folder_memory_limit_bounds_unknown_size_remote_child(monkeypa
     assert err.detail["actual_bytes"] == 10_000
 
 
-def test_read_xml_folder_compacts_non_recursive_xml_files(tmp_path) -> None:
-    """Verify read xml folder compacts direct xml children only."""
+def test_read_xml_folder_compacts_non_recursive_xml_files(tmp_path, require_native: None) -> None:
+    """Verify read XML folder compacts non recursive XML files."""
     pytest.importorskip("pyarrow")
-    require_native()
-    from schema_sanitizer.input_impl.source_plan import (
-        last_native_multisource_route,
-    )
 
     folder = tmp_path / "events"
     nested = folder / "nested"
@@ -459,11 +528,10 @@ def test_read_xml_folder_compacts_non_recursive_xml_files(tmp_path) -> None:
         {"id": "1", "country": "ES"},
         {"id": "2", "country": "US"},
     ]
-    assert last_native_multisource_route() == "cxx_path_sources"
 
 
 def test_read_xml_folder_propagates_native_root_tag_failure(tmp_path, monkeypatch) -> None:
-    """Verify XML directory input has no Python root-tag fallback."""
+    """Verify read XML folder propagates native root tag failure."""
     pytest.importorskip("pyarrow")
 
     def fail_native_row_tag(*_args: object) -> str:
@@ -484,9 +552,8 @@ def test_read_xml_folder_propagates_native_root_tag_failure(tmp_path, monkeypatc
         read_test_xml_folder(folder)
 
 
-def test_native_xml_folder_helpers_strip_declarations(tmp_path) -> None:
-    """Verify native XML folder helper validates stable roots."""
-    require_native()
+def test_native_xml_folder_helpers_strip_declarations(tmp_path, require_native: None) -> None:
+    """Verify native XML folder helpers strip declarations."""
     from schema_sanitizer.core_impl.native_runtime import native_core as _native
 
     first = tmp_path / "a.xml"
@@ -499,10 +566,9 @@ def test_native_xml_folder_helpers_strip_declarations(tmp_path) -> None:
         assert _native.xml_folder_effective_row_tag(sequence, "", -1) == "event"
 
 
-def test_read_xml_folder_supports_file_uri(tmp_path) -> None:
-    """Verify read xml folder can list children through file URIs."""
+def test_read_xml_folder_supports_file_uri(tmp_path, require_native: None) -> None:
+    """Verify read XML folder supports file URI."""
     pytest.importorskip("pyarrow")
-    require_native()
 
     folder = tmp_path / "events"
     nested = folder / "nested"
@@ -521,10 +587,9 @@ def test_read_xml_folder_supports_file_uri(tmp_path) -> None:
     ]
 
 
-def test_read_xml_folder_rejects_non_utf8_directory_input(tmp_path) -> None:
-    """Verify XML directory input requires native UTF-8 path-source ingestion."""
+def test_read_xml_folder_rejects_non_utf8_directory_input(tmp_path, require_native: None) -> None:
+    """Verify read XML folder rejects non utf8 directory input."""
     pytest.importorskip("pyarrow")
-    require_native()
 
     folder = tmp_path / "latin1"
     folder.mkdir()
@@ -535,7 +600,7 @@ def test_read_xml_folder_rejects_non_utf8_directory_input(tmp_path) -> None:
 
 
 def test_read_xml_folder_rejects_missing_or_empty_folder(tmp_path) -> None:
-    """Verify read xml folder rejects invalid folder inputs."""
+    """Verify read XML folder rejects missing or empty folder."""
     with pytest.raises(NotADirectoryError):
         read_test_xml_folder(tmp_path / "missing")
 
@@ -546,20 +611,20 @@ def test_read_xml_folder_rejects_missing_or_empty_folder(tmp_path) -> None:
 
 
 def test_read_xml_folder_rejects_mismatched_root_tags(tmp_path) -> None:
-    """Verify read xml folder rejects mixed document root tags."""
+    """Verify read XML folder rejects mismatched root tags."""
     folder = tmp_path / "mixed"
     folder.mkdir()
     (folder / "a.xml").write_text("<event><id>1</id></event>", encoding="utf-8")
-    (folder / "b.xml").write_text("<order><id>2</id></order>", encoding="utf-8")
+    (folder / "b.xml").write_text("<record><id>2</id></record>", encoding="utf-8")
 
     with pytest.raises(ValueError, match="expected root tag"):
         read_test_xml_folder(folder)
 
 
-def test_read_xml_folder_memory_limit_rejects_large_document(tmp_path) -> None:
-    """Verify read xml folder respects configured document-row memory limits."""
-    require_native()
-
+def test_read_xml_folder_memory_limit_rejects_large_document(
+    tmp_path, require_native: None
+) -> None:
+    """Verify read XML folder memory limit rejects large document."""
     folder = tmp_path / "large"
     folder.mkdir()
     (folder / "row.xml").write_text(
@@ -604,9 +669,8 @@ def test_discovered_file_rejects_known_oversize_before_opening() -> None:
     assert not opened
 
 
-def test_python_rows_generator_rejects_replay_spool_limit() -> None:
+def test_python_rows_generator_rejects_replay_spool_limit(require_native: None) -> None:
     """One-shot Python iterables must not grow replay storage without a bound."""
-    require_native()
     reader = PythonRowsJsonlByteReader(
         ({"payload": "x" * 256} for _ in range(100)),
         memory_limit_bytes=256,

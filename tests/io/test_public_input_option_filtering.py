@@ -1,4 +1,8 @@
-"""Tests explicit public input formats, extensions, and directory mode."""
+"""Tests explicit public input formats, extensions, and directory mode.
+
+It confirms wrapper-only arguments are removed before schema normalization for
+analytical and file conversion routes.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,6 @@ from types import SimpleNamespace
 import pytest
 from _support.public_input_modes import GENERATED_COLUMNS as GENERATED
 from _support.public_input_modes import data_rows as _data_rows
-from conftest import require_native
 
 import schema_sanitizer as ss
 
@@ -18,7 +21,7 @@ def test_file_conversion_core_filters_helper_and_writer_options_before_schema_op
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify internal file conversion ignores non-schema options defensively."""
+    """Verify file conversion core filters helper and writer options before schema options."""
     from schema_sanitizer.api_impl.file_conversion import converters as file_convert_core
     from schema_sanitizer.api_impl.results import Result
 
@@ -79,9 +82,9 @@ def test_file_conversion_core_filters_helper_and_writer_options_before_schema_op
 def test_analytical_core_filters_helper_options_before_schema_options(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    require_native: None,
 ) -> None:
-    """Verify internal analytical conversion ignores helper options defensively."""
-    require_native()
+    """Verify analytical core filters helper options before schema options."""
     import schema_sanitizer.api_impl.analytical as analytical_conversion
 
     source = tmp_path / "rows.jsonl"
@@ -90,7 +93,7 @@ def test_analytical_core_filters_helper_options_before_schema_options(
     real_normalize = analytical_conversion.normalize_call_options_or_none
 
     def tracking_normalize(**kwargs):
-        """Capture schema option input and preserve behavior."""
+        """Capture normalized schema options before invoking the real normalizer."""
         captured_options.append(kwargs)
         return real_normalize(**kwargs)
 
@@ -125,7 +128,7 @@ def test_analytical_core_filters_helper_options_before_schema_options(
 
 
 def test_file_converter_accepts_json_array(tmp_path: Path) -> None:
-    """Verify JSON-array input works with a file output sink."""
+    """Verify file converter accepts JSON array."""
     source = tmp_path / "rows.json"
     output = tmp_path / "rows.jsonl"
     source.write_text('[{"a":1},{"a":2}]', encoding="utf-8")

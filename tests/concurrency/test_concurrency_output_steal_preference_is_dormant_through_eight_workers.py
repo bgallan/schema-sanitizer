@@ -1,20 +1,26 @@
-"""Regression coverage for concurrency output steal preference is dormant through eight workers."""
+"""Define high-core output-steal selection contracts.
+
+The cases keep low-core stealing unchanged, prefer front output ahead of later broad work only
+at the high-core gate, and preserve constant-time selection.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import require_native
+import pytest
 
 from schema_sanitizer.core_impl.native_runtime import native_core
 
 
-def test_output_steal_preference_is_dormant_through_eight_workers() -> None:
-    """The eight-worker stealing path remains the legacy reverse scan."""
-    require_native()
-    promoted, outputs, broad, stolen, started, queued, submitted = (
+def test_output_steal_preference_is_dormant_through_eight_workers(require_native: None) -> None:
+    """The eight-worker stealing path uses the low-worker reverse scan."""
+    promoted, outputs, broad, stolen, started, queued, submitted, cpu_capacity = (
         native_core.operation_task_arena_output_steal_probe(8)
     )
+
+    if cpu_capacity < 3:
+        pytest.skip("output-steal topology requires at least three runnable CPUs")
 
     assert 0 <= promoted <= outputs
     assert outputs == 3
@@ -26,12 +32,14 @@ def test_output_steal_preference_is_dormant_through_eight_workers() -> None:
     assert blocker_count <= started <= 8
 
 
-def test_idle_high_worker_steals_front_output_before_later_broad_work() -> None:
+def test_idle_high_worker_steals_front_output_before_later_broad_work(require_native: None) -> None:
     """An idle high worker no longer hides front output behind back broad work."""
-    require_native()
-    promoted, outputs, broad, stolen, started, queued, submitted = (
+    promoted, outputs, broad, stolen, started, queued, submitted, cpu_capacity = (
         native_core.operation_task_arena_output_steal_probe(16)
     )
+
+    if cpu_capacity < 3:
+        pytest.skip("output-steal topology requires at least three runnable CPUs")
 
     assert 0 <= promoted <= outputs
     assert outputs == 7
@@ -47,7 +55,7 @@ def test_steal_preference_is_constant_time_and_high_core_only() -> None:
     """The extension adds no queue scan, global index, or low-core branch."""
     root = Path(__file__).resolve().parents[2]
     runtime = (root / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text()
-    probe = (root / "cpp/src/api/python_abi3/runtime/arena_scheduler_probe.cc").read_text()
+    probe = (root / "cpp/src/api/python_abi3/runtime/test_probes.cc").read_text()
 
     assert "template <bool PreferDedicatedOutput>\nbool steal_compatible" in runtime
     assert "dedicated_high_output(candidate.tasks.front()" in runtime

@@ -1,4 +1,6 @@
-// Python ABI3 wrappers for direct Arrow schema helpers.
+// Implements Python ABI3 wrappers for direct Arrow schema helpers. These
+// routines keep Arrow schema interpretation and buffer ownership explicit at
+// the ABI boundary.
 
 #include "api/python_abi3/arrow_direct/_core_abi3_arrow_direct.hh"
 
@@ -13,6 +15,8 @@
 namespace core_abi3_internal {
 namespace {
 
+/// Acquires a PyArrow schema capsule and parses it into the direct-ingestion
+/// schema model.
 ArrowSchema *schema_from_pyarrow_object(PyObject *schema_obj,
                                         PyObject **capsule_out) {
   ArrowSchema *schema = nullptr;

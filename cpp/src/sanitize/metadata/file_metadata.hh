@@ -1,4 +1,6 @@
-// Declares generated file metadata helpers shared by file sinks.
+// Declares generated per-file metadata shared by native file sinks.
+// The helper derives stable source, timestamp, and registry columns without
+// coupling sink implementations to metadata normalization details.
 
 #pragma once
 
@@ -16,11 +18,11 @@ struct FileMetadataInput {
 
 using FileMetadataColumns = std::vector<std::pair<std::string, std::string>>;
 
-// Builds generated per-file metadata columns.
+/// Builds generated per-file metadata columns.
 Result<FileMetadataColumns>
 generated_file_metadata_columns(const FileMetadataInput &input);
 
-// Returns the current UTC timestamp as an ISO-8601 string with microseconds.
+/// Returns the current UTC timestamp as an ISO-8601 string with microseconds.
 Result<std::string> current_utc_iso_timestamp();
 
 } // namespace sanitize

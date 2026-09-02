@@ -1,5 +1,8 @@
-// Parses primitive lists and Parquet column metadata from compact Thrift.
+// Parses column-chunk metadata, statistics, encodings, and paths from
+// compact-Thrift footer data. This fragment is included by the consolidated
+// footer reader inside its private implementation namespace.
 
+/// Reads a bounded compact-Thrift list of signed 32-bit values.
 sanitize::Result<std::vector<std::int32_t>>
 read_i32_list(CompactReader &reader, std::uint64_t max_count,
               std::string_view label) {
@@ -22,6 +25,7 @@ read_i32_list(CompactReader &reader, std::uint64_t max_count,
   return out;
 }
 
+/// Reads a bounded compact-Thrift list of signed 64-bit values.
 sanitize::Result<std::vector<std::int64_t>>
 read_i64_list(CompactReader &reader, std::uint64_t max_count,
               std::string_view label) {
@@ -44,6 +48,8 @@ read_i64_list(CompactReader &reader, std::uint64_t max_count,
   return out;
 }
 
+/// Reads a bounded compact-Thrift Boolean list, skipping mismatched element
+/// types.
 sanitize::Result<std::vector<bool>> read_bool_list(CompactReader &reader,
                                                    std::uint64_t max_count,
                                                    std::string_view label) {
@@ -74,6 +80,7 @@ sanitize::Result<std::vector<bool>> read_bool_list(CompactReader &reader,
   return out;
 }
 
+/// Reads a bounded compact-Thrift binary list into owned strings.
 sanitize::Result<std::vector<std::string>>
 read_string_list(CompactReader &reader, std::uint64_t max_count,
                  std::string_view label) {
@@ -96,6 +103,8 @@ read_string_list(CompactReader &reader, std::uint64_t max_count,
   return out;
 }
 
+/// Parses one compact-Thrift ColumnMetaData structure into an existing column
+/// record.
 sanitize::Result<ColumnChunkInfo> read_column_metadata(CompactReader &reader,
                                                        ColumnChunkInfo column) {
   std::int16_t last_field_id = 0;

@@ -1,37 +1,14 @@
-"""Tests for reusable partition pipeline helpers."""
+"""Construct source files used by pipeline warm-up and execution tests.
+
+The builders cover every public format and input mode while preserving stable field names and
+expected row values.
+"""
 
 from __future__ import annotations
 
-import json
-import logging
-from datetime import date
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
-
-from schema_sanitizer.pipeline import (
-    PartitionRunPlan,
-    SchemaRegistryState,
-)
-from schema_sanitizer.pipeline.advanced import (
-    HiveRangeConfig,
-    build_hive_range_plan,
-    compact_stats_for_log,
-    cpu_io_wall_percentages,
-    diff_flat_schema_paths,
-    discover_existing_source_plans,
-    estimate_cpu_io_wall_time,
-    format_duration,
-    infer_warm_up_schema_registry,
-    infer_warm_up_schema_registry_json,
-    infer_warm_up_schema_registry_state,
-    parse_final_schema_registry,
-    read_parquet_schema,
-    run_partitioned_to_parquet,
-    run_partitioned_to_parquet_registry_json,
-    run_partitioned_to_parquet_registry_state,
-)
 
 
 def _write_warm_up_source(
@@ -58,7 +35,7 @@ def _write_warm_up_source(
         path.write_text(f'{{"{field_name}": 1}}', encoding="utf-8")
     elif input_format == "json_array":
         path.write_text(f'[{{"{field_name}": 1}}]', encoding="utf-8")
-    elif input_format in {"jsonl", "ndjson"}:
+    elif input_format == "jsonl":
         path.write_text(f'{{"{field_name}": 1}}\n', encoding="utf-8")
     elif input_format == "xml":
         path.write_text(f"<row><{field_name}>1</{field_name}></row>", encoding="utf-8")
@@ -79,32 +56,3 @@ def _input_suffix(input_format: str) -> str:
     if input_format == "parquet":
         return "parquet"
     return input_format
-
-
-__all__ = [
-    "HiveRangeConfig",
-    "PartitionRunPlan",
-    "SchemaRegistryState",
-    "SimpleNamespace",
-    "_input_suffix",
-    "_write_warm_up_source",
-    "build_hive_range_plan",
-    "compact_stats_for_log",
-    "cpu_io_wall_percentages",
-    "date",
-    "diff_flat_schema_paths",
-    "discover_existing_source_plans",
-    "estimate_cpu_io_wall_time",
-    "format_duration",
-    "infer_warm_up_schema_registry",
-    "infer_warm_up_schema_registry_json",
-    "infer_warm_up_schema_registry_state",
-    "json",
-    "logging",
-    "parse_final_schema_registry",
-    "pytest",
-    "read_parquet_schema",
-    "run_partitioned_to_parquet",
-    "run_partitioned_to_parquet_registry_json",
-    "run_partitioned_to_parquet_registry_state",
-]

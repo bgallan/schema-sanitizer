@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency wide reordered flat inference matches single."""
+"""Verify reordered flat-field inference against the single-worker schema oracle.
+
+Crossing the field ceiling must fall back without semantic drift, low-memory output remains
+byte-identical, and flat-parser overflow stays bounded and charged to memory accounting.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +12,6 @@ from pathlib import Path
 
 import pytest
 from _support.diagnostics import assert_diagnostics_semantically_equal
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.core_impl.execution import ExecutionContext
@@ -31,9 +34,8 @@ def _schema_probe(payload: str, threading_mode: str, memory_limit_bytes: int = _
     return ExecutionContext().schema_probe_from_source("jsonl", "text", payload, options)
 
 
-def test_wide_reordered_flat_inference_matches_single() -> None:
+def test_wide_reordered_flat_inference_matches_single(require_native: None) -> None:
     """Tracked overflow and ordered matching preserve wide schema semantics."""
-    require_native()
     columns = [f"field_{index:03d}" for index in range(128)]
     lines: list[str] = []
     for row in range(2_048):
@@ -56,9 +58,8 @@ def test_wide_reordered_flat_inference_matches_single() -> None:
     assert len(multi.field_names) == len(columns)
 
 
-def test_field_ceiling_falls_back_to_generic_without_semantic_drift() -> None:
+def test_field_ceiling_falls_back_to_generic_without_semantic_drift(require_native: None) -> None:
     """More than the bounded flat capacity retains the generic reference path."""
-    require_native()
     columns = [f"f{index:03d}" for index in range(520)]
     payload = "\n".join(
         json.dumps({key: row + index for index, key in enumerate(columns)}, separators=(",", ":"))
@@ -74,9 +75,8 @@ def test_field_ceiling_falls_back_to_generic_without_semantic_drift() -> None:
     assert len(multi.field_names) == len(columns)
 
 
-def test_wide_low_memory_output_is_byte_identical(tmp_path: Path) -> None:
+def test_wide_low_memory_output_is_byte_identical(tmp_path: Path, require_native: None) -> None:
     """Overflow evidence stays inside the operation budget and preserves output."""
-    require_native()
     source = tmp_path / "wide.jsonl"
     rows = [{f"field_{column:03d}": row + column for column in range(128)} for row in range(4_096)]
     source.write_text(

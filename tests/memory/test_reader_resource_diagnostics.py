@@ -1,4 +1,7 @@
-"""Reader hardening resource diagnostics regressions."""
+"""Checks bounded reader metrics across modes, consumer cancellation or close, memory-pool
+release, and Parquet footer accounting. Diagnostics differ only in legitimate peak
+values, record cancellation at close, and sum footer sizes without retaining unbounded
+state."""
 
 from __future__ import annotations
 
@@ -6,7 +9,6 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 
 @pytest.mark.parametrize(
@@ -35,9 +37,9 @@ def test_reader_resource_diagnostics_report_bounded_operation_metrics(
     expected_depth: int,
     expected_nodes: int,
     multi_threading: bool,
+    require_native: None,
 ) -> None:
     """Every text reader reports stable counters without retaining pool bytes."""
-    require_native()
     import schema_sanitizer as ss
 
     source = tmp_path / f"source{suffix}"
@@ -69,9 +71,9 @@ def test_reader_resource_diagnostics_report_bounded_operation_metrics(
 
 def test_reader_resource_diagnostics_are_mode_independent_except_peak(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Serial and parallel execution expose identical semantic reader metrics."""
-    require_native()
     import schema_sanitizer as ss
 
     source = tmp_path / "source.jsonl"
@@ -94,9 +96,8 @@ def test_reader_resource_diagnostics_are_mode_independent_except_peak(
     assert left == right
 
 
-def test_consumer_close_records_cancellation_and_releases_pool() -> None:
+def test_consumer_close_records_cancellation_and_releases_pool(require_native: None) -> None:
     """Closing an unconsumed native stream records a privacy-safe reason code."""
-    require_native()
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
     from schema_sanitizer.options_impl.call_options import normalize_call_options
 

@@ -1,3 +1,9 @@
+// Derives element intervals, offsets, and validity from Parquet repetition and
+// definition levels. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
+
+/// Selects the native decoded-value buffer representation for one Parquet page
+/// encoding.
 NativeValueBufferKind value_buffer_kind_for_page(const ColumnChunkInfo &column,
                                                  const PageHeaderInfo &page) {
   if (!page.has_value_encoding || !column.has_physical_type) {
@@ -46,6 +52,7 @@ NativeValueBufferKind value_buffer_kind_for_page(const ColumnChunkInfo &column,
   return NativeValueBufferKind::none;
 }
 
+/// Returns the checked physical value width required by one native page plan.
 std::int32_t value_width_bytes_for_page(const ColumnChunkInfo &column,
                                         const PageHeaderInfo &page) {
   if (!page.has_value_encoding) {
@@ -60,6 +67,8 @@ std::int32_t value_width_bytes_for_page(const ColumnChunkInfo &column,
   return 0;
 }
 
+/// Returns the Arrow buffer count required by a decoded native value
+/// representation.
 constexpr std::int32_t
 arrow_buffer_count_for_value_kind(NativeValueBufferKind kind) noexcept {
   switch (kind) {
@@ -88,6 +97,8 @@ struct RepeatedLeafReadPlanState {
   std::int32_t dictionary_index_bit_width = 0;
 };
 
+/// Reports whether a repeated Parquet leaf has a native decoded-value
+/// representation.
 constexpr bool
 is_supported_repeated_leaf_value_kind(NativeValueBufferKind kind,
                                       std::int32_t width) noexcept {
@@ -101,6 +112,8 @@ is_supported_repeated_leaf_value_kind(NativeValueBufferKind kind,
          kind == NativeValueBufferKind::bit_packed_boolean;
 }
 
+/// Accumulates page levels and value spans needed to plan one repeated Parquet
+/// leaf.
 void observe_repeated_leaf_data_page(const ColumnChunkInfo &column,
                                      const PageHeaderInfo &page,
                                      RepeatedLeafReadPlanState *state) {
@@ -135,6 +148,8 @@ void observe_repeated_leaf_data_page(const ColumnChunkInfo &column,
   }
 }
 
+/// Assigns repeated leaf native read plan from validated schema and page
+/// metadata for later materialization.
 sanitize::Status assign_repeated_leaf_native_read_plan(
     ColumnChunkInfo *column, const RepeatedLevelLayoutInfo &leaf_layout,
     const RepeatedLeafReadPlanState &state) {
@@ -207,6 +222,8 @@ sanitize::Status assign_repeated_leaf_native_read_plan(
   return {};
 }
 
+/// Assigns generic list chain level layout from validated schema and page
+/// metadata for later materialization.
 sanitize::Status
 assign_generic_list_chain_level_layout(std::int64_t row_count,
                                        ColumnChunkInfo *column) {
@@ -393,6 +410,8 @@ assign_generic_list_chain_level_layout(std::int64_t row_count,
   return {};
 }
 
+/// Assigns simple list level layout from validated schema and page metadata for
+/// later materialization.
 sanitize::Status assign_simple_list_level_layout(std::int64_t row_count,
                                                  ColumnChunkInfo *column) {
   if (!column || !is_native_repeated_path_leaf(*column)) {

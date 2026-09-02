@@ -1,4 +1,8 @@
-"""Immutable execution policy shared by Python orchestration and native work."""
+"""Define immutable execution policy shared by Python and native work.
+
+Threading choices are normalized into one policy and serialized consistently for native calls,
+operation orchestration, and diagnostics.
+"""
 
 from __future__ import annotations
 

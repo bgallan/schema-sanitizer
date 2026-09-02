@@ -1,17 +1,18 @@
-"""Regression coverage for concurrency output preference is dormant through eight workers."""
+"""Define low- and high-core output-lane scheduling contracts.
+
+The cases keep preference dormant through eight workers, permit one bounded high-core bypass,
+restore FIFO, and drain mixed lanes without extra threads.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from conftest import require_native
-
 from schema_sanitizer.core_impl.native_runtime import native_core
 
 
-def test_output_preference_is_dormant_through_eight_workers() -> None:
+def test_output_preference_is_dormant_through_eight_workers(require_native: None) -> None:
     """The low-core arena keeps strict local FIFO and the exact thread budget."""
-    require_native()
     promoted, outputs, broad, started, queued, _elapsed_us = (
         native_core.operation_task_arena_output_preference_probe(8)
     )
@@ -23,9 +24,8 @@ def test_output_preference_is_dormant_through_eight_workers() -> None:
     assert queued == 0
 
 
-def test_high_core_output_lane_bypasses_local_broad_backlog() -> None:
+def test_high_core_output_lane_bypasses_local_broad_backlog(require_native: None) -> None:
     """Dedicated output tasks run before broad upstream tasks on high workers."""
-    require_native()
     promoted, outputs, broad, started, queued, _elapsed_us = (
         native_core.operation_task_arena_output_preference_probe(16)
     )
@@ -40,10 +40,10 @@ def test_high_core_output_lane_bypasses_local_broad_backlog() -> None:
 
 
 def test_scheduler_uses_compile_time_low_core_specialization() -> None:
-    """One-through-eight workers retain the legacy front/pop-front hot path."""
+    """One-through-eight workers use the front/pop-front hot path."""
     root = Path(__file__).resolve().parents[2]
     runtime = (root / "cpp/src/internal/runtime/operation_task_arena_runtime.cc.inc").read_text()
-    probe = (root / "cpp/src/api/python_abi3/runtime/arena_scheduler_probe.cc").read_text()
+    probe = (root / "cpp/src/api/python_abi3/runtime/test_probes.cc").read_text()
 
     assert "template <bool PreferDedicatedOutput, bool CheckGlobalStopping>" in runtime
     assert "worker_loop<true, false>(state, index, stop)" in runtime
@@ -60,9 +60,8 @@ def test_scheduler_uses_compile_time_low_core_specialization() -> None:
     assert "operation_task_arena_output_preference_probe" in probe
 
 
-def test_mixed_lanes_still_drain_and_steal_without_extra_workers() -> None:
+def test_mixed_lanes_still_drain_and_steal_without_extra_workers(require_native: None) -> None:
     """The preference keeps mixed lanes live and within the arena budget."""
-    require_native()
     (
         _elapsed_ns,
         stolen,
@@ -81,9 +80,8 @@ def test_mixed_lanes_still_drain_and_steal_without_extra_workers() -> None:
     assert submitted == 3_008
 
 
-def test_output_preference_forces_fifo_after_one_bypass() -> None:
+def test_output_preference_forces_fifo_after_one_bypass(require_native: None) -> None:
     """A second output wave cannot repeatedly starve the broad front task."""
-    require_native()
     promoted, outputs, broad, started, queued, _elapsed_us = (
         native_core.operation_task_arena_output_preference_probe(16, 2)
     )

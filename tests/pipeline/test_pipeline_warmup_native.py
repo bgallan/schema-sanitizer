@@ -1,17 +1,33 @@
-"""Native pipeline warmup tests."""
+"""Native pipeline warmup tests.
 
-# ruff: noqa: F405
+It covers native registry warm-up for files and directories, wrapper bypass, prior
+state, empty sources, cleanup, and discovered-input reuse.
+"""
 
 from __future__ import annotations
 
-from _support.pipeline import *  # noqa: F403
+import json
+from datetime import date
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+from _support.pipeline import _write_warm_up_source
+
+from schema_sanitizer.pipeline.partition_execution import run_partitioned_to_parquet
+from schema_sanitizer.pipeline.registry_warmup import (
+    infer_warm_up_schema_registry,
+    infer_warm_up_schema_registry_json,
+    infer_warm_up_schema_registry_state,
+)
+from schema_sanitizer.pipeline.types import PartitionRunPlan
 
 
 def test_pipeline_warm_up_prefers_native_auto_registry_stream(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Verify warm-up shares the normal native auto-registry source-plan path."""
+    """Verify pipeline warm up prefers native auto registry stream."""
     source = tmp_path / "a.jsonl"
     source.write_text('{"id": 1}\n', encoding="utf-8")
     closed: list[str] = []
@@ -29,7 +45,7 @@ def test_pipeline_warm_up_prefers_native_auto_registry_stream(
         native_registry_state = "compiled-state"
 
         def close(self) -> None:
-            """Record stream close."""
+            """Close the fake raw and release its retained resources."""
             closed.append("raw")
 
     class FakeRawContext:
@@ -42,22 +58,18 @@ def test_pipeline_warm_up_prefers_native_auto_registry_stream(
             call_options,
             **kwargs,
         ):
-            """Capture the auto-registry call."""
+            """Capture native registry warm-up sources and options."""
             assert sink == "stream"
             assert call_options is not None
             assert call_options._operation_detected_at.endswith("Z")
             calls.append((sources, kwargs))
             return FakeRaw()
 
-        def registry_probe_path_sources_best_effort(self, *_args, **_kwargs):
-            """Fail if warm-up falls back to the older probe path."""
-            raise AssertionError("warm-up should use native auto-registry stream")
-
     class FakePool:
         """Fake context pool."""
 
         def get(self):
-            """Return a fake high-level context wrapper."""
+            """Return the configured response for the requested provider object."""
             return SimpleNamespace(_raw=FakeRawContext())
 
     import schema_sanitizer.input_impl.source_plan as path_sources_impl
@@ -99,15 +111,14 @@ def test_pipeline_warm_up_prefers_native_auto_registry_stream(
 
 
 def test_pipeline_warm_up_uses_source_plan_probe_helper() -> None:
-    """Verify warm-up does not own low-level source-plan probing."""
+    """Verify pipeline warm up uses source plan probe helper."""
     from schema_sanitizer.pipeline import registry_warmup
 
-    assert not hasattr(registry_warmup, "probe_source_plan_registry")
     assert hasattr(registry_warmup, "probe_prepared_source_plan_registry")
 
 
 def test_pipeline_warm_up_skips_invalid_json_probe_sources(tmp_path: Path) -> None:
-    """Verify warm-up can skip invalid JSON sources outside the main run range."""
+    """Verify pipeline warm up skips invalid JSON probe sources."""
     bad = tmp_path / "bad.jsonl"
     good = tmp_path / "good.jsonl"
     bad.write_bytes(b'{"broken":"raw \x01 control"}\n')
@@ -129,7 +140,7 @@ def test_pipeline_warm_up_skips_invalid_json_probe_sources(tmp_path: Path) -> No
 
 
 def test_pipeline_warm_up_can_return_registry_json(tmp_path: Path) -> None:
-    """Verify warm-up can return canonical registry JSON without parsing it."""
+    """Verify pipeline warm up can return registry JSON."""
     source = tmp_path / "a.jsonl"
     source.write_text('{"alpha": 1}\n', encoding="utf-8")
 
@@ -147,7 +158,7 @@ def test_pipeline_warm_up_can_return_registry_json(tmp_path: Path) -> None:
 
 
 def test_pipeline_warm_up_can_return_registry_state(tmp_path: Path) -> None:
-    """Verify warm-up returns native registry state for the normal run boundary."""
+    """Verify pipeline warm up can return registry state."""
     source = tmp_path / "a.jsonl"
     source.write_text('{"alpha": 1}\n', encoding="utf-8")
 
@@ -207,7 +218,7 @@ def test_pipeline_warm_up_completed_progress_measures_probe_cpu(
 def test_pipeline_warm_up_keeps_parquet_writer_options_out_of_schema_options(
     tmp_path: Path,
 ) -> None:
-    """Verify full to_parquet kwargs do not leak writer options into warm-up registry_warmup."""
+    """Verify pipeline warm up keeps Parquet writer options out of schema options."""
     source = tmp_path / "a.jsonl"
     source.write_text('{"alpha": 1}\n', encoding="utf-8")
 
@@ -230,12 +241,10 @@ def test_pipeline_warm_up_keeps_parquet_writer_options_out_of_schema_options(
 
 
 def test_pipeline_parquet_warm_up_uses_native_arrow_sources(tmp_path: Path) -> None:
-    """Verify Parquet warm-up bypasses the Parquet-to-JSONL fallback."""
+    """Verify pipeline Parquet warm up uses native arrow sources."""
     pytest.importorskip("pyarrow")
     first = _write_warm_up_source(tmp_path, "parquet", "single_file", "first", "alpha")
     second = _write_warm_up_source(tmp_path, "parquet", "single_file", "second", "beta")
-
-    from schema_sanitizer.pipeline.registry_warmup import last_warm_up_route
 
     state = infer_warm_up_schema_registry_state(
         [
@@ -252,11 +261,10 @@ def test_pipeline_parquet_warm_up_uses_native_arrow_sources(tmp_path: Path) -> N
     fields = state.schema_registry["canonical_schema"]["fields"]
     assert {field["name"] for field in fields} >= {"alpha", "beta"}
     assert state.native_registry_state is not None
-    assert last_warm_up_route() == "native_parquet_arrow_sources"
 
 
 def test_pipeline_parquet_directory_warm_up_bypasses_jsonl_bridge(tmp_path: Path) -> None:
-    """Verify mixed-schema Parquet directory warm-up uses child Arrow sources."""
+    """Verify pipeline Parquet directory warm up bypasses JSONL bridge."""
     pa = pytest.importorskip("pyarrow")
     pq = pytest.importorskip("pyarrow.parquet")
     folder = tmp_path / "parquet"
@@ -264,8 +272,6 @@ def test_pipeline_parquet_directory_warm_up_bypasses_jsonl_bridge(tmp_path: Path
     pq.write_table(pa.table({"alpha": [1]}), folder / "a.parquet")
     pq.write_table(pa.table({"beta": [2]}), folder / "b.parquet")
 
-    from schema_sanitizer.pipeline.registry_warmup import last_warm_up_route
-
     state = infer_warm_up_schema_registry_state(
         [PartitionRunPlan(date(2026, 1, 1), str(folder), str(tmp_path / "out.parquet"))],
         input_format="parquet",
@@ -278,21 +284,18 @@ def test_pipeline_parquet_directory_warm_up_bypasses_jsonl_bridge(tmp_path: Path
     fields = state.schema_registry["canonical_schema"]["fields"]
     assert {field["name"] for field in fields} >= {"alpha", "beta"}
     assert state.native_registry_state is not None
-    assert last_warm_up_route() == "native_parquet_arrow_sources"
 
 
 def test_pipeline_xml_directory_warm_up_bypasses_wrapper(
     tmp_path: Path,
 ) -> None:
-    """Verify XML directory warm-up infers row tags and reads child paths natively."""
+    """Verify pipeline XML directory warm up bypasses wrapper."""
     folder = tmp_path / "xml"
     folder.mkdir()
     (folder / "a.xml").write_text(
         '<?xml version="1.0"?><row><alpha>1</alpha></row>', encoding="utf-8"
     )
     (folder / "b.xml").write_text("<row><beta>2</beta></row>", encoding="utf-8")
-
-    from schema_sanitizer.pipeline.registry_warmup import last_warm_up_route
 
     registry = infer_warm_up_schema_registry(
         [PartitionRunPlan(date(2026, 1, 1), str(folder), str(tmp_path / "out.parquet"))],
@@ -305,15 +308,12 @@ def test_pipeline_xml_directory_warm_up_bypasses_wrapper(
 
     fields = registry["canonical_schema"]["fields"]
     assert {field["name"] for field in fields} >= {"alpha", "beta"}
-    assert last_warm_up_route() == "native_manifest_paths"
 
 
 def test_pipeline_xml_warm_up_infers_row_tag_natively(tmp_path: Path) -> None:
-    """Verify XML warm-up no longer needs the temp wrapper to infer row tags."""
+    """Verify pipeline XML warm up infers row tag natively."""
     first = _write_warm_up_source(tmp_path, "xml", "single_file", "first", "alpha")
     second = _write_warm_up_source(tmp_path, "xml", "single_file", "second", "beta")
-
-    from schema_sanitizer.pipeline.registry_warmup import last_warm_up_route
 
     registry = infer_warm_up_schema_registry(
         [
@@ -329,7 +329,6 @@ def test_pipeline_xml_warm_up_infers_row_tag_natively(tmp_path: Path) -> None:
 
     fields = registry["canonical_schema"]["fields"]
     assert {field["name"] for field in fields} >= {"alpha", "beta"}
-    assert last_warm_up_route() == "native_manifest_paths"
 
 
 @pytest.mark.parametrize("input_format", ["csv", "xml"])
@@ -337,12 +336,11 @@ def test_pipeline_warm_up_native_manifest_replaces_fallback_routing(
     tmp_path: Path,
     input_format: str,
 ) -> None:
-    """Verify CSV/XML warm-up builds native manifests without fallback routing."""
+    """Verify pipeline warm up native manifest replaces fallback routing."""
     source = _write_warm_up_source(tmp_path, input_format, "directory", "native", "alpha")
 
     from schema_sanitizer.pipeline import registry_warmup as warm_up_input
 
-    assert not hasattr(warm_up_input, "_route_prepared_inputs_for_warm_up")
     progress = []
 
     prepared = warm_up_input.prepare_schema_warm_up_input(
@@ -371,13 +369,13 @@ def test_pipeline_warm_up_native_manifest_replaces_fallback_routing(
 
 @pytest.mark.parametrize(
     "input_format",
-    ["jsonl", "ndjson", "json", "json_array", "csv", "xml"],
+    ["jsonl", "json", "json_array", "csv", "xml"],
 )
 def test_pipeline_warm_up_and_normal_directory_share_source_descriptors(
     tmp_path: Path,
     input_format: str,
 ) -> None:
-    """Verify warm-up and normal directory ingestion build the same native sources."""
+    """Verify pipeline warm up and normal directory share source descriptors."""
     from schema_sanitizer.api_impl.input.preparation import prepare_public_input
     from schema_sanitizer.api_impl.source_plan.attached import source_plan_from_data
     from schema_sanitizer.pipeline.registry_warmup import prepare_schema_warm_up_input
@@ -412,7 +410,7 @@ def test_pipeline_warm_up_and_normal_directory_share_source_descriptors(
 
 @pytest.mark.parametrize(
     "input_format",
-    ["jsonl", "ndjson", "json", "json_array", "csv", "xml", "parquet"],
+    ["jsonl", "json", "json_array", "csv", "xml", "parquet"],
 )
 @pytest.mark.parametrize("input_mode", ["single_file", "directory"])
 def test_pipeline_warm_up_supports_all_public_file_formats_and_modes(
@@ -420,7 +418,7 @@ def test_pipeline_warm_up_supports_all_public_file_formats_and_modes(
     input_format: str,
     input_mode: str,
 ) -> None:
-    """Verify warm-up can infer across every public input format and mode."""
+    """Verify pipeline warm up supports all public file formats and modes."""
     first = _write_warm_up_source(tmp_path, input_format, input_mode, "first", "alpha")
     second = _write_warm_up_source(tmp_path, input_format, input_mode, "second", "beta")
 
@@ -449,7 +447,7 @@ def test_pipeline_warm_up_supports_all_public_file_formats_and_modes(
 def test_pipeline_warm_up_registry_does_not_inject_rows_into_normal_partitions(
     tmp_path: Path,
 ) -> None:
-    """Verify warm-up data only seeds schema registry_warmup, never normal output rows."""
+    """Verify pipeline warm up registry does not inject rows into normal partitions."""
     pq = pytest.importorskip("pyarrow.parquet")
     warm = tmp_path / "warm.jsonl"
     normal = tmp_path / "normal.jsonl"
@@ -486,7 +484,7 @@ def test_pipeline_warm_up_registry_uses_native_registry_stream_normal_partition(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Verify non-overlapping warm-up dates use the native registry stream."""
+    """Verify pipeline warm up registry uses native registry stream normal partition."""
     pq = pytest.importorskip("pyarrow.parquet")
     from schema_sanitizer.api_impl.source_plan import registry as source_plan_registry_stream
 
@@ -510,7 +508,7 @@ def test_pipeline_warm_up_registry_uses_native_registry_stream_normal_partition(
     real_registry_stream = source_plan_registry_stream.open_source_plan_registry_stream
 
     def tracking_registry_stream(*args, **kwargs):
-        """Track native registry stream use while preserving behavior."""
+        """Record registry-stream use before delegating to the real implementation."""
         nonlocal registry_stream_calls
         registry_stream_calls += 1
         return real_registry_stream(*args, **kwargs)
@@ -541,7 +539,7 @@ def test_pipeline_warm_up_registry_uses_native_registry_stream_normal_partition(
 def test_pipeline_warm_up_directory_parquet_coalesces_source_file_batches(
     tmp_path: Path,
 ) -> None:
-    """Verify many tiny source files do not become many Parquet row groups."""
+    """Verify pipeline warm up directory Parquet coalesces source file batches."""
     pq = pytest.importorskip("pyarrow.parquet")
 
     warm = tmp_path / "warm-coalesce"

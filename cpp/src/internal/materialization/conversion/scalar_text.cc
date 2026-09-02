@@ -1,4 +1,6 @@
 // Formats ValueView values used by build conversion fallback paths.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/conversion/scalar_text.hh"
 
@@ -16,10 +18,10 @@ namespace {
 using sanitize::Status;
 using sanitize::ValueView;
 
-// Converts value to jsonish.
+/// Serializes a fallback value to JSON-compatible scalar or container text.
 std::string value_to_jsonish(ValueView value);
 
-// Escapes json string.
+/// Quotes and escapes a string according to JSON text rules.
 std::string escape_json_string(std::string_view value) {
   std::string out;
   out.reserve(value.size() + 2);
@@ -62,7 +64,8 @@ std::string escape_json_string(std::string_view value) {
   return out;
 }
 
-// Converts double to string.
+/// Formats a finite double with round-trip precision, mapping non-finite values
+/// to null.
 std::string double_to_string(double value) {
   if (!std::isfinite(value))
     return "null";

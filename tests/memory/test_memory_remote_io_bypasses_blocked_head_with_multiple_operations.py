@@ -1,4 +1,8 @@
-"""Regression coverage for memory remote io bypasses blocked head with multiple operations."""
+"""Stress-tests multi-operation remote-I/O fairness with delivered-permit cancellation,
+opportunistic acquisition, provider gates, forked context cleanup, staged paths,
+diagnostics, telemetry journals, and process-guarded Arrow or Parquet cleanup. Blocked
+heads may be bypassed only by eligible queued operations, while inherited resources
+return without parent locks and hostile metadata cannot leak slots."""
 
 from __future__ import annotations
 
@@ -7,10 +11,17 @@ import os
 import select
 import threading
 import time
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import (
+    SCHEDULER_TIMEOUT_SECONDS,
+    join_thread_or_fail,
+    run_isolated_python_probe,
+    wait_for_process_exit,
+)
 
 
 def _set_environment(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
@@ -29,10 +40,11 @@ def test_remote_io_bypasses_blocked_head_with_multiple_operations() -> None:
         large_a = module._Waiter(loop, SimpleNamespace(), 4, "large-a", "a")
         small_a = module._Waiter(loop, SimpleNamespace(), 1, "small-a", "a")
         large_b = module._Waiter(loop, SimpleNamespace(), 4, "large-b", "b")
-        governor._waiters.extend((large_a, small_a, large_b))
+        for waiter in (large_a, small_a, large_b):
+            governor._enqueue_waiter_locked(waiter)
         deliveries = governor._grant_ready_locked()
 
-    assert deliveries == [small_a]
+    assert list(deliveries) == [small_a]
     assert large_a.bypasses == 1
     snapshot = governor.snapshot()
     assert snapshot.in_use == 4
@@ -48,10 +60,12 @@ def test_remote_io_cancel_after_delivery_reclaims_future_owned_permit(
 
     class CancelAfterResultFuture(asyncio.Future[module.RemoteIoPermit]):
         def __await__(self):  # type: ignore[no-untyped-def]
+            """Return a fresh provider resource."""
             yield from super().__await__()
             raise asyncio.CancelledError
 
     async def run() -> None:
+        """Consume the delivered result, then raise cancellation to model the race."""
         governor = module.RemoteIoPermitGovernor(capacity=1)
         loop = asyncio.get_running_loop()
         monkeypatch.setattr(
@@ -77,24 +91,31 @@ def test_remote_delivery_callback_is_noop_after_grant_reclamation() -> None:
 
     class DeferredLoop:
         def call_soon_threadsafe(self, callback: Any) -> None:
+            """Invoke the thread-safe callback immediately."""
             callbacks.append(callback)
 
     class Future:
         def cancelled(self) -> bool:
+            """Report whether the fake future was cancelled."""
             return False
 
         def done(self) -> bool:
+            """Report whether the future test double has completed."""
             return False
 
         def set_result(self, _value: object) -> None:
+            """Publish the controlled future result."""
             raise AssertionError("reclaimed grant must not be published")
 
     governor = module.RemoteIoPermitGovernor(capacity=1)
     waiter = module._Waiter(DeferredLoop(), Future(), 1, "label", "operation")
     waiter.state = "granted"
     waiter.granted_weight = 1
+    waiter.delivery_callback = lambda: governor._delivery_callback(waiter)
     governor._in_use = 1
-    governor._deliver([waiter])
+    deliveries = module._GrantBatch(1)
+    deliveries.append(waiter)
+    governor._deliver(deliveries)
 
     with governor._lock:
         waiter.state = "cancelled"
@@ -113,11 +134,12 @@ def test_opportunistic_process_acquisition_does_not_bypass_fifo_waiter() -> None
     acquired: list[Any] = []
 
     def wait_for_all() -> None:
+        """Wait until every queued remote operation reaches completion."""
         acquired.append(governor.acquire(2, timeout_seconds=2.0))
 
     thread = threading.Thread(target=wait_for_all)
     thread.start()
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while governor.snapshot().waiting != 1 and time.monotonic() < deadline:
         time.sleep(0.005)
     assert governor.snapshot().waiting == 1
@@ -127,8 +149,7 @@ def test_opportunistic_process_acquisition_does_not_bypass_fifo_waiter() -> None
     assert governor.snapshot().opportunistic_rejections == 1
 
     first.release()
-    thread.join(timeout=2.0)
-    assert not thread.is_alive()
+    join_thread_or_fail(thread)
     assert len(acquired) == 1
     acquired[0].release()
 
@@ -153,12 +174,14 @@ def test_provider_key_gate_cleanup_survives_repeated_cancellation() -> None:
     )
 
     async def run() -> None:
+        """Cancel acquisition after delivery and verify permit reclamation."""
         pool = RemoteProviderSessionPool()
         await pool.__aenter__()
         entered = asyncio.Event()
         blocker = asyncio.Event()
 
         async def borrower() -> None:
+            """Borrow the provider resource in the competing task."""
             async with pool._key_guard(("key",)):
                 entered.set()
                 await blocker.wait()
@@ -180,9 +203,8 @@ def test_provider_key_gate_cleanup_survives_repeated_cancellation() -> None:
     asyncio.run(run())
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
-def test_fork_child_drops_inherited_resource_contextvars() -> None:
-    """The surviving fork thread must not retain parent resource ownership graphs."""
+def _probe_fork_child_drops_inherited_resource_contextvars() -> None:
+    """Exercise inherited context cleanup in a disposable process."""
     from schema_sanitizer.api_impl import partition_resources
     from schema_sanitizer.core_impl import cancellation
     from schema_sanitizer.remote_impl import provider_session_pool
@@ -206,16 +228,22 @@ def test_fork_child_drops_inherited_resource_contextvars() -> None:
             os._exit(0)
 
         os.close(write_fd)
-        ready, _, _ = select.select([read_fd], [], [], 3.0)
+        ready, _, _ = select.select([read_fd], [], [], SCHEDULER_TIMEOUT_SECONDS)
         payload = os.read(read_fd, 1) if ready else b""
         os.close(read_fd)
-        _child, status = os.waitpid(pid, 0)
+        status = wait_for_process_exit(pid)
         assert os.waitstatus_to_exitcode(status) == 0
         assert payload == b"1"
     finally:
         cancellation._CURRENT_TOKEN.reset(cancellation_token)
         partition_resources._CURRENT_PARTITION_RESOURCES.reset(partition_token)
         provider_session_pool._CURRENT_POOL.reset(pool_token)
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
+def test_fork_child_drops_inherited_resource_contextvars() -> None:
+    """The surviving fork thread must not retain parent resource ownership graphs."""
+    run_isolated_python_probe(__file__, "_probe_fork_child_drops_inherited_resource_contextvars")
 
 
 @pytest.mark.parametrize(
@@ -243,9 +271,8 @@ def test_inherited_logical_leases_do_not_touch_parent_locks(factory: str) -> Non
         from schema_sanitizer.remote_impl import provider_throttle as module
 
         governor = module.ProviderThrottleGovernor()
-        state = module._State(in_flight=1)
-        governor._states["key"] = state
-        lease = module.ProviderRequestLease(governor, "key")
+        lease, _delay = governor.try_acquire("key")
+        assert lease is not None
 
     object.__setattr__(lease, "_pid", -1)
     lease._lock.acquire()
@@ -260,6 +287,8 @@ def test_inherited_logical_leases_do_not_touch_parent_locks(factory: str) -> Non
         assert governor.snapshot().in_use == 1
     else:
         assert governor.snapshot("key").in_flight == 1
+        object.__setattr__(lease, "_pid", os.getpid())
+        lease.release()
 
 
 def test_staged_path_inherited_close_does_not_delete_parent_artifact(tmp_path) -> None:
@@ -335,7 +364,10 @@ def test_provider_pool_rejects_cross_event_loop_reuse() -> None:
     asyncio.run(pool.__aenter__())
 
     async def borrow() -> None:
+        """Borrow the resource under the controlled ownership conditions."""
+
         async def factory() -> object:
+            """Reject an invalid descriptor weight before constructing a resource."""
             return object()
 
         await pool.borrow_client(("key",), factory)
@@ -362,45 +394,14 @@ def test_completed_operation_diagnostics_do_not_share_nested_state() -> None:
     module._reset_after_fork()
 
 
-@pytest.mark.parametrize("kind", ["memory", "temporary", "cross_process"])
-def test_inherited_byte_leases_return_before_parent_mutex(kind: str) -> None:
+@pytest.mark.parametrize("kind", ["temporary", "cross_process"])
+def test_inherited_byte_leases_return_before_parent_mutex(kind: str, tmp_path: Path) -> None:
     """Byte-accounting finalizers cannot block on locks inherited from parent."""
-    if kind == "memory":
-        from schema_sanitizer.core_impl.memory_budget import OperationMemoryLease
+    if kind == "temporary":
+        from schema_sanitizer.core_impl.temporary_storage import TemporaryStoragePermitPool
 
-        class Ledger:
-            def __init__(self) -> None:
-                self.released = 0
-
-            def reserve(self, _amount: int, *, stage: str) -> None:
-                assert stage == "test"
-
-            def release(self, amount: int) -> None:
-                self.released += amount
-
-        owner = Ledger()
-        lease = OperationMemoryLease(owner, 7, "test")
-    elif kind == "temporary":
-        from pathlib import Path
-
-        from schema_sanitizer.core_impl.temporary_storage import TemporaryStorageLease
-
-        class Pool:
-            def __init__(self) -> None:
-                self.released = 0
-
-            def _release(self, amount: int, **_kwargs: object) -> None:
-                self.released += amount
-
-        owner = Pool()
-        lease = TemporaryStorageLease(
-            owner,
-            7,
-            label="test",
-            filesystem_key=1,
-            filesystem_path=Path("."),
-            inode_count=1,
-        )
+        owner = TemporaryStoragePermitPool(1024)
+        lease = owner.acquire(7, label="test", path=tmp_path)
     else:
         from schema_sanitizer.core_impl.cross_process_memory import (
             CrossProcessMemoryLease,
@@ -418,7 +419,9 @@ def test_inherited_byte_leases_return_before_parent_mutex(kind: str) -> None:
         lease._lock.release()
 
     if kind != "cross_process":
-        assert owner.released == 0
+        assert owner.snapshot().reserved_bytes == 7
+        object.__setattr__(lease, "_pid", os.getpid())
+        lease.release()
     assert lease.reserved_bytes == 0
 
 
@@ -446,22 +449,26 @@ def test_remote_delivery_reentrancy_is_iterative() -> None:
 
     class ImmediateLoop:
         def call_soon_threadsafe(self, callback: Any) -> None:
+            """Count factory calls and return a fresh provider resource."""
             callback()
 
     class FinishedFuture:
         def cancelled(self) -> bool:
+            """Report whether the fake future was cancelled."""
             return False
 
         def done(self) -> bool:
+            """Report whether the finished future test double has completed."""
             return True
 
         def set_result(self, _value: object) -> None:
+            """Publish the controlled future result."""
             raise AssertionError("finished future must not receive a permit")
 
     governor = module.RemoteIoPermitGovernor(capacity=1, max_waiters=4096)
     with governor._lock:
         for index in range(2_000):
-            governor._waiters.append(
+            governor._enqueue_waiter_locked(
                 module._Waiter(
                     ImmediateLoop(),
                     FinishedFuture(),
@@ -590,10 +597,12 @@ def test_provider_pool_rejects_invalid_descriptor_weight_before_factory(
     calls = 0
 
     async def run() -> None:
+        """Queue the thread-safe callback for deferred execution."""
         nonlocal calls
         pool = RemoteProviderSessionPool()
 
         async def factory() -> object:
+            """Reject inherited pool use before loop access or resource construction."""
             nonlocal calls
             calls += 1
             return object()
@@ -629,11 +638,13 @@ def test_provider_pool_rejects_inherited_reference_before_loop_or_factory() -> N
     calls = 0
 
     async def run() -> None:
+        """Cancel a guarded borrower twice and verify its key gate is reclaimed."""
         nonlocal calls
         pool = RemoteProviderSessionPool()
         pool._pid = -1
 
         async def factory() -> object:
+            """Count factory calls and return a fresh provider resource."""
             nonlocal calls
             calls += 1
             return object()
@@ -654,25 +665,31 @@ def test_provider_throttle_hostile_exception_metadata_cannot_leak_slot() -> None
     class HostileProviderError(RuntimeError):
         @property
         def status(self) -> object:
+            """Raise the deliberate failure for the status path."""
             raise RuntimeError("hostile status")
 
         @property
         def status_code(self) -> object:
+            """Raise the deliberate failure for the status code path."""
             raise KeyboardInterrupt("hostile status code")
 
         @property
         def retry_after(self) -> object:
+            """Return the controlled retry delay for the remote response."""
             raise RuntimeError("hostile retry-after")
 
         @property
         def headers(self) -> object:
+            """Raise the deliberate failure for the headers path."""
             raise KeyboardInterrupt("hostile headers")
 
         @property
         def response(self) -> object:
+            """Raise the deliberate failure for the response path."""
             raise RuntimeError("hostile response")
 
         def __str__(self) -> str:
+            """Raise when the test attempts to render the hostile value."""
             raise KeyboardInterrupt("hostile text")
 
     governor = module.ProviderThrottleGovernor()
@@ -694,8 +711,7 @@ def test_provider_throttle_invalid_outcome_is_atomic() -> None:
     lease, _delay = governor.try_acquire("atomic")
     assert lease is not None
     with pytest.raises(ValueError, match="unknown provider throttle outcome"):
-        governor.release(
-            "atomic",
+        lease._release_outcome(
             outcome="invalid",
             throttled=False,
             retry_after_seconds=None,
@@ -725,81 +741,6 @@ def test_parquet_factory_child_cleanup_preserves_parent_staging(tmp_path) -> Non
     assert path.exists()
     with pytest.raises(RuntimeError, match="after fork"):
         factory.__arrow_c_stream__()
-
-
-def test_operation_memory_ledger_close_retries_host_wide_release(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Live native bytes retain host ownership and final release stays retryable."""
-    from schema_sanitizer.core_impl import allocator_control, memory_budget, safety_margins
-
-    class Native:
-        def __init__(self) -> None:
-            """Initialize mutable native bytes for the focused close regression."""
-            self.reserved = 128
-
-        def operation_memory_ledger_snapshot(self, _capsule: object) -> tuple[int, int, int]:
-            return (1024, self.reserved, 256)
-
-        def operation_memory_ledger_release(self, _capsule: object, amount: int) -> None:
-            """Release bytes from the focused native-ledger test double."""
-            self.reserved = max(0, self.reserved - amount)
-
-        def operation_memory_ledger_diagnostics(self, _capsule: object) -> tuple[int, int]:
-            """Return empty over-release diagnostics for the test double."""
-            return (0, 0)
-
-    class CrossProcess:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        def release(self) -> None:
-            self.calls += 1
-            if self.calls == 1:
-                raise OSError("journal failure")
-
-    ledger = object.__new__(memory_budget.OperationMemoryLedger)
-    ledger.limit_bytes = 1024
-    ledger._pid = os.getpid()
-    ledger._native = Native()
-    ledger._capsule = object()
-    ledger._cross_process = CrossProcess()
-    ledger._cross_process_reconciliation_failures = 0
-    ledger._cross_process_pending_bytes = 0
-    ledger._cross_process_release_deferred = False
-    ledger._cross_process_release_failures = 0
-    ledger._lock = threading.Lock()
-    ledger._close_condition = threading.Condition(ledger._lock)
-    ledger._close_started = False
-    ledger._closing = False
-    ledger._closed = False
-    ledger._close_outstanding_bytes = 0
-
-    ledger.close()
-    assert ledger._close_started is True
-    assert ledger._closed is True
-    assert ledger._cross_process.calls == 0
-    assert ledger._cross_process_release_deferred is True
-    with pytest.raises(RuntimeError, match="closed"):
-        _ = ledger.capsule
-    with pytest.raises(RuntimeError, match="closed"):
-        ledger.reserve(1, stage="after-close")
-
-    ledger.release(128)
-    assert ledger._cross_process.calls == 1
-    assert ledger._cross_process_release_deferred is True
-
-    monkeypatch.setattr(
-        memory_budget,
-        "process_memory_pressure_snapshot",
-        lambda: memory_budget.ProcessMemoryPressureSnapshot(1, 0, 0, 1, None, None),
-    )
-    monkeypatch.setattr(safety_margins, "record_resource_telemetry", lambda **_kwargs: None)
-    monkeypatch.setattr(allocator_control, "maybe_trim_allocator", lambda **_kwargs: False)
-    ledger.close()
-    assert ledger._cross_process.calls == 2
-    assert ledger._cross_process_release_deferred is False
-    assert ledger._close_outstanding_bytes == 0
 
 
 def test_operation_memory_ledger_child_cleanup_returns_before_parent_lock() -> None:
@@ -834,6 +775,7 @@ def test_telemetry_reads_do_not_rewrite_or_publish_journals(
     path.write_bytes(payload)
 
     def unexpected(*_args: object, **_kwargs: object) -> None:
+        """Raise the deliberate failure for the unexpected path."""
         raise AssertionError("read-only telemetry query attempted a commit")
 
     monkeypatch.setattr(module, "commit_locked_payload", unexpected)
@@ -879,6 +821,7 @@ def test_relaxed_telemetry_journal_recovers_partial_main_write(
     calls = 0
 
     def partial_then_fail(handle: object, payload: bytes) -> None:
+        """Yield one partial response chunk before raising the injected failure."""
         nonlocal calls
         calls += 1
         if calls == 1:

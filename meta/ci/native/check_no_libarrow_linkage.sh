@@ -31,7 +31,8 @@ elif command -v ldd >/dev/null 2>&1; then
     exit 1
   fi
 else
-  echo "WARN: neither otool nor ldd found; skipping linkage check" >&2
+  echo "ERROR: neither otool nor ldd is available; linkage cannot be certified" >&2
+  exit 2
 fi
 
 echo "OK: no libarrow/libparquet in extension linkage"

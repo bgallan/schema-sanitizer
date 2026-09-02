@@ -1,4 +1,8 @@
-"""One-partition source lookahead contracts."""
+"""One-partition source lookahead contracts.
+
+It covers one-partition prefetch, result ordering, dynamic options, temporary-storage
+contention, remote resume, and retained-resource finalization.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +12,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
 
 from schema_sanitizer.api_impl.operation_context import OperationExecutionContext
 from schema_sanitizer.api_impl.source_plan import remote as remote_source_plan
+from schema_sanitizer.core_impl.execution_policy import ExecutionPolicy, execution_policy
 from schema_sanitizer.core_impl.temporary_storage import TemporaryStoragePermitPool
 from schema_sanitizer.errors import SchemaSanitizerResourceError
 from schema_sanitizer.input_impl.prepared import PreparedPublicInput
@@ -38,6 +44,23 @@ def _multi_kwargs() -> dict[str, Any]:
         "multi_threading": True,
         "memory_limit_bytes": 64 << 20,
     }
+
+
+def _multi_lookahead_policy() -> ExecutionPolicy:
+    """Return the production policy that decides whether lookahead is safe."""
+    return execution_policy("multi", 64 << 20)
+
+
+def _parallel_lookahead_expected(policy: ExecutionPolicy) -> bool:
+    """Select only the legitimate one-CPU fallback, never a capable-host regression."""
+    assert policy.requested_mode == "multi"
+    if policy.available_cpus == 1:
+        assert policy.fallback_to_one_worker_reason == "cpu_limited"
+        assert policy.effective_workers == 1
+        return False
+    assert policy.fallback_to_one_worker_reason is None
+    assert policy.effective_workers > 1
+    return True
 
 
 def test_operation_context_forks_share_resources_but_not_metadata(monkeypatch) -> None:
@@ -74,8 +97,11 @@ def test_multi_pipeline_prepares_next_partition_before_current_callback(
     monkeypatch,
 ) -> None:
     """Static multi pipelines overlap exactly the next immutable source."""
+    from schema_sanitizer.api_impl.file_conversion import converters as converter_module
     from schema_sanitizer.pipeline import partition_lookahead as lookahead_module
 
+    policy = _multi_lookahead_policy()
+    parallel_lookahead = _parallel_lookahead_expected(policy)
     plans = [_jsonl_plan(tmp_path, ordinal) for ordinal in range(2)]
     original_prepare = lookahead_module.prepare_public_input
     second_started = threading.Event()
@@ -87,17 +113,22 @@ def test_multi_pipeline_prepares_next_partition_before_current_callback(
         preparation_threads.append(threading.current_thread().name)
         if path == plans[1].source_uri:
             second_started.set()
-            assert release_second.wait(timeout=5)
+            if parallel_lookahead:
+                assert release_second.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
         return original_prepare(path, **kwargs)
 
     monkeypatch.setattr(lookahead_module, "prepare_public_input", delayed_prepare)
+    monkeypatch.setattr(converter_module, "prepare_public_input", delayed_prepare)
     callbacks: list[int] = []
 
     def after_partition(index: int, *_args: Any) -> None:
         """Confirm the next source started before partition one was reported."""
         if index == 1:
-            assert second_started.wait(timeout=5)
-            release_second.set()
+            if parallel_lookahead:
+                assert second_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+                release_second.set()
+            else:
+                assert not second_started.is_set()
         callbacks.append(index)
 
     result = run_partitioned_to_parquet(
@@ -110,9 +141,13 @@ def test_multi_pipeline_prepares_next_partition_before_current_callback(
     assert callbacks == [1, 2]
     assert len(result.completed_runs) == 2
     assert preparation_threads[0] == threading.current_thread().name
-    assert any(
-        name.startswith("schema-sanitizer-partition-lookahead") for name in preparation_threads
-    )
+    if parallel_lookahead:
+        assert any(
+            name.startswith("schema-sanitizer-partition-lookahead") for name in preparation_threads
+        )
+    else:
+        assert second_started.is_set()
+        assert set(preparation_threads) == {threading.current_thread().name}
     assert all(Path(plan.output_uri).is_file() for plan in plans)
 
 
@@ -121,8 +156,11 @@ def test_lookahead_error_is_retained_until_its_partition_ordinal(
     monkeypatch,
 ) -> None:
     """A future source failure cannot suppress the current partition commit."""
+    from schema_sanitizer.api_impl.file_conversion import converters as converter_module
     from schema_sanitizer.pipeline import partition_lookahead as lookahead_module
 
+    policy = _multi_lookahead_policy()
+    parallel_lookahead = _parallel_lookahead_expected(policy)
     plans = [_jsonl_plan(tmp_path, ordinal) for ordinal in range(2)]
     original_prepare = lookahead_module.prepare_public_input
     failure_ready = threading.Event()
@@ -136,11 +174,15 @@ def test_lookahead_error_is_retained_until_its_partition_ordinal(
         return original_prepare(path, **kwargs)
 
     monkeypatch.setattr(lookahead_module, "prepare_public_input", failing_prepare)
+    monkeypatch.setattr(converter_module, "prepare_public_input", failing_prepare)
 
     def after_partition(index: int, *_args: Any) -> None:
         """Record the current commit before the next failure is published."""
         if index == 1:
-            assert failure_ready.wait(timeout=5)
+            if parallel_lookahead:
+                assert failure_ready.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+            else:
+                assert not failure_ready.is_set()
             assert not Path(plans[1].output_uri).exists()
         callbacks.append(index)
 
@@ -153,27 +195,14 @@ def test_lookahead_error_is_retained_until_its_partition_ordinal(
         )
 
     assert callbacks == [1]
+    assert failure_ready.is_set()
     assert Path(plans[0].output_uri).is_file()
     assert not Path(plans[1].output_uri).exists()
 
 
-def test_single_pipeline_never_constructs_partition_lookahead_worker(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def test_single_pipeline_prepares_partitions_on_the_caller(tmp_path: Path) -> None:
     """Strict single mode keeps partition preparation on the caller thread."""
-    from schema_sanitizer.pipeline import partition_lookahead as lookahead_module
-
     plans = [_jsonl_plan(tmp_path, ordinal) for ordinal in range(2)]
-
-    class ForbiddenExecutor:
-        """Fail if single mode attempts to create a helper thread."""
-
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            """Reject construction immediately."""
-            raise AssertionError("single mode created a partition lookahead worker")
-
-    monkeypatch.setattr(lookahead_module, "ThreadPoolExecutor", ForbiddenExecutor)
     result = run_partitioned_to_parquet(
         plans,
         initial_schema_registry={},
@@ -202,7 +231,7 @@ def test_callable_partition_options_preserve_original_evaluation_order(
         """Fail if a dynamic options pipeline attempts speculative preparation."""
 
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            """Reject speculative controller construction."""
+            """Fail immediately if callable options enable speculative lookahead."""
             raise AssertionError("callable options unexpectedly enabled lookahead")
 
     monkeypatch.setattr(execution_module, "PartitionSourceLookahead", ForbiddenLookahead)
@@ -228,9 +257,11 @@ def test_temporary_window_contention_is_retried_at_partition_ordinal(
     """Speculative permit contention falls back without changing success semantics."""
     from schema_sanitizer.pipeline import partition_lookahead as lookahead_module
 
+    policy = _multi_lookahead_policy()
+    parallel_lookahead = _parallel_lookahead_expected(policy)
     plan = _jsonl_plan(tmp_path, 0)
     controller = PartitionSourceLookahead(_multi_kwargs())
-    assert controller.enabled
+    assert controller.enabled is parallel_lookahead
     parent = OperationExecutionContext(threading_mode="multi", memory_limit_bytes=64 << 20)
     held = parent.temporary_storage.acquire(200 << 20, label="current partition")
     attempts = 0
@@ -257,17 +288,24 @@ def test_temporary_window_contention_is_retried_at_partition_ordinal(
 
     monkeypatch.setattr(lookahead_module, "prepare_public_input", prepare_after_capacity)
     try:
-        deferred = controller._prepare(plan, parent.fork())
-        assert type(deferred).__name__ == "_DeferredPartition"
-        held.release()
-        prepared = controller._materialize_deferred(deferred)
+        if controller.enabled:
+            deferred = controller._prepare(plan, parent.fork())
+            assert type(deferred).__name__ == "_DeferredPartition"
+            held.release()
+            prepared = controller._materialize_deferred(deferred)
+        else:
+            held.release()
+            prepared = controller._prepare(plan, parent.fork())
+            assert type(prepared).__name__ == "_PreparedPartition"
         prepared.close()
     finally:
         held.release()
         controller.close()
         parent.close()
 
-    assert attempts == 2
+    # close() disables the controller, so compare against the immutable policy
+    # decision captured before exercising and closing it.
+    assert attempts == (2 if parallel_lookahead else 1)
 
 
 def test_prefetched_remote_prefix_resumes_after_retained_file_count(monkeypatch) -> None:
@@ -280,11 +318,11 @@ def test_prefetched_remote_prefix_resumes_after_retained_file_count(monkeypatch)
         """Return one later staged packet for the remaining manifest."""
 
         def __enter__(self):
-            """Return the staged remainder iterator."""
+            """Return the managed context value from context entry."""
             return iter([later])
 
         def __exit__(self, *_exc: object) -> None:
-            """Leave the fake staging context."""
+            """Finalize the context context without suppressing exceptions."""
             return None
 
     def open_chunks(_manifest: object, *, start: int = 0) -> Context:
@@ -312,33 +350,48 @@ def test_one_slot_window_never_prepares_partition_n_plus_two_early(
     monkeypatch,
 ) -> None:
     """The dedicated worker never advances beyond exactly one partition."""
+    from schema_sanitizer.api_impl.file_conversion import converters as converter_module
     from schema_sanitizer.pipeline import partition_lookahead as lookahead_module
 
+    policy = _multi_lookahead_policy()
+    parallel_lookahead = _parallel_lookahead_expected(policy)
     plans = [_jsonl_plan(tmp_path, ordinal) for ordinal in range(3)]
     original_prepare = lookahead_module.prepare_public_input
     second_started = threading.Event()
     release_second = threading.Event()
     third_started = threading.Event()
+    preparation_threads: list[str] = []
 
     def ordered_prepare(path: str, **kwargs: Any) -> PreparedPublicInput:
         """Hold N+1 and prove N+2 is not submitted into the one-slot window."""
+        preparation_threads.append(threading.current_thread().name)
         if path == plans[1].source_uri:
             second_started.set()
-            assert release_second.wait(timeout=5)
+            if parallel_lookahead:
+                assert release_second.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
         elif path == plans[2].source_uri:
             third_started.set()
         return original_prepare(path, **kwargs)
 
     monkeypatch.setattr(lookahead_module, "prepare_public_input", ordered_prepare)
+    monkeypatch.setattr(converter_module, "prepare_public_input", ordered_prepare)
 
     def after_partition(index: int, *_args: Any) -> None:
         """Release each next source only after proving the one-slot bound."""
         if index == 1:
-            assert second_started.wait(timeout=5)
-            assert not third_started.is_set()
-            release_second.set()
+            if parallel_lookahead:
+                assert second_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+                assert not third_started.is_set()
+                release_second.set()
+            else:
+                assert not second_started.is_set()
+                assert not third_started.is_set()
         elif index == 2:
-            assert third_started.wait(timeout=5)
+            if parallel_lookahead:
+                assert third_started.wait(timeout=SCHEDULER_TIMEOUT_SECONDS)
+            else:
+                assert second_started.is_set()
+                assert not third_started.is_set()
 
     result = run_partitioned_to_parquet(
         plans,
@@ -348,6 +401,10 @@ def test_one_slot_window_never_prepares_partition_n_plus_two_early(
     )
 
     assert len(result.completed_runs) == 3
+    assert second_started.is_set()
+    assert third_started.is_set()
+    if not parallel_lookahead:
+        assert set(preparation_threads) == {threading.current_thread().name}
 
 
 def test_fixed_partition_timestamps_are_identical_across_modes(
@@ -401,7 +458,10 @@ def test_fixed_partition_timestamps_are_identical_across_modes(
                 "multi_threading": mode == "multi",
             },
         )
-        rows = [pq.read_table(plan.output_uri).to_pylist() for plan in mode_plans]
+        rows = [
+            pq.ParquetFile(plan.output_uri).read(use_threads=False).to_pylist()
+            for plan in mode_plans
+        ]
         drifts = [run.schema_drifts_json for run in result.completed_runs]
         return rows, [json.dumps(json.loads(value or "[]"), sort_keys=True) for value in drifts]
 
@@ -417,22 +477,13 @@ def test_worker_creation_failure_falls_back_to_ordered_preparation(
 
     plans = [_jsonl_plan(tmp_path, ordinal) for ordinal in range(2)]
 
-    class UnavailableExecutor:
-        """Model an environment that refuses the optional lookahead worker."""
-
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            """Create the unavailable executor double."""
-            self.closed = False
-
-        def submit(self, *_args: Any, **_kwargs: Any) -> Any:
-            """Reject optional work submission."""
-            raise RuntimeError("worker creation unavailable")
-
-        def shutdown(self, **_kwargs: Any) -> None:
-            """Record deterministic fallback cleanup."""
-            self.closed = True
-
-    monkeypatch.setattr(lookahead_module, "ThreadPoolExecutor", UnavailableExecutor)
+    monkeypatch.setattr(
+        lookahead_module._DaemonThreadPoolExecutor,
+        "submit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("worker creation unavailable")
+        ),
+    )
     result = run_partitioned_to_parquet(
         plans,
         initial_schema_registry={},
@@ -448,8 +499,11 @@ def test_live_static_options_discard_stale_speculative_input(
     monkeypatch,
 ) -> None:
     """A live mapping mutation invalidates and re-prepares the retained source."""
+    from schema_sanitizer.api_impl.file_conversion import converters as converter_module
     from schema_sanitizer.pipeline import partition_lookahead as lookahead_module
 
+    policy = _multi_lookahead_policy()
+    parallel_lookahead = _parallel_lookahead_expected(policy)
     plans = [_jsonl_plan(tmp_path, ordinal) for ordinal in range(2)]
     kwargs = _multi_kwargs()
     seen_encodings: list[str] = []
@@ -461,19 +515,36 @@ def test_live_static_options_discard_stale_speculative_input(
         return original_prepare(path, **options)
 
     monkeypatch.setattr(lookahead_module, "prepare_public_input", capture_prepare)
-    controller = PartitionSourceLookahead(kwargs)
-    first = controller.prepare_first(plans[0])
-    try:
-        controller.arm(plans[1], first.operation_context)
-        controller.trigger()
-        kwargs["input_text_encoding"] = "latin-1"
-        second = controller.take_next(plans[1])
-        second.close()
-    finally:
-        first.close()
-        controller.close()
+    if parallel_lookahead:
+        controller = PartitionSourceLookahead(kwargs)
+        first = controller.prepare_first(plans[0])
+        try:
+            controller.arm(plans[1], first.operation_context)
+            controller.trigger()
+            kwargs["input_text_encoding"] = "latin-1"
+            second = controller.take_next(plans[1])
+            second.close()
+        finally:
+            first.close()
+            controller.close()
+        assert seen_encodings == ["utf-8", "utf-8", "latin-1"]
+    else:
+        monkeypatch.setattr(converter_module, "prepare_public_input", capture_prepare)
 
-    assert seen_encodings == ["utf-8", "utf-8", "latin-1"]
+        def mutate_after_first(index: int, *_args: Any) -> None:
+            """Change the live options only after partition one commits."""
+            if index == 1:
+                kwargs["input_text_encoding"] = "iso8859-1"
+
+        result = run_partitioned_to_parquet(
+            plans,
+            initial_schema_registry={},
+            to_parquet_kwargs=kwargs,
+            after_partition=mutate_after_first,
+        )
+
+        assert len(result.completed_runs) == 2
+        assert seen_encodings == ["utf-8", "iso8859-1"]
 
 
 def test_manifest_carrier_closes_retained_remote_lookahead() -> None:
@@ -486,7 +557,7 @@ def test_manifest_carrier_closes_retained_remote_lookahead() -> None:
         """Track release of retained remote lookahead state."""
 
         def close(self) -> None:
-            """Record one manifest close."""
+            """Close the manifest and release its retained resources."""
             closed.append("remote")
 
     carrier = NativeDirectoryManifestCarrier()

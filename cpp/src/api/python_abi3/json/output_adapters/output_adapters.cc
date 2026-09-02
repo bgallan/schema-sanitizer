@@ -1,4 +1,10 @@
-/* Cohesive file, Python-object, and in-memory JSONL output adapters. */
+/*
+ * Implements cohesive file, Python-object, and in-memory JSONL output adapters.
+ *
+ * The routines preserve JSON value semantics while enforcing bounded native
+ * ownership and Python errors.
+ */
+
 #include "api/python_abi3/json/output_adapters/api.hh"
 
 #include "api/python_abi3/arrow_stream/_core_abi3_arrow_stream_lifecycle.hh"
@@ -14,6 +20,8 @@ namespace {
 
 namespace jsonl = sanitize::internal::jsonl_stream_writer;
 
+/// Consumes an Arrow C stream and writes JSONL records to the selected Python
+/// destination.
 sanitize::Result<jsonl::WriteStats>
 write_python_jsonl_stream(PyObject *stream_obj, jsonl::Output &output,
                           std::int64_t memory_limit_bytes,
@@ -34,6 +42,8 @@ write_python_jsonl_stream(PyObject *stream_obj, jsonl::Output &output,
 
 class FileJsonlOutput final : public jsonl::Output {
 public:
+  /// Initializes the JSONL output adapter and establishes ownership of its
+  /// destination.
   explicit FileJsonlOutput(std::string path) : fd_lease_(1U) {
     if (fd_lease_) {
       out_.open(std::move(path),
@@ -44,12 +54,18 @@ public:
     }
   }
 
+  /// Releases resources retained by `FileJsonlOutput` without propagating
+  /// cleanup failures.
   ~FileJsonlOutput() override {
     sanitize::internal::close_stream_and_commit(out_, fd_lease_);
   }
 
+  /// Reports whether the output adapter opened successfully and remains
+  /// writable.
   [[nodiscard]] bool ok() const noexcept { return static_cast<bool>(out_); }
 
+  /// Appends encoded JSONL bytes to the configured destination with
+  /// complete-write checks.
   sanitize::Status Write(std::string_view data) override {
     out_.write(data.data(), static_cast<std::streamsize>(data.size()));
     if (!out_) {
@@ -58,6 +74,7 @@ public:
     return sanitize::Status::OK();
   }
 
+  /// Commits buffered output to its destination and surfaces any write failure.
   sanitize::Status Flush() override {
     out_.flush();
     if (!out_) {
@@ -73,6 +90,8 @@ private:
 
 class PythonJsonlOutput final : public jsonl::Output {
 public:
+  /// Initializes the JSONL output adapter and establishes ownership of its
+  /// destination.
   explicit PythonJsonlOutput(PyObject *writer) : writer_(writer) {
     Py_XINCREF(writer_);
     write_ = PyObject_GetAttrString(writer_, "write");
@@ -86,18 +105,23 @@ public:
     }
   }
 
+  /// Releases resources retained by `PythonJsonlOutput` without propagating
+  /// cleanup failures.
   ~PythonJsonlOutput() override {
     Py_XDECREF(flush_);
     Py_XDECREF(write_);
     Py_XDECREF(writer_);
   }
 
+  /// Appends encoded JSONL bytes to the configured destination with
+  /// complete-write checks.
   sanitize::Status Write(std::string_view data) override {
     buffer_.append(data.data(), data.size());
     return buffer_.size() < kFlushThresholdBytes ? sanitize::Status::OK()
                                                  : Drain();
   }
 
+  /// Commits buffered output to its destination and surfaces any write failure.
   sanitize::Status Flush() override {
     auto status = Drain();
     if (!status.ok()) {
@@ -121,6 +145,8 @@ public:
 private:
   static constexpr std::size_t kFlushThresholdBytes = 4U << 20;
 
+  /// Writes the buffered bytes through the cached Python method and clears them
+  /// on success.
   sanitize::Status Drain() {
     if (buffer_.empty()) {
       return sanitize::Status::OK();
@@ -157,13 +183,17 @@ private:
 
 class StringJsonlOutput final : public jsonl::Output {
 public:
+  /// Binds JSONL output to a caller-owned string destination.
   explicit StringJsonlOutput(std::string *out) : out_(out) {}
 
+  /// Appends encoded JSONL bytes to the configured destination with
+  /// complete-write checks.
   sanitize::Status Write(std::string_view data) override {
     out_->append(data.data(), data.size());
     return sanitize::Status::OK();
   }
 
+  /// Completes a string-output flush, which requires no buffered work.
   sanitize::Status Flush() override { return sanitize::Status::OK(); }
 
 private:

@@ -3,8 +3,7 @@
 This directory is organized by responsibility to keep implementation code
 navigable:
 
-- `api/c/`: C bridge entry points used by bindings and C-facing glue code.
-- `api/python_abi3/`: Python limited-API wrappers, grouped by protocol and output domain.
+- `api/python_abi3/`: Direct C++ Python limited-API wrappers, grouped by protocol and output domain.
 - `core/`: Core data types, parsing primitives, and ingest orchestration.
 - `frontends/`: Input frontend implementations (JSON/CSV and adapters).
 - `planning/`: Options, plan compilation, and context logic.

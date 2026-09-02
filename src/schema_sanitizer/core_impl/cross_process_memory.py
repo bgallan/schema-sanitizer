@@ -1,4 +1,8 @@
-"""Optional cgroup/host-wide resident-memory admission across processes."""
+"""Coordinate optional resident-memory admission across worker processes.
+
+A locked journal and fair coordinator track exact leases, reconcile finalizer releases, remove
+stale process state, and rebuild safe synchronization after a fork.
+"""
 
 from __future__ import annotations
 
@@ -7,11 +11,10 @@ import math
 import os
 import tempfile
 from contextlib import contextmanager
-from contextvars import ContextVar
 from pathlib import Path
 from threading import Lock
 from time import time
-from typing import Iterator, Protocol, cast
+from typing import Iterator, cast
 
 from .bounded_generation import BoundedGenerationPool
 from .coordination_journal import (
@@ -23,7 +26,7 @@ from .coordination_journal import (
 from .finalization import runtime_is_finalizing
 from .finalizer_escrow import ReservedFinalizerEscrow, _reserved_escrow_static_bytes
 from .fork_safety import quarantine_inherited_state
-from .process_identity import process_identity_matches, process_start_token
+from .process_identity import process_is_alive, process_start_token
 from .rooted_finalizer import FinalizerReplayCapability, RootedFinalizerAuthority
 from .safe_errors import add_bounded_note, clear_exception_traceback
 from .terminal_ownership import publish_terminal_owner, retire_terminal_owner
@@ -36,14 +39,6 @@ except ImportError:  # pragma: no cover - Windows fallback
 
 class _RetryFinalizerDrain(RuntimeError):
     """Keep a claimed escrow owner published when authentication cannot commit."""
-
-
-class _LegacyFinalizerQueue(Protocol):
-    """Queue surface retained for focused compatibility injection tests."""
-
-    def get_nowait(self) -> object: ...
-
-    def put_nowait(self, value: object) -> object: ...
 
 
 _ENV_ENABLED = "SCHEMA_SANITIZER_CROSS_PROCESS_MEMORY_RESERVATIONS"
@@ -64,47 +59,25 @@ _register_static_control_plane(
     "cross_process_memory_stale_scratch", _MAX_PROCESS_LEASE_RECORDS * 8 + 4096
 )
 # stale_keys are stored in this fixed scratch buffer; no per-prune list allocation.
-_COORDINATION_PATH_OVERRIDE: ContextVar[Path | None] = ContextVar(
-    "schema_sanitizer_memory_coordination_path_override", default=None
-)
 
 
 def _enabled() -> bool:
-    """Implement the internal _enabled helper."""
+    """Return whether cross-process memory coordination is enabled and supported."""
     value = os.getenv(_ENV_ENABLED, "").strip().lower()
     return fcntl is not None and value in {"1", "true", "yes", "on"}
 
 
 def _coordination_path() -> Path:
-    """Implement the internal _coordination_path helper."""
+    """Return the shared resident-memory coordination document path."""
     configured = os.getenv(_ENV_DIRECTORY)
     directory = Path(configured) if configured else Path(tempfile.gettempdir())
     directory.mkdir(parents=True, exist_ok=True)
     return directory / "schema-sanitizer-resident-memory.json"
 
 
-def _process_start_token(pid: int) -> str:
-    """Return the shared PID-reuse-safe process start token."""
-    return process_start_token(pid)
-
-
 def _nonnegative_int(value: object) -> int:
     """Return a non-negative exact JSON integer, rejecting bool/coercions."""
     return max(0, value) if type(value) is int else 0
-
-
-def _process_alive(pid: int, start_token: str) -> bool:
-    """Implement the internal _process_alive helper."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    current = _process_start_token(pid)
-    return process_identity_matches(start_token, current)
 
 
 def _decode_state(raw: bytes) -> dict[str, object]:
@@ -119,33 +92,33 @@ def _decode_state(raw: bytes) -> dict[str, object]:
         raise OSError("cross-process resident-memory state is corrupt") from exc
     if not isinstance(decoded, dict):
         raise OSError("cross-process resident-memory state root must be an object")
-    version = decoded.get("version", 1)
+    if set(decoded) != {"version", "leases"}:
+        raise OSError("cross-process resident-memory state has unknown or missing fields")
+    version = decoded["version"]
     if type(version) is not int or version != 1:
         raise OSError(f"unsupported cross-process resident-memory state version: {version!r}")
-    leases = decoded.get("leases", {})
+    leases = decoded["leases"]
     if not isinstance(leases, dict):
         raise OSError("cross-process resident-memory leases must be an object")
     return {"version": 1, "leases": leases}
 
 
 def _encode_state(state: object) -> bytes:
-    """Return the canonical representation shared with legacy writers."""
+    """Return the canonical coordination-state representation."""
     return json.dumps(state, sort_keys=True, separators=(",", ":")).encode()
 
 
 @contextmanager
-def _locked_state() -> Iterator[dict[str, object]]:
+def _locked_state(path: Path | None = None) -> Iterator[dict[str, object]]:
     """Lock and transactionally update resident-memory coordination state."""
-    path = _COORDINATION_PATH_OVERRIDE.get() or _coordination_path()
+    path = _coordination_path() if path is None else path
     with open_coordination_file(path) as handle:
         with coordination_file_lock(handle):
             raw = recover_locked_payload(
                 path,
                 handle,
                 max_payload_bytes=_MAX_STATE_BYTES,
-                validate=_decode_state,
-                canonicalize=_encode_state,
-                process_alive=_process_alive,
+                process_alive=process_is_alive,
             )
             state = _decode_state(raw)
             baseline = _encode_state(state)
@@ -170,19 +143,8 @@ def _locked_state() -> Iterator[dict[str, object]]:
                             before=raw,
                             after=payload,
                             max_payload_bytes=_MAX_STATE_BYTES,
-                            process_start=_process_start_token(os.getpid()),
+                            process_start=process_start_token(os.getpid()),
                         )
-
-
-@contextmanager
-def _locked_state_for(path: Path) -> Iterator[dict[str, object]]:
-    """Use one lease-lifetime path while preserving the legacy lock hook."""
-    token = _COORDINATION_PATH_OVERRIDE.set(path)
-    try:
-        with _locked_state() as state:
-            yield state
-    finally:
-        _COORDINATION_PATH_OVERRIDE.reset(token)
 
 
 def _clean_leases(state: dict[str, object]) -> dict[str, dict[str, object]]:
@@ -215,10 +177,12 @@ def _clean_leases(state: dict[str, object]) -> dict[str, dict[str, object]]:
                 raise OSError(f"invalid resident-memory lease entry: {key!r}")
             if pid_value <= 0 or reserved_value < 0:
                 raise OSError(f"invalid resident-memory lease entry: {key!r}")
+            if key != f"{pid_value}:{start_value}":
+                raise OSError(f"invalid resident-memory lease identity: {key!r}")
             alive = True
             if reserved_value:
                 if liveness_checks < _MAX_LIVENESS_CHECKS_PER_TRANSACTION:
-                    alive = _process_alive(pid_value, start_value)
+                    alive = process_is_alive(pid_value, start_value)
                     liveness_checks += 1
                 # Beyond the bounded probe budget, retain the record
                 # conservatively; a later transaction continues housekeeping.
@@ -244,10 +208,12 @@ class _DirectLeaseRegistration:
     __slots__ = ("lease_id", "capability")
 
     def __init__(self, capability: object) -> None:
+        """Initialize the direct lease registration and its owned runtime state."""
         self.lease_id = 0
         self.capability = capability
 
     def __iter__(self):
+        """Iterate over the retained values."""
         yield self.lease_id
         yield self.capability
 
@@ -256,6 +222,7 @@ class _DirectLeaseEntry:
     __slots__ = ("owner_id", "capability", "reserved", "generation")
 
     def __init__(self, owner_id: int, capability: object, generation: int) -> None:
+        """Initialize the direct lease entry and its owned runtime state."""
         self.owner_id = owner_id
         self.capability = capability
         self.reserved = 0
@@ -289,6 +256,7 @@ def _rebuild_direct_lease_free_locked() -> None:
 
 
 def _register_direct_lease(owner: object) -> _DirectLeaseRegistration:
+    """Register authoritative ownership for a direct memory lease."""
     global _DIRECT_LEASE_FREE_COUNT
     capability = FinalizerReplayCapability()
     result = _DirectLeaseRegistration(capability)
@@ -318,6 +286,7 @@ def _register_direct_lease(owner: object) -> _DirectLeaseRegistration:
 
 
 def _direct_lease_reserved_authority(owner_id: int, lease_id: int, capability: object) -> int:
+    """Return bytes retained by an authenticated direct lease owner."""
     with _DIRECT_LEASE_LOCK:
         entry = _DIRECT_LEASE_LEDGER.get(lease_id)
         if entry is None or entry.owner_id != owner_id or entry.capability is not capability:
@@ -326,12 +295,14 @@ def _direct_lease_reserved_authority(owner_id: int, lease_id: int, capability: o
 
 
 def _direct_lease_reserved(owner: object, lease_id: int, capability: object) -> int:
+    """Return bytes retained by an authoritative direct lease."""
     return _direct_lease_reserved_authority(id(owner), lease_id, capability)
 
 
 def _update_direct_lease_reserved_authority(
     owner_id: int, lease_id: int, capability: object, reserved: int
 ) -> None:
+    """Update bytes retained by an authenticated direct lease owner."""
     global _DIRECT_LEASE_UNKNOWN_RELEASES
     with _DIRECT_LEASE_LOCK:
         entry = _DIRECT_LEASE_LEDGER.get(lease_id)
@@ -344,10 +315,12 @@ def _update_direct_lease_reserved_authority(
 def _update_direct_lease_reserved(
     owner: object, lease_id: int, capability: object, reserved: int
 ) -> None:
+    """Update bytes retained by one authoritative direct memory lease."""
     _update_direct_lease_reserved_authority(id(owner), lease_id, capability, reserved)
 
 
 def _retire_direct_lease_authority(owner_id: int, lease_id: int, capability: object) -> int:
+    """Retire an authenticated direct lease and return its released bytes."""
     global _DIRECT_LEASE_UNKNOWN_RELEASES, _DIRECT_LEASE_FREE_COUNT
     with _DIRECT_LEASE_LOCK:
         entry = _DIRECT_LEASE_LEDGER.get(lease_id)
@@ -375,10 +348,12 @@ def _retire_direct_lease_authority(owner_id: int, lease_id: int, capability: obj
 
 
 def _retire_direct_lease(owner: object, lease_id: int, capability: object) -> int:
+    """Retire authoritative ownership for a direct memory lease."""
     return _retire_direct_lease_authority(id(owner), lease_id, capability)
 
 
 def _direct_lease_snapshot() -> tuple[int, int, int]:
+    """Return active lease count, reserved bytes, and unknown releases."""
     with _DIRECT_LEASE_LOCK:
         return (
             len(_DIRECT_LEASE_LEDGER),
@@ -410,7 +385,7 @@ def _run_direct_cross_memory_finalizer(authority: RootedFinalizerAuthority) -> N
         raise RuntimeError("direct cross-process finalizer lost journal identity")
     owner_total = _direct_lease_total_reserved()
     key = authority.arg7
-    with _locked_state_for(coordination_path) as state:
+    with _locked_state(coordination_path) as state:
         leases = _clean_leases(state)
         if owner_total:
             if key not in leases and len(leases) >= _MAX_PROCESS_LEASE_RECORDS:
@@ -429,16 +404,14 @@ class CrossProcessMemoryLease:
     """Crash-recoverable host-wide resident-memory admission lease."""
 
     def __init__(self, capacity_bytes: int, initial_bytes: int) -> None:
-        """Initialize this helper."""
+        """Initialize the cross process memory lease and its owned runtime state."""
         if type(capacity_bytes) is not int or type(initial_bytes) is not int:
             raise TypeError("cross-process memory sizes must be exact integers")
         if capacity_bytes <= 0 or initial_bytes < 0:
             raise ValueError("cross-process memory sizes are out of range")
         self._capacity = capacity_bytes
         self._pid = os.getpid()
-        self._start = _process_start_token(self._pid)
-        # New writers aggregate all leases owned by one PID instance. Legacy
-        # per-operation keys remain readable and coexist during rolling deploys.
+        self._start = process_start_token(self._pid)
         self._key = f"{self._pid}:{self._start}"
         self._reserved = 0
         self._lock = Lock()
@@ -526,7 +499,7 @@ class CrossProcessMemoryLease:
         coordination_path = self._coordination_path
         if coordination_path is None:
             raise RuntimeError("coordinated memory lease has no coordination path")
-        with _locked_state_for(coordination_path) as state:
+        with _locked_state(coordination_path) as state:
             leases = _clean_leases(state)
             if owner_total:
                 if self._key not in leases and len(leases) >= _MAX_PROCESS_LEASE_RECORDS:
@@ -550,13 +523,6 @@ class CrossProcessMemoryLease:
             return
         self._write_owner_journal_total(_direct_lease_total_reserved())
 
-    def _tighten_capacity(self, capacity_bytes: int) -> None:
-        """Monotonically lower live admission capacity without reallocating."""
-        if type(capacity_bytes) is not int or capacity_bytes <= 0:
-            raise ValueError("cross-process memory capacity must be a positive integer")
-        with self._lock:
-            self._capacity = min(self._capacity, capacity_bytes)
-
     def _set_capacity(self, capacity_bytes: int) -> None:
         """Set the process lease ceiling after authenticated owner-cap recompute."""
         if type(capacity_bytes) is not int or capacity_bytes <= 0:
@@ -566,7 +532,7 @@ class CrossProcessMemoryLease:
 
     @property
     def reserved_bytes(self) -> int:
-        """Implement the internal reserved_bytes helper."""
+        """Return bytes still reserved by this cross-process memory lease."""
         if os.getpid() != self._pid:
             return 0
         with self._lock:
@@ -611,7 +577,7 @@ class CrossProcessMemoryLease:
             if requested >= current_reserved:
                 # Growth: journal first so another process never sees less than
                 # the live local reservations during the commit window.
-                with _locked_state_for(coordination_path) as state:
+                with _locked_state(coordination_path) as state:
                     leases = _clean_leases(state)
                     owner_reserved = _nonnegative_int(leases.get(self._key, {}).get("reserved"))
                     # Repair any earlier conservative drift before admission math.
@@ -707,7 +673,7 @@ class CrossProcessMemoryLease:
                 if ticket < 0:
                     ticket = owner.ticket if owner is not None else -1
                 if ticket >= 0 and isinstance(owner, RootedFinalizerAuthority):
-                    if owner._escrow_armed:
+                    if owner.is_armed_for(ticket):
                         self._finalizer_ticket = -1
                         return
                     owner.make_ack_only()
@@ -724,9 +690,6 @@ class CrossProcessMemoryLease:
                             "cross-process memory finalizer slot retirement did not commit"
                         )
                     return
-                # Legacy/synthetic owners may predate the separate rooted authority.
-                if _DIRECT_CROSS_MEMORY_FINALIZER_ESCROW.release_ticket(ticket):
-                    self._finalizer_ticket = -1
                 return
             if self._journal_cleanup_pending:
                 self._reconcile_journal_to_direct()
@@ -815,6 +778,7 @@ _DIRECT_CROSS_MEMORY_FINALIZER_OVERFLOWS = 0
 
 
 def _mark_direct_cross_memory_finalizer_overflow(ticket: int) -> None:
+    """Mark direct cross memory finalizer overflow."""
     global _DIRECT_CROSS_MEMORY_FINALIZER_OVERFLOWS
     try:
         _DIRECT_CROSS_MEMORY_FINALIZER_OVERFLOWS += 1
@@ -823,63 +787,12 @@ def _mark_direct_cross_memory_finalizer_overflow(ticket: int) -> None:
     publish_terminal_owner("cross_process_memory_finalizer_overflow", ticket, retained_bytes=256)
 
 
-_ABANDONED_DIRECT_LOCK = Lock()
-_ABANDONED_DIRECT_LEASES: dict[int, CrossProcessMemoryLease] = {}
-_ABANDONED_DIRECT_EMERGENCY: list[CrossProcessMemoryLease | None] = [
-    None
-] * _MAX_ABANDONED_DIRECT_LEASES
-_ABANDONED_DIRECT_EMERGENCY_COUNT = 0
-
-
-def _retry_direct_cross_process_lease(token: int) -> None:
-    with _ABANDONED_DIRECT_LOCK:
-        lease = _ABANDONED_DIRECT_LEASES.get(token)
-    if lease is None:
-        return
-    lease.release()
-    with _ABANDONED_DIRECT_LOCK:
-        if _ABANDONED_DIRECT_LEASES.get(token) is lease:
-            _ABANDONED_DIRECT_LEASES.pop(token, None)
-    retire_terminal_owner("cross_process_memory_finalizer", token)
-
-
-def _defer_direct_cross_process_lease(lease: CrossProcessMemoryLease) -> None:
-    """Publish a direct lease into its pre-reserved, allocation-free GC slot."""
-    global _DIRECT_CROSS_MEMORY_FINALIZER_OVERFLOWS, _ABANDONED_DIRECT_EMERGENCY_COUNT
-    ticket = getattr(lease, "_finalizer_ticket", None)
-    owner = getattr(lease, "_finalizer_owner", None)
-    if type(ticket) is int and ticket >= 0 and isinstance(owner, RootedFinalizerAuthority):
-        if _DIRECT_CROSS_MEMORY_FINALIZER_ESCROW.publish_rooted(ticket, owner):
-            lease._finalizer_ticket = -1
-            publish_terminal_owner("cross_process_memory_finalizer", ticket, retained_bytes=256)
-            return
-        _mark_direct_cross_memory_finalizer_overflow(ticket)
-        return
-
-    # Compatibility for synthetic legacy test doubles that were constructed
-    # without the pre-reserved ticket. Production leases never enter here.
-    token = id(lease)
-    with _ABANDONED_DIRECT_LOCK:
-        if token in _ABANDONED_DIRECT_LEASES:
-            return
-        if len(_ABANDONED_DIRECT_LEASES) >= _MAX_ABANDONED_DIRECT_LEASES:
-            if _ABANDONED_DIRECT_EMERGENCY_COUNT < _MAX_ABANDONED_DIRECT_LEASES:
-                index = _ABANDONED_DIRECT_EMERGENCY_COUNT
-                _ABANDONED_DIRECT_EMERGENCY[index] = lease
-                _ABANDONED_DIRECT_EMERGENCY_COUNT = index + 1
-                publish_terminal_owner(
-                    "cross_process_memory_finalizer_overflow", token, retained_bytes=256
-                )
-            return
-        _ABANDONED_DIRECT_LEASES[token] = lease
-    publish_terminal_owner("cross_process_memory_finalizer", token, retained_bytes=256)
-
-
 def drain_direct_cross_process_memory_finalizers() -> int:
     """Release direct leases while their generation remains rooted in escrow."""
     drained = 0
 
     def process(ticket: int, owner: RootedFinalizerAuthority) -> None:
+        """Process one retained work item."""
         nonlocal drained
         owner.run()
         owner.clear()
@@ -896,48 +809,13 @@ def drain_direct_cross_process_memory_finalizers() -> int:
             # The exact owner remains PUBLISHED in the same generation.
             break
 
-    # Drain compatibility owners synchronously here, never from __del__.
-    with _ABANDONED_DIRECT_LOCK:
-        tokens = tuple(_ABANDONED_DIRECT_LEASES)
-    for token in tokens:
-        try:
-            _retry_direct_cross_process_lease(token)
-        except BaseException:
-            continue
-        drained += 1
-
-    global _ABANDONED_DIRECT_EMERGENCY_COUNT
-    emergency_attempts = _ABANDONED_DIRECT_EMERGENCY_COUNT
-    for _ in range(emergency_attempts):
-        with _ABANDONED_DIRECT_LOCK:
-            if _ABANDONED_DIRECT_EMERGENCY_COUNT <= 0:
-                break
-            index = _ABANDONED_DIRECT_EMERGENCY_COUNT - 1
-            lease = _ABANDONED_DIRECT_EMERGENCY[index]
-            _ABANDONED_DIRECT_EMERGENCY[index] = None
-            _ABANDONED_DIRECT_EMERGENCY_COUNT = index
-        if lease is None:
-            continue
-        try:
-            lease.release()
-        except BaseException:
-            with _ABANDONED_DIRECT_LOCK:
-                index = _ABANDONED_DIRECT_EMERGENCY_COUNT
-                if index < _MAX_ABANDONED_DIRECT_LEASES:
-                    _ABANDONED_DIRECT_EMERGENCY[index] = lease
-                    _ABANDONED_DIRECT_EMERGENCY_COUNT = index + 1
-            continue
-        retire_terminal_owner("cross_process_memory_finalizer_overflow", id(lease))
-        drained += 1
     return drained
 
 
 def direct_cross_process_memory_finalizer_snapshot() -> tuple[int, int]:
     """Return published direct-finalizer owners and irreversible overflows."""
     return (
-        _DIRECT_CROSS_MEMORY_FINALIZER_ESCROW.published_count()
-        + len(_ABANDONED_DIRECT_LEASES)
-        + _ABANDONED_DIRECT_EMERGENCY_COUNT,
+        _DIRECT_CROSS_MEMORY_FINALIZER_ESCROW.published_count(),
         max(1, _DIRECT_CROSS_MEMORY_FINALIZER_OVERFLOWS)
         if _DIRECT_CROSS_MEMORY_FINALIZER_ESCROW.overflowed
         else _DIRECT_CROSS_MEMORY_FINALIZER_OVERFLOWS,
@@ -958,12 +836,10 @@ _register_static_control_plane(
 )
 _PROCESS_FINALIZER_RELEASE_OVERFLOWS = 0
 _PROCESS_FINALIZER_RELEASE_OVERFLOWED = False
-# Preallocated marker used when the primary contribution is already gone and a
-# reserved finalizer generation only needs to be acknowledged.
-_PROCESS_FINALIZER_ACK = object()
 
 
 def _round_reservation(value: int) -> int:
+    """Round a memory reservation to the coordination quantum."""
     if value <= 0:
         return 0
     slab = _COORDINATOR_SLAB_BYTES
@@ -985,27 +861,44 @@ class _ProcessCrossMemoryFinalizerOwner:
         "_owner_id",
         "_capability",
         "_finalizer_ticket",
-        "_escrow_armed",
         "_escrow_armed_ticket",
         "_primary_released",
     )
 
     def __init__(self, token: int, owner_id: int, capability: object, ticket: int) -> None:
+        """Initialize the process cross memory finalizer owner and its owned runtime state."""
         self._token = token
         self._owner_id = owner_id
         self._capability = capability
         self._finalizer_ticket = ticket
-        self._escrow_armed = False
         self._escrow_armed_ticket = 0
         self._primary_released = False
 
     @property
     def ticket(self) -> int:
+        """Return the current ownership ticket."""
         return self._finalizer_ticket
 
     @ticket.setter
     def ticket(self, value: int) -> None:
+        """Replace the ownership ticket mirrored by this finalizer owner."""
         self._finalizer_ticket = int(value)
+
+    def arm_for_ticket(self, ticket: int) -> None:
+        """Arm finalizer cleanup for the supplied ownership ticket."""
+        exact = int(ticket)
+        if exact <= 0:
+            raise ValueError("finalizer arm ticket must be positive")
+        self._escrow_armed_ticket = exact
+
+    def disarm_ticket(self, ticket: int | None = None) -> None:
+        """Disarm cleanup authority for the matching ownership ticket."""
+        if ticket is None or self._escrow_armed_ticket == int(ticket):
+            self._escrow_armed_ticket = 0
+
+    def is_armed_for(self, ticket: int) -> bool:
+        """Return whether cleanup is armed for the supplied ownership ticket."""
+        return self._escrow_armed_ticket == int(ticket)
 
 
 class _ProcessCrossMemoryReservation:
@@ -1030,6 +923,7 @@ class _ProcessCrossMemoryReservation:
         initial: int,
         finalizer_ticket: int,
     ) -> None:
+        """Initialize the process cross memory reservation and its owned runtime state."""
         self._coordinator = coordinator
         self._token = token
         self._finalizer_ticket = finalizer_ticket
@@ -1045,13 +939,16 @@ class _ProcessCrossMemoryReservation:
     def _capability(self) -> object:
         # Keep finalizer authentication in the separately rooted authority so
         # stale-capability fault injection remains visible after publication.
+        """Return the authoritative capability retained by this lease."""
         return self._finalizer_owner._capability
 
     @_capability.setter
     def _capability(self, value: object) -> None:
+        """Replace the authoritative capability retained by this lease."""
         self._finalizer_owner._capability = value
 
     def _bind_generation(self, token: int, ticket: int) -> None:
+        """Bind this memory lease to its coordinator generation."""
         token = int(token)
         ticket = int(ticket)
         if token <= 0 or ticket <= 0:
@@ -1065,12 +962,14 @@ class _ProcessCrossMemoryReservation:
 
     @property
     def reserved_bytes(self) -> int:
+        """Return bytes still reserved by this cross-process memory lease."""
         if os.getpid() != self._pid:
             return 0
         with self._lock:
             return 0 if self._released else self._reserved
 
     def resize(self, size_bytes: int) -> None:
+        """Resize the retained reservation."""
         if os.getpid() != self._pid:
             raise RuntimeError("cross-process memory reservation cannot be reused after fork")
         if type(size_bytes) is not int:
@@ -1084,6 +983,7 @@ class _ProcessCrossMemoryReservation:
             self._reserved = size_bytes
 
     def release(self) -> None:
+        """Release resources owned by this process cross memory reservation."""
         if os.getpid() != self._pid:
             return
         with self._lock:
@@ -1099,7 +999,7 @@ class _ProcessCrossMemoryReservation:
                     self._finalizer_ticket = -1
                 return
             # Explicit close may perform the final coalesced downward commit.
-            self._coordinator.release(self._token, id(self), self._capability, nonblocking=False)
+            self._coordinator.release(self._token, id(self), self._capability)
             self._finalizer_owner._primary_released = True
             # Primary authority is irreversibly gone at this point. Publish that
             # fact locally before attempting any secondary escrow retirement.
@@ -1118,6 +1018,7 @@ class _ProcessCrossMemoryReservation:
     close = release
 
     def _release_nonblocking(self) -> None:
+        """Publish nonblocking release of this cross-process memory lease."""
         if os.getpid() != self._pid:
             return
         # Never wait for a reservation lock from ``__del__``.  If an explicit
@@ -1148,6 +1049,7 @@ class _ProcessCrossMemoryReservation:
             self._lock.release()
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing():
                 return
@@ -1160,6 +1062,7 @@ class _ProcessCrossMemoryCoordinator:
     """Single process-scoped physical reservation with coalesced shrink I/O."""
 
     def __init__(self, capacity_bytes: int) -> None:
+        """Initialize the process cross memory coordinator and its owned runtime state."""
         self._pid = os.getpid()
         self._capacity = capacity_bytes
         self._lock = Lock()
@@ -1180,7 +1083,6 @@ class _ProcessCrossMemoryCoordinator:
         self._contribution_capacities: dict[int, int] = {}
         self._unknown_releases = 0
         self._generation_pool = BoundedGenerationPool(_MAX_FINALIZER_RELEASE_TOKENS)
-        self._sequence = 0  # compatibility: latest bounded token
         self._pending_shrink = False
         self._reconcile_scheduled = False
         self._shrink_failures = 0
@@ -1188,8 +1090,11 @@ class _ProcessCrossMemoryCoordinator:
         # Finalizers publish only integer tokens here. The bounded queue has
         # no dependency on the coordinator lock or coordination-file I/O; a
         # full queue fails closed and is surfaced by shutdown observability.
-        self._finalizer_releases: ReservedFinalizerEscrow[object] = ReservedFinalizerEscrow(
-            _MAX_FINALIZER_RELEASE_TOKENS, static_kind="cross_process_memory_coordinator"
+        self._finalizer_releases: ReservedFinalizerEscrow[_ProcessCrossMemoryFinalizerOwner] = (
+            ReservedFinalizerEscrow(
+                _MAX_FINALIZER_RELEASE_TOKENS,
+                static_kind="cross_process_memory_coordinator",
+            )
         )
 
     def _environment_compatible(self) -> bool:
@@ -1198,110 +1103,53 @@ class _ProcessCrossMemoryCoordinator:
         signature = (enabled, str(_coordination_path()) if enabled else "")
         return self._pid == os.getpid() and self._coordination_signature == signature
 
-    def compatible(self, capacity_bytes: int) -> bool:
-        """Compatibility is the coordination domain; capacity is per owner."""
-        return self._environment_compatible()
-
     def _effective_capacity_locked(self) -> int:
+        """Return effective cross-process capacity while holding the coordinator lock."""
         if self._contribution_capacities:
             return min(self._contribution_capacities.values())
         return self._capacity
 
     def _refresh_effective_capacity_locked(self) -> None:
+        """Refresh effective cross-process capacity while holding the coordinator lock."""
         effective = self._effective_capacity_locked()
-        setter = getattr(self._physical, "_set_capacity", None)
-        if callable(setter):
-            setter(effective)
-        else:
-            # Focused historical fakes may expose only the old monotonic API.
-            tighten = getattr(self._physical, "_tighten_capacity", None)
-            if callable(tighten):
-                tighten(effective)
-
-    def tighten_capacity(self, capacity_bytes: int) -> None:
-        """Compatibility API: lower all currently live owner ceilings."""
-        if type(capacity_bytes) is not int or capacity_bytes <= 0:
-            raise ValueError("cross-process memory capacity must be a positive integer")
-        with self._lock:
-            self._capacity = min(self._capacity, capacity_bytes)
-            for token, ceiling in tuple(self._contribution_capacities.items()):
-                self._contribution_capacities[token] = min(ceiling, capacity_bytes)
-            self._refresh_effective_capacity_locked()
+        self._physical._set_capacity(effective)
 
     def _logical_total_locked(self) -> int:
+        """Return logical reservations while holding the coordinator lock."""
         return sum(self._contributions.values())
 
     def _drain_finalizer_releases_locked(self) -> None:
+        """Drain finalizer releases while holding the governing lock."""
         removed = False
-        mailbox = self._finalizer_releases
-        process_one = getattr(mailbox, "process_one", None)
-        if callable(process_one):
 
-            def process(_ticket: int, published: object) -> None:
-                nonlocal removed
-                if published is _PROCESS_FINALIZER_ACK:
-                    return
-                if type(published) is int:
-                    token = published
-                    if token in self._contributions:
-                        if not self._generation_pool.release(token):
-                            raise _RetryFinalizerDrain("finalizer generation retirement failed")
-                        self._contributions.pop(token, None)
-                        self._contribution_owners.pop(token, None)
-                        self._contribution_capacities.pop(token, None)
-                        removed = True
-                    return
-                owner = published
-                if bool(getattr(owner, "_primary_released", False)):
-                    # Primary release already committed; this rooted owner now
-                    # represents only finalizer-generation acknowledgement.
-                    return
-                owner_token = getattr(owner, "_token", None)
-                capability = getattr(owner, "_capability", None)
-                owner_id = getattr(owner, "_owner_id", id(owner))
-                if type(owner_token) is not int:
-                    self._unknown_releases += 1
-                    # Raising asks ReservedFinalizerEscrow.process_one() to put
-                    # CLAIMED back to PUBLISHED instead of ACKing away authority.
-                    raise _RetryFinalizerDrain("invalid finalizer token")
-                expected = self._contribution_owners.get(owner_token)
-                if expected is None or expected[0] != owner_id or expected[1] is not capability:
-                    self._unknown_releases += 1
-                    raise _RetryFinalizerDrain("finalizer capability mismatch")
-                if owner_token not in self._contributions:
-                    self._unknown_releases += 1
-                    raise _RetryFinalizerDrain("finalizer contribution missing")
-                # Retire by the exact finalizer owner, not by a naked integer.
-                if not self._generation_pool.release_for(owner):
-                    raise _RetryFinalizerDrain("finalizer generation retirement failed")
-                self._contributions.pop(owner_token, None)
-                self._contribution_owners.pop(owner_token, None)
-                self._contribution_capacities.pop(owner_token, None)
-                removed = True
+        def process(_ticket: int, owner: _ProcessCrossMemoryFinalizerOwner) -> None:
+            """Process one retained work item."""
+            nonlocal removed
+            if owner._primary_released:
+                return
+            owner_token = owner._token
+            capability = owner._capability
+            owner_id = owner._owner_id
+            expected = self._contribution_owners.get(owner_token)
+            if expected is None or expected[0] != owner_id or expected[1] is not capability:
+                self._unknown_releases += 1
+                raise _RetryFinalizerDrain("finalizer capability mismatch")
+            if owner_token not in self._contributions:
+                self._unknown_releases += 1
+                raise _RetryFinalizerDrain("finalizer contribution missing")
+            if not self._generation_pool.release_for(owner):
+                raise _RetryFinalizerDrain("finalizer generation retirement failed")
+            self._contributions.pop(owner_token, None)
+            self._contribution_owners.pop(owner_token, None)
+            self._contribution_capacities.pop(owner_token, None)
+            removed = True
 
-            while True:
-                try:
-                    if not process_one(process):
-                        break
-                except _RetryFinalizerDrain:
-                    # Owner is back in PUBLISHED state. Stop this drain pass so a
-                    # corrupt/stale owner cannot spin while holding coordinator lock.
+        while True:
+            try:
+                if not self._finalizer_releases.process_one(process):
                     break
-        else:  # compatibility for pass44 queue-injection tests
-            while True:
-                try:
-                    published = cast(_LegacyFinalizerQueue, mailbox).get_nowait()
-                except Exception:
-                    break
-                if type(published) is int:
-                    token = published
-                    if token in self._contributions:
-                        if not self._generation_pool.release(token):
-                            break
-                        self._contributions.pop(token, None)
-                        self._contribution_owners.pop(token, None)
-                        self._contribution_capacities.pop(token, None)
-                        removed = True
+            except _RetryFinalizerDrain:
+                break
         if removed:
             self._refresh_effective_capacity_locked()
             self._pending_shrink = True
@@ -1317,60 +1165,41 @@ class _ProcessCrossMemoryCoordinator:
 
     def defer_release(
         self,
-        reservation: object,
+        owner: _ProcessCrossMemoryFinalizerOwner,
         *,
-        ticket: int | None = None,
+        ticket: int,
     ) -> bool:
         """Publish a finalizer owner without acquiring the coordinator lock.
 
-        Production publishes the reservation object itself into its exclusive
-        pre-reserved slot. Authentication is performed while draining under the
-        coordinator lock. Exact-int input remains only for pass44 compatibility.
+        The reservation object is published into its exclusive pre-reserved
+        slot and authenticated while draining under the coordinator lock.
         """
-        published: object = reservation
-        if ticket is None:
-            reserve = getattr(self._finalizer_releases, "reserve_ticket", None)
-            if callable(reserve):
-                ticket = reserve()
-            else:
-                try:
-                    cast(_LegacyFinalizerQueue, self._finalizer_releases).put_nowait(published)
-                    return True
-                except BaseException:
-                    self.record_finalizer_overflow()
-                    return False
-        if ticket is None or ticket < 0:
+        if ticket < 0:
             self.record_finalizer_overflow()
             return False
         try:
-            if getattr(published, "_finalizer_ticket", None) == ticket:
-                accepted = self._finalizer_releases.publish_rooted(ticket, published)
-            else:
-                accepted = self._finalizer_releases.publish_reserved(ticket, published)
+            accepted = self._finalizer_releases.publish_rooted(ticket, owner)
         except BaseException:
             accepted = False
         if not accepted:
             self.record_finalizer_overflow()
         return accepted
 
-    def defer_finalizer_ack(self, ticket: int, *, owner: object | None = None) -> bool:
+    def defer_finalizer_ack(self, ticket: int, *, owner: _ProcessCrossMemoryFinalizerOwner) -> bool:
         """Publish an ACK-only owner for an already-released contribution."""
         if ticket < 0:
             return True
         try:
-            if owner is not None and getattr(owner, "_finalizer_ticket", None) == ticket:
-                accepted = bool(self._finalizer_releases.publish_rooted(ticket, owner))
-            else:
-                accepted = bool(
-                    self._finalizer_releases.publish_reserved(ticket, _PROCESS_FINALIZER_ACK)
-                )
+            accepted = bool(self._finalizer_releases.publish_rooted(ticket, owner))
         except BaseException:
             accepted = False
         if not accepted:
             self.record_finalizer_overflow()
         return accepted
 
-    def release_finalizer_ticket(self, ticket: int, *, owner: object | None = None) -> bool:
+    def release_finalizer_ticket(
+        self, ticket: int, *, owner: _ProcessCrossMemoryFinalizerOwner
+    ) -> bool:
         """Retire or safely transfer an ACK-only reserved generation.
 
         A failed ``release_ticket`` must never destroy the caller's only proof
@@ -1383,20 +1212,18 @@ class _ProcessCrossMemoryCoordinator:
         # This API is only valid after primary contribution ownership is gone.
         # Commit ACK semantics before any fallible secondary retirement so a
         # fallback publication can never replay contribution release.
-        if owner is not None and hasattr(owner, "_primary_released"):
-            owner._primary_released = True
-        release = getattr(self._finalizer_releases, "release_ticket", None)
-        if callable(release):
-            try:
-                if release(ticket):
-                    return True
-            except BaseException:
-                pass
+        owner._primary_released = True
+        try:
+            if self._finalizer_releases.release_ticket(ticket):
+                return True
+        except BaseException:
+            pass
         return self.defer_finalizer_ack(ticket, owner=owner)
 
     def acquire(
         self, initial_bytes: int, capacity_bytes: int | None = None
     ) -> _ProcessCrossMemoryReservation:
+        """Acquire governed capacity through this process cross memory coordinator."""
         owner_capacity = self._capacity if capacity_bytes is None else capacity_bytes
         if type(owner_capacity) is not int or owner_capacity <= 0:
             raise ValueError("cross-process memory owner capacity must be positive")
@@ -1476,7 +1303,6 @@ class _ProcessCrossMemoryCoordinator:
                 if target > previous_physical:
                     self._physical.resize(target)
                     self._physical_bytes = target
-                self._sequence = token
                 return reservation
             except BaseException as primary:
                 if published_owner:
@@ -1515,6 +1341,7 @@ class _ProcessCrossMemoryCoordinator:
                 raise
 
     def resize(self, token: int, owner_id: int, capability: object, requested: int) -> None:
+        """Resize the retained reservation."""
         with self._lock:
             self._drain_finalizer_releases_locked()
             expected = self._contribution_owners.get(token)
@@ -1550,24 +1377,16 @@ class _ProcessCrossMemoryCoordinator:
     def release(
         self,
         token: int,
-        owner_id: int | None = None,
-        capability: object | None = None,
-        *,
-        nonblocking: bool,
+        owner_id: int,
+        capability: object,
     ) -> None:
-        if nonblocking:
-            # Legacy compatibility only; production finalizers authenticate.
-            self.defer_release(token)
-            return
+        """Release resources owned by this process cross memory coordinator."""
         with self._lock:
             self._drain_finalizer_releases_locked()
-            if owner_id is not None:
-                expected = self._contribution_owners.get(token)
-                if expected is None or expected[0] != owner_id or expected[1] is not capability:
-                    self._unknown_releases += 1
-                    raise RuntimeError("cross-process memory reservation is not authoritative")
-            elif token not in self._contributions:
-                return
+            expected = self._contribution_owners.get(token)
+            if expected is None or expected[0] != owner_id or expected[1] is not capability:
+                self._unknown_releases += 1
+                raise RuntimeError("cross-process memory reservation is not authoritative")
             generation_owner = self._generation_pool.owner_for(token)
             if generation_owner is not None:
                 generation_released = self._generation_pool.release_for(generation_owner)
@@ -1601,6 +1420,7 @@ class _ProcessCrossMemoryCoordinator:
                 return
 
     def _schedule_reconcile_locked(self, *, start_worker: bool) -> None:
+        """Schedule reconcile while holding the governing lock."""
         if self._reconcile_scheduled or not self._pending_shrink:
             return
         self._reconcile_scheduled = True
@@ -1619,6 +1439,7 @@ class _ProcessCrossMemoryCoordinator:
             self._reconcile_scheduled = False
 
     def reconcile_pending(self) -> None:
+        """Reconcile deferred cross-process memory journal updates."""
         with self._lock:
             self._drain_finalizer_releases_locked()
             self._reconcile_scheduled = False
@@ -1662,6 +1483,7 @@ class _ProcessCrossMemoryCoordinator:
             return True
 
     def empty(self) -> bool:
+        """Return whether the governed state is empty."""
         with self._lock:
             self._drain_finalizer_releases_locked()
             return not self._contributions
@@ -1675,6 +1497,7 @@ def _reconcile_process_cross_memory() -> None:
 
 
 def _get_process_coordinator(capacity_bytes: int) -> _ProcessCrossMemoryCoordinator:
+    """Return the process-wide cross-memory coordinator."""
     global _PROCESS_COORDINATOR
     with _PROCESS_COORDINATOR_LOCK:
         coordinator = _PROCESS_COORDINATOR
@@ -1682,7 +1505,7 @@ def _get_process_coordinator(capacity_bytes: int) -> _ProcessCrossMemoryCoordina
             coordinator = _ProcessCrossMemoryCoordinator(capacity_bytes)
             _PROCESS_COORDINATOR = coordinator
             return coordinator
-        if coordinator.compatible(capacity_bytes):
+        if coordinator._environment_compatible():
             if not coordinator.empty():
                 return coordinator
             # Prefer a clean replacement, but never make new admission depend
@@ -1738,7 +1561,7 @@ def cross_process_memory_reserved_bytes() -> int:
     if not _enabled():
         return 0
     coordinator = _PROCESS_COORDINATOR
-    if coordinator is not None and coordinator.compatible(coordinator._capacity):
+    if coordinator is not None and coordinator._environment_compatible():
         try:
             coordinator.reconcile_pending()
         except BaseException:
@@ -1798,16 +1621,19 @@ def process_cross_memory_snapshot() -> dict[str, int]:
 
 
 def _prepare_stale_scratch_for_fork() -> None:
+    """Prepare stale scratch for fork."""
     global _STALE_KEY_SCRATCH_FORK_FRESH_LOCK
     _STALE_KEY_SCRATCH_FORK_FRESH_LOCK = _STALE_KEY_SCRATCH_LOCK_BANK[_STALE_KEY_SCRATCH_BANK_INDEX]
 
 
 def _clear_stale_scratch_fork() -> None:
+    """Clear stale scratch fork."""
     global _STALE_KEY_SCRATCH_FORK_FRESH_LOCK
     _STALE_KEY_SCRATCH_FORK_FRESH_LOCK = None
 
 
 def _reset_stale_scratch_after_fork() -> None:
+    """Reset stale scratch after fork."""
     global \
         _STALE_KEY_SCRATCH_LOCK, \
         _STALE_KEY_SCRATCH_FORK_FRESH_LOCK, \
@@ -1824,8 +1650,6 @@ def _reset_stale_scratch_after_fork() -> None:
 def _reset_cross_process_memory_after_fork() -> None:
     """Drop inherited process-scoped coordination without touching parent locks."""
     global _PROCESS_COORDINATOR_LOCK, _PROCESS_COORDINATOR
-    global _ABANDONED_DIRECT_LOCK, _ABANDONED_DIRECT_LEASES
-    global _ABANDONED_DIRECT_EMERGENCY, _ABANDONED_DIRECT_EMERGENCY_COUNT
     global _PROCESS_FINALIZER_RELEASE_OVERFLOWS, _PROCESS_FINALIZER_RELEASE_OVERFLOWED
     global _DIRECT_CROSS_MEMORY_FINALIZER_OVERFLOWS
     global \
@@ -1838,7 +1662,6 @@ def _reset_cross_process_memory_after_fork() -> None:
     # Rebind before dropping inherited owners. Their finalizers observe a PID
     # mismatch and therefore cannot mutate the child's new coordination state.
     _PROCESS_COORDINATOR_LOCK = Lock()
-    _ABANDONED_DIRECT_LOCK = Lock()
     _DIRECT_LEASE_LOCK = Lock()
     _DIRECT_LEASE_LEDGER = {}
     _DIRECT_LEASE_FREE = list(range(1, _MAX_DIRECT_LEASES + 1))
@@ -1846,14 +1669,10 @@ def _reset_cross_process_memory_after_fork() -> None:
     _DIRECT_LEASE_GENERATIONS = [0] * (_MAX_DIRECT_LEASES + 1)
     _DIRECT_LEASE_UNKNOWN_RELEASES = 0
     _PROCESS_COORDINATOR = None
-    _ABANDONED_DIRECT_LEASES = {}
-    _ABANDONED_DIRECT_EMERGENCY = [None] * _MAX_ABANDONED_DIRECT_LEASES
-    _ABANDONED_DIRECT_EMERGENCY_COUNT = 0
     _DIRECT_CROSS_MEMORY_FINALIZER_ESCROW.reset_after_fork()
     _DIRECT_CROSS_MEMORY_FINALIZER_OVERFLOWS = 0
     _PROCESS_FINALIZER_RELEASE_OVERFLOWS = 0
     _PROCESS_FINALIZER_RELEASE_OVERFLOWED = False
-    _COORDINATION_PATH_OVERRIDE.set(None)
 
 
 from .fork_manager import register_fork_handler as _register_fork_handler  # noqa: E402

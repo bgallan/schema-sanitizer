@@ -1,4 +1,8 @@
-"""Memory-governed in-place sorting for large retained metadata collections."""
+"""Sort large retained metadata collections under explicit memory governance.
+
+The module estimates CPython key and merge scratch, admits it through operation or control-plane
+budgets, performs the in-place sort, and releases the reservation on every exit path.
+"""
 
 from __future__ import annotations
 

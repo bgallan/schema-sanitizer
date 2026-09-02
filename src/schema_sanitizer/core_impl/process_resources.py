@@ -1,4 +1,8 @@
-"""Process-wide logical admission for project-owned threads and file handles."""
+"""Govern process-wide capacity for project-owned threads and file handles.
+
+Exact leases, callbacks, runtime pools, native permits, physical descriptor transitions, and
+governed file wrappers all share the admission and diagnostic accounting maintained here.
+"""
 
 from __future__ import annotations
 
@@ -73,7 +77,6 @@ class ProcessResourceSnapshot:
     rejected_callbacks: int = 0
     unknown_lease_releases: int = 0
     admission_closed: bool = False
-    compatibility_release_attempts: int = 0
     teardown_admission_closed: bool = False
     teardown_reserve: int = 0
     teardown_in_use: int = 0
@@ -111,51 +114,11 @@ class _AvailabilityDelivery:
     dispatcher: Callable[[AvailabilityEvent], None] | None = dataclass_field(
         default=None, repr=False, compare=False
     )
-    publication_batch: tuple["_AvailabilityDelivery", ...] = dataclass_field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        # Allocate the singleton batch before registration is published so
-        # post-release availability delivery can use the compatibility batch
-        # API without allocating after the resource-release commit point.
-        self.publication_batch = (self,)
 
     @property
     def key(self) -> tuple[int, AvailabilityEvent, int]:
+        """Return the immutable queue key retained by this entry."""
         return (id(self.governor), self.event, self.generation)
-
-
-def _event_for_exact_internal_callback(
-    callback: Callable[[], None],
-) -> AvailabilityEvent | None:
-    """Compatibility bridge authenticated by exact singleton/method identity."""
-    try:
-        from . import cleanup_dispatcher, retry_scheduler, temporary_janitor
-    except BaseException as exc:
-        clear_exception_traceback(exc)
-        return None
-    exact = (
-        (
-            retry_scheduler._SCHEDULER,
-            retry_scheduler._RetryScheduler._ensure_workers,
-            AvailabilityEvent.RETRY_SCHEDULER,
-        ),
-        (
-            cleanup_dispatcher._DISPATCHER,
-            cleanup_dispatcher._CleanupDispatcher._availability_wakeup,
-            AvailabilityEvent.CLEANUP_DISPATCHER,
-        ),
-        (
-            temporary_janitor._JANITOR,
-            temporary_janitor._TemporaryArtifactJanitor._availability_wakeup,
-            AvailabilityEvent.TEMPORARY_JANITOR,
-        ),
-    )
-    owner = getattr(callback, "__self__", None)
-    function = getattr(callback, "__func__", None)
-    for expected_owner, expected_function, event in exact:
-        if owner is expected_owner and function is expected_function:
-            return event
-    return None
 
 
 def _dispatch_availability_event(event: AvailabilityEvent) -> None:
@@ -192,6 +155,7 @@ class _Waiter:
 
 
 def _release_process_lease_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Release process lease capsule."""
     governor = capsule.arg0
     lease_id = capsule.arg1
     capability = capsule.arg2
@@ -209,31 +173,13 @@ def _release_process_lease_capsule(capsule: PreparedFinalizerCleanup) -> None:
 
 
 class _ExternalRuntimeBorrowResult:
-    """Single-owner child-borrow handoff.
-
-    ``lease`` is authoritative. ``budget``/``granted`` are compatibility views
-    only, so an interruption after the budget commit cannot orphan an integer
-    debt before the caller publishes it.
-    """
+    """Single-owner child-borrow handoff allocated before admission commits."""
 
     __slots__ = ("lease",)
 
     def __init__(self, lease: "_OperationThreadBorrowLease | None" = None) -> None:
+        """Initialize the external runtime borrow result and its owned runtime state."""
         self.lease = lease
-
-    @property
-    def budget(self) -> "_OperationThreadBorrowBudget | None":
-        lease = self.lease
-        return lease._budget if lease is not None else None
-
-    @property
-    def granted(self) -> int:
-        lease = self.lease
-        return lease.amount if lease is not None else 0
-
-    def __iter__(self):  # compatibility; production does not unpack post-commit
-        yield self.budget
-        yield self.granted
 
 
 class _Lease:
@@ -269,6 +215,7 @@ class _Lease:
     _finalizer_capsule: PreparedFinalizerCleanup | None
 
     def __init__(self, governor: "_Governor", amount: int, *, _active: bool = True) -> None:
+        """Initialize the lease and its owned runtime state."""
         object.__setattr__(self, "_sealed", False)
         object.__setattr__(self, "_finalizer_ticket", 0)
         object.__setattr__(self, "_finalizer_capsule", None)
@@ -288,16 +235,19 @@ class _Lease:
             object.__setattr__(self, "_sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
+        """Reject mutation of lease identity after authoritative publication."""
         if getattr(self, "_sealed", False) and name in self._IMMUTABLE_FIELDS:
             raise AttributeError(f"{name} is immutable after lease publication")
         object.__setattr__(self, name, value)
 
     @property
     def amount(self) -> int:
+        """Return the exact capacity retained by this lease."""
         return self._amount
 
     @property
     def lease_id(self) -> int:
+        """Return the lease id."""
         return self._lease_id
 
     def _activate(
@@ -307,6 +257,7 @@ class _Lease:
         lease_id: int,
         capability: object,
     ) -> None:
+        """Activate this lease with authoritative capacity and capability."""
         if self._sealed:
             raise RuntimeError("lease already published")
         if amount is not None:
@@ -321,6 +272,7 @@ class _Lease:
         object.__setattr__(self, "_sealed", True)
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this lease."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -338,6 +290,7 @@ class _Lease:
             object.__setattr__(self, "_finalizer_capsule", None)
 
     def release(self) -> None:
+        """Release resources owned by this lease."""
         if os.getpid() != self._pid:
             return
         # Keep the per-lease lock until the governor acknowledges removal from
@@ -425,7 +378,8 @@ class _Lease:
                 minimum=floor,
                 exact=bool(exact),
             )
-            return _ExternalRuntimeBorrowResult(borrow_lease)
+            result.lease = borrow_lease
+            return result
 
     def shrink(self, amount: int) -> None:
         """Return a suffix of an exact multi-resource lease without reacquiring."""
@@ -451,9 +405,11 @@ class _Lease:
     close = release
 
     def __enter__(self) -> "_Lease":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        """Release managed resources when leaving the context."""
         self.release()
 
     def __del__(self) -> None:
@@ -499,7 +455,7 @@ class _UncertainFdCloseDebtSlot:
 
 # Physically preallocated terminal ownership: descriptor-close uncertainty must
 # not allocate a dict node or tuple while the process may already be under OOM.
-_UNCERTAIN_FD_CLOSE_DEBTS: list[_UncertainFdCloseDebtSlot] | dict[int, tuple[object, int, str]] = [
+_UNCERTAIN_FD_CLOSE_DEBTS: list[_UncertainFdCloseDebtSlot] = [
     _UncertainFdCloseDebtSlot() for _ in range(16_384)
 ]
 _UNCERTAIN_FD_CLOSE_COUNT = 0
@@ -520,6 +476,7 @@ class _Governor:
         teardown_reserve: int = 0,
         availability_dispatcher: Callable[[AvailabilityEvent], None] | None = None,
     ) -> None:
+        """Initialize the governor and its owned runtime state."""
         if type(capacity) is not int:
             raise TypeError("process resource capacity must be an exact integer")
         if type(teardown_reserve) is not int:
@@ -553,7 +510,6 @@ class _Governor:
         self._lease_sequence = 0
         self._active_leases: dict[int, _LedgerEntry] = {}
         self._unknown_lease_releases = 0
-        self._compatibility_release_attempts = 0
         self._corrupted = False
         self._external_admission_closed = False
         self._teardown_admission_closed = False
@@ -591,6 +547,7 @@ class _Governor:
                 self._condition.notify_all()
 
     def _raise_closed(self, *, teardown: bool = False) -> None:
+        """Raise the standard closed-governor error."""
         domain = "teardown" if teardown else "external"
         raise SchemaSanitizerResourceError(
             f"process {self.label} {domain} admission is closed",
@@ -686,6 +643,7 @@ class _Governor:
         return False
 
     def _can_grant_locked(self, amount: int, *, teardown: bool) -> bool:
+        """Return whether a request can be granted while holding the governor lock."""
         if not self._reconcile_authority_locked():
             return False
         if self._in_use + amount > self.capacity:
@@ -695,6 +653,7 @@ class _Governor:
         return self._external_in_use + amount <= self.external_capacity
 
     def _available_locked(self, *, teardown: bool) -> int:
+        """Return available capacity while holding the governor lock."""
         total_available = max(0, self.capacity - self._in_use)
         if teardown:
             return total_available
@@ -704,6 +663,7 @@ class _Governor:
         )
 
     def _request_capacity_locked(self, *, teardown: bool) -> int:
+        """Derive request capacity while holding the governor lock."""
         return self.capacity if teardown else self.external_capacity
 
     def _raise_if_waiter_became_impossible_locked(self, waiter: _Waiter) -> None:
@@ -734,6 +694,7 @@ class _Governor:
         timeout_seconds: float | None = None,
         _teardown: bool = False,
     ) -> _Lease:
+        """Acquire governed capacity through this governor."""
         if type(amount) is not int:
             raise TypeError(f"process {self.label} request must be an exact integer")
         if amount <= 0:
@@ -869,6 +830,7 @@ class _Governor:
     def try_acquire_up_to(
         self, desired: int, *, minimum: int = 1, _teardown: bool = False
     ) -> _Lease:
+        """Acquire up to the requested capacity without blocking."""
         if type(desired) is not int:
             raise TypeError(f"process {self.label} desired amount must be an exact integer")
         if type(minimum) is not int:
@@ -945,6 +907,7 @@ class _Governor:
             return lease
 
     def _return_capacity_locked(self, returned: int) -> tuple[_AvailabilityDelivery, ...]:
+        """Return capacity while holding the governing lock."""
         if returned < 0 or returned > self._in_use:
             self._over_release_count += 1
             self._over_release_amount += max(0, returned - self._in_use)
@@ -971,7 +934,6 @@ class _Governor:
         an asynchronous exception lands after the native commit, retrying the
         same receipt is idempotent and the ledger still knows the owner.
         """
-        native_fd_amount = 0
         native_fd_api: Any | None = None
         native_fd_lease: object | None = None
         should_publish = False
@@ -989,17 +951,11 @@ class _Governor:
             self._reconcile_authority_locked()
             if not entry.resource_released and entry.native_fd_lease is not None:
                 native_fd_api = _native_file_descriptor_api()
-                if not _native_fd_exact_supported(native_fd_api):
-                    raise RuntimeError("exact native FD lease lost its ABI authority")
                 native_fd_lease = entry.native_fd_lease
 
         if native_fd_lease is not None:
             committed = _native_fd_exact_resize(native_fd_api, native_fd_lease, 0)
-            authoritative_after = (
-                committed[1]
-                if committed is not None
-                else _native_fd_exact_amount(native_fd_api, native_fd_lease)
-            )
+            authoritative_after = committed[1]
             if authoritative_after != 0:
                 raise RuntimeError("exact native FD release did not retire authority")
 
@@ -1015,12 +971,6 @@ class _Governor:
                 raise RuntimeError(f"unknown or corrupted process {self.label} lease release")
             self._reconcile_authority_locked()
             if not entry.resource_released:
-                # Legacy ABI keeps the amount path only when no exact receipt
-                # exists. Production pass81 binaries always use the receipt.
-                if entry.native_fd_lease is None:
-                    native_fd_amount = entry.native_fd_amount
-                    if native_fd_amount:
-                        native_fd_api = _native_file_descriptor_api()
                 raw_returned = entry.amount
                 bounded_returned = min(max(0, raw_returned), self._in_use)
                 next_in_use = self._in_use - bounded_returned
@@ -1059,8 +1009,6 @@ class _Governor:
                     clear_exception_traceback(exc)
             control_ticket = entry.control_ticket
 
-        if native_fd_amount:
-            _release_native_file_descriptor_permits_noexcept(native_fd_api, native_fd_amount)
         if control_ticket is not None:
             if not release_control_plane(control_ticket):
                 raise RuntimeError(f"process {self.label} control-plane retirement did not commit")
@@ -1079,7 +1027,6 @@ class _Governor:
 
     def _shrink_lease(self, lease: _Lease, amount: int) -> None:
         """Return a suffix while keeping exact native FD ownership retryable."""
-        native_fd_returned = 0
         native_fd_api: Any | None = None
         native_fd_lease: object | None = None
         native_fd_target = 0
@@ -1101,8 +1048,6 @@ class _Governor:
             returned = entry.amount - amount
             if entry.native_fd_lease is not None:
                 native_fd_api = _native_file_descriptor_api()
-                if not _native_fd_exact_supported(native_fd_api):
-                    raise RuntimeError("exact native FD lease lost its ABI authority")
                 native_fd_lease = entry.native_fd_lease
                 authoritative = _native_fd_exact_amount(native_fd_api, native_fd_lease)
                 # Target is derived from the requested final lease width, not
@@ -1110,17 +1055,9 @@ class _Governor:
                 # Python was interrupted, retry observes authoritative==amount
                 # and therefore becomes a no-op instead of shrinking twice.
                 native_fd_target = min(max(0, int(amount)), authoritative)
-            elif entry.native_fd_amount:
-                native_fd_returned = min(returned, entry.native_fd_amount)
-                native_fd_api = _native_file_descriptor_api()
-
         if native_fd_lease is not None:
             committed = _native_fd_exact_resize(native_fd_api, native_fd_lease, native_fd_target)
-            authoritative_after = (
-                committed[1]
-                if committed is not None
-                else _native_fd_exact_amount(native_fd_api, native_fd_lease)
-            )
+            authoritative_after = committed[1]
             if authoritative_after != native_fd_target:
                 raise RuntimeError("exact native FD shrink did not publish target authority")
 
@@ -1149,8 +1086,6 @@ class _Governor:
             entry.amount = amount
             if native_fd_lease is not None:
                 entry.native_fd_amount = native_fd_target
-            elif native_fd_returned:
-                entry.native_fd_amount -= native_fd_returned
             self._in_use = next_in_use
             self._teardown_in_use = next_teardown
             self._external_in_use = next_external
@@ -1165,8 +1100,6 @@ class _Governor:
                 diagnostic_transition()
             except BaseException as exc:
                 clear_exception_traceback(exc)
-        if native_fd_returned:
-            _release_native_file_descriptor_permits_noexcept(native_fd_api, native_fd_returned)
         if self._availability_events:
             self._publish_available_events_noexcept()
 
@@ -1202,27 +1135,19 @@ class _Governor:
         failed = False
         if retry_delivery is not None:
             try:
-                failed = (
-                    bool(_AVAILABILITY_NOTIFIER.publish(retry_delivery.publication_batch)) or failed
-                )
+                failed = not _AVAILABILITY_NOTIFIER.publish_one(retry_delivery) or failed
             except BaseException as exc:
                 clear_exception_traceback(exc)
                 failed = True
         if cleanup_delivery is not None:
             try:
-                failed = (
-                    bool(_AVAILABILITY_NOTIFIER.publish(cleanup_delivery.publication_batch))
-                    or failed
-                )
+                failed = not _AVAILABILITY_NOTIFIER.publish_one(cleanup_delivery) or failed
             except BaseException as exc:
                 clear_exception_traceback(exc)
                 failed = True
         if janitor_delivery is not None:
             try:
-                failed = (
-                    bool(_AVAILABILITY_NOTIFIER.publish(janitor_delivery.publication_batch))
-                    or failed
-                )
+                failed = not _AVAILABILITY_NOTIFIER.publish_one(janitor_delivery) or failed
             except BaseException as exc:
                 clear_exception_traceback(exc)
                 failed = True
@@ -1238,29 +1163,12 @@ class _Governor:
             self._schedule_availability_retry_noexcept()
 
     def _delivery_is_current(self, delivery: _AvailabilityDelivery) -> bool:
+        """Return whether a queued delivery still belongs to this governor generation."""
         with self._condition:
             return self._delivery_is_current_locked(delivery)
 
-    def _sealed_dispatcher_for_delivery(
-        self, delivery: _AvailabilityDelivery
-    ) -> Callable[[AvailabilityEvent], None] | None:
-        """Return the dispatcher sealed by the authoritative registration.
-
-        Compatibility deliveries historically carried the registration object as
-        their ``generation``.  Resolve them back to the canonical delivery here
-        instead of consulting the mutable module-global dispatcher at publication
-        time.  That prevents a stale notifier from adopting another runtime/test
-        instance's later dispatcher replacement.
-        """
-        with self._condition:
-            current = self._availability_events.get(delivery.event)
-            if delivery.governor is not self or current is None:
-                return None
-            if current is delivery or delivery.generation is current:
-                return current.dispatcher
-            return None
-
     def _ack_delivery(self, delivery: _AvailabilityDelivery) -> bool:
+        """Acknowledge a completed asynchronous permit delivery."""
         with self._condition:
             if not self._delivery_is_current_locked(delivery):
                 return False
@@ -1271,24 +1179,12 @@ class _Governor:
             return True
 
     def _delivery_is_current_locked(self, delivery: _AvailabilityDelivery) -> bool:
+        """Return whether a delivery is current while holding the governor lock."""
         current = self._availability_events.get(delivery.event)
-        # ``generation is current`` preserves the historical private-test
-        # constructor contract from before registrations stored the prebuilt
-        # delivery object directly.
-        return delivery.governor is self and (current is delivery or delivery.generation is current)
-
-    def release(self, amount: int) -> None:
-        """Record a deprecated unscoped release attempt without changing capacity."""
-        if type(amount) is not int:
-            raise TypeError(f"process {self.label} release must be an exact integer")
-        with self._condition:
-            self._compatibility_release_attempts += 1
-            self._over_release_count += 1
-            self._over_release_amount += max(0, amount)
-            diagnostic_transition()
-            self._condition.notify_all()
+        return delivery.governor is self and current is delivery
 
     def register_availability_event(self, event: object) -> bool:
+        """Register a callback for the next capacity transition."""
         ensure_runtime_fork_safe()
         if not isinstance(event, AvailabilityEvent):
             raise TypeError("availability event must be AvailabilityEvent")
@@ -1311,8 +1207,7 @@ class _Governor:
                 # Construct and seal the exact internal dispatcher before
                 # publishing the registration.  Asynchronous work registered
                 # before an unrelated module-global replacement cannot later
-                # observe that replacement.  Manually constructed compatibility
-                # deliveries still bind at publish_one().
+                # observe that replacement.
                 delivery = _AvailabilityDelivery(
                     self,
                     event,
@@ -1327,7 +1222,7 @@ class _Governor:
                 self._availability_dirty = True
         if immediate and delivery is not None:
             try:
-                accepted = not bool(_AVAILABILITY_NOTIFIER.publish(delivery.publication_batch))
+                accepted = _AVAILABILITY_NOTIFIER.publish_one(delivery)
             except BaseException as exc:
                 clear_exception_traceback(exc)
                 accepted = False
@@ -1344,6 +1239,7 @@ class _Governor:
         return True
 
     def unregister_availability_event(self, event: object) -> None:
+        """Remove a capacity-transition callback registration."""
         if not isinstance(event, AvailabilityEvent):
             return
         with self._condition:
@@ -1352,20 +1248,6 @@ class _Governor:
                     bool(self._availability_events) and self._availability_dirty
                 )
                 diagnostic_transition()
-
-    def register_availability_callback(self, callback: Callable[[], None]) -> bool:
-        """Compatibility shim accepting only exact built-in singleton methods."""
-        event = _event_for_exact_internal_callback(callback)
-        if event is None:
-            with self._condition:
-                self._rejected_callbacks += 1
-            return False
-        return self.register_availability_event(event)
-
-    def unregister_availability_callback(self, callback: Callable[[], None]) -> None:
-        event = _event_for_exact_internal_callback(callback)
-        if event is not None:
-            self.unregister_availability_event(event)
 
     def close_external_admission(self) -> None:
         """Reject new user work while preserving the teardown reserve."""
@@ -1390,6 +1272,7 @@ class _Governor:
             self._condition.notify_all()
 
     def reopen_admission_for_tests(self) -> None:
+        """Reopen admission for an isolated test run."""
         with self._condition:
             self._corrupted = False
             self._reconcile_authority_locked()
@@ -1403,6 +1286,7 @@ class _Governor:
         # Snapshot is a normal governed safe point: make abandoned lease
         # handoffs observable and retry any level-triggered availability that
         # an earlier OOM could not publish.
+        """Return a bounded snapshot of the current governor."""
         drain_finalizer_cleanup()
         if self._availability_dirty:
             self._publish_available_events_noexcept()
@@ -1422,7 +1306,6 @@ class _Governor:
                 self._rejected_callbacks,
                 self._unknown_lease_releases,
                 self._external_admission_closed,
-                self._compatibility_release_attempts,
                 self._teardown_admission_closed,
                 self.teardown_reserve,
                 self._teardown_in_use,
@@ -1433,6 +1316,7 @@ class _Governor:
             )
 
     def reset_after_fork(self) -> None:
+        """Reset process-local state inherited across a fork."""
         quarantine_inherited_state(f"governor:{self.label}", self.__dict__)
         self._condition = Condition()
         self._in_use = 0
@@ -1454,7 +1338,6 @@ class _Governor:
         self._lease_sequence = 0
         self._active_leases = {}
         self._unknown_lease_releases = 0
-        self._compatibility_release_attempts = 0
         self._corrupted = False
         self._external_admission_closed = True
         self._teardown_admission_closed = True
@@ -1493,6 +1376,7 @@ _NOTIFIER_RETRY_OWNERS: dict[int, object] = {}
 
 
 def _retry_availability_notifier_token(token: int) -> None:
+    """Resume the notifier owner retained under a retry token."""
     with _NOTIFIER_RETRY_OWNERS_LOCK:
         owner = _NOTIFIER_RETRY_OWNERS.pop(token, None)
     if owner is None:
@@ -1504,8 +1388,8 @@ class _AvailabilityNotifier:
     """Bounded host for sealed, acknowledged internal availability events."""
 
     def __init__(self, *, reserve_thread_slot: bool = False) -> None:
+        """Initialize the availability notifier and its owned runtime state."""
         self._condition = Condition()
-        self._queue: deque[_AvailabilityDelivery] = deque()  # compatibility only
         self._queued: dict[tuple[int, AvailabilityEvent, int], _AvailabilityDelivery] = {}
         self._queued_keys: set[tuple[int, AvailabilityEvent, int]] = set()
         self._parked: dict[tuple[int, AvailabilityEvent, int], _AvailabilityDelivery] = {}
@@ -1556,6 +1440,7 @@ class _AvailabilityNotifier:
             publish_terminal_owner("availability_notifier", id(delivery), retained_bytes=256)
 
     def _schedule_restart(self) -> None:
+        """Schedule governed restart of the availability notifier."""
         with self._condition:
             if (
                 self._state is not _NotifierLifecycle.RUNNING
@@ -1594,6 +1479,7 @@ class _AvailabilityNotifier:
                 self._condition.notify_all()
 
     def _restart_from_retry(self) -> None:
+        """Restart the availability notifier after a governed retry."""
         with self._condition:
             self._restart_scheduled = False
             if self._state is not _NotifierLifecycle.RUNNING:
@@ -1602,20 +1488,10 @@ class _AvailabilityNotifier:
 
     def publish_one(self, delivery: _AvailabilityDelivery) -> bool:
         """Transactionally admit one preconstructed delivery."""
-        if type(delivery) is not _AvailabilityDelivery:
+        if type(delivery) is not _AvailabilityDelivery or delivery.dispatcher is None:
             with self._condition:
                 self._rejected += 1
             return False
-        # Bind compatibility deliveries to the dispatcher already sealed by the
-        # governor registration.  Resolve this before taking the notifier lock to
-        # preserve the governor -> notifier lock order used by release paths.
-        if delivery.dispatcher is None:
-            dispatcher = delivery.governor._sealed_dispatcher_for_delivery(delivery)
-            if dispatcher is None:
-                with self._condition:
-                    self._rejected += 1
-                return False
-            delivery.dispatcher = dispatcher
         self._retry_failed_leases()
         with self._condition:
             if self._state is not _NotifierLifecycle.RUNNING:
@@ -1655,19 +1531,8 @@ class _AvailabilityNotifier:
             clear_exception_traceback(exc)
         return True
 
-    def publish(
-        self, deliveries: tuple[_AvailabilityDelivery, ...]
-    ) -> tuple[_AvailabilityDelivery, ...]:
-        """Compatibility batch publication backed by atomic single delivery admission."""
-        if len(deliveries) == 1:
-            return () if self.publish_one(deliveries[0]) else deliveries
-        rejected: list[_AvailabilityDelivery] = []
-        for delivery in deliveries:
-            if not self.publish_one(delivery):
-                rejected.append(delivery)
-        return tuple(rejected)
-
     def _ensure_worker(self, *, allow_stopping: bool) -> None:
+        """Ensure the availability notifier owns a live governed worker."""
         self._retry_failed_leases()
         with self._condition:
             allowed = self._state is _NotifierLifecycle.RUNNING or (
@@ -1735,6 +1600,7 @@ class _AvailabilityNotifier:
                 self._condition.notify_all()
 
     def _release_or_retain_lease(self, lease: _Lease) -> None:
+        """Release or retain lease."""
         try:
             lease.release()
             return
@@ -1759,6 +1625,7 @@ class _AvailabilityNotifier:
             self._condition.notify_all()
 
     def _retry_failed_leases(self) -> None:
+        """Retry release of thread leases retained after worker failure."""
         with self._condition:
             pending = tuple(self._failed_leases)
         for lease in pending:
@@ -1777,6 +1644,7 @@ class _AvailabilityNotifier:
                 self._condition.notify_all()
 
     def _take_due_locked(self) -> _AvailabilityDelivery | None:
+        """Remove due availability callbacks while holding the notifier lock."""
         if not self._queued:
             return None
         if self._state is not _NotifierLifecycle.RUNNING:
@@ -1799,6 +1667,7 @@ class _AvailabilityNotifier:
         return None
 
     def _run(self, lease: _Lease) -> None:
+        """Run the background worker loop for this availability notifier."""
         current = threading.current_thread()
         try:
             while True:
@@ -1843,12 +1712,9 @@ class _AvailabilityNotifier:
                 try:
                     dispatcher = delivery.dispatcher
                     if dispatcher is None:
-                        # Production publication seals the exact dispatcher before
-                        # queue visibility.  A legacy/directly-mutated queue node
-                        # must never bind a later module-global replacement here:
-                        # doing so lets stale notifier instances dispatch through
-                        # another instance/test generation. Treat it as failed and
-                        # let bounded retry/parking preserve ownership instead.
+                        # Publication seals the dispatcher before queue
+                        # visibility. Treat a malformed node as failed so bounded
+                        # retry/parking preserves ownership.
                         succeeded = False
                     else:
                         dispatcher(delivery.event)
@@ -1907,6 +1773,7 @@ class _AvailabilityNotifier:
             # physical exit even though the permit remains correctly charged.
 
     def snapshot(self) -> AvailabilityNotifierSnapshot:
+        """Return a bounded snapshot of the current availability notifier."""
         with self._condition:
             worker = self._worker
             now_ns = monotonic_ns()
@@ -1927,6 +1794,7 @@ class _AvailabilityNotifier:
             )
 
     def close(self, *, deadline_seconds: float = 5.0) -> bool:
+        """Release resources owned by this availability notifier."""
         deadline_ns = deadline_ns_from_timeout(
             deadline_seconds, name="availability notifier shutdown deadline"
         )
@@ -1976,6 +1844,7 @@ class _AvailabilityNotifier:
                 self._condition.wait(timeout=min(0.01, remaining_seconds(deadline_ns)))
 
     def reopen_for_tests(self) -> None:
+        """Reopen for an isolated test run."""
         with self._condition:
             if self._state is _NotifierLifecycle.RUNNING:
                 return
@@ -1994,19 +1863,18 @@ class _AvailabilityNotifier:
             self._condition.notify_all()
 
     def reset_after_fork(self) -> None:
+        """Reset process-local state inherited across a fork."""
         if globals().get("_AVAILABILITY_NOTIFIER") is self:
             retire_terminal_category("availability_notifier")
         quarantine_inherited_state(
             "availability-notifier",
             self._condition,
-            self._queue,
             self._queued,
             self._parked,
             self._worker,
             self._failed_leases,
         )
         self._condition = Condition()
-        self._queue = deque()
         self._queued = {}
         self._queued_keys = set()
         self._parked = {}
@@ -2086,9 +1954,10 @@ def _read_bounded_system_integer(paths: tuple[str, ...]) -> int | None:
 def _effective_memory_limit_sample():
     """Return the effective memory limit for the active cgroup generation."""
     view = current_cgroup_view()
-    if view.version == 2:
+    version = view.controller_version("memory")
+    if version == 2:
         return read_effective_cgroup_integer("memory.max", controller="memory")
-    if view.version == 1:
+    if version == 1:
         return read_effective_cgroup_integer("memory.limit_in_bytes", controller="memory")
     # A known host without a cgroup controller is genuinely unbounded.  An
     # unresolved Linux hierarchy remains UNKNOWN and is handled fail-closed.
@@ -2122,11 +1991,12 @@ def _effective_memory_ceiling_bytes() -> int | None:
 def _effective_memory_headroom_bytes() -> int | None:
     """Return live memory headroom for new thread-stack admission."""
     view = current_cgroup_view()
-    if view.version == 2:
+    version = view.controller_version("memory")
+    if version == 2:
         cgroup_headroom = read_effective_cgroup_headroom(
             "memory.max", "memory.current", controller="memory"
         )
-    elif view.version == 1:
+    elif version == 1:
         cgroup_headroom = read_effective_cgroup_headroom(
             "memory.limit_in_bytes",
             "memory.usage_in_bytes",
@@ -2182,6 +2052,7 @@ def _thread_requested_capacity() -> int:
     # in the process.  A CPU-scaled envelope would therefore count the same
     # constraint twice and can collapse to zero after importing a runtime with
     # a persistent pool (Arrow, Polars, DuckDB, ...).
+    """Return the configured process-wide project-thread envelope."""
     default = _DEFAULT_MAX_PROJECT_THREADS
     configured = os.getenv("SCHEMA_SANITIZER_MAX_PROJECT_THREADS")
     if configured:
@@ -2195,8 +2066,9 @@ def _thread_requested_capacity() -> int:
 
 
 def _cgroup_pid_headroom() -> int | None:
+    """Return the cgroup process-count headroom, when known."""
     view = current_cgroup_view()
-    if view.version not in (1, 2):
+    if view.controller_version("pids") not in (1, 2):
         return None if view.resolution_known else 0
     maximum = read_effective_cgroup_integer("pids.max", controller="pids")
     if maximum.state is CgroupValueState.UNKNOWN:
@@ -2208,15 +2080,14 @@ def _cgroup_pid_headroom() -> int | None:
         return 0
     if headroom.state is CgroupValueState.UNBOUNDED:
         return None
-    assert maximum.value is not None and headroom.value is not None
+    if maximum.value is None or headroom.value is None:
+        raise AssertionError("bounded cgroup PID samples must carry values")
     reserve = max(8, min(32, maximum.value // 16))
     return max(0, headroom.value - reserve)
 
 
 def _thread_hard_capacity(*, governed_in_use: int = 0) -> int:
-    # Pass54 compatibility breadcrumb: _CONSERVATIVE_THREAD_STACK_BYTES was
-    # the fixed predecessor of _thread_stack_reservation_bytes(). Pass70 uses
-    # the native-clamped effective reservation as the single source of truth.
+    """Return the live thread ceiling after process and cgroup headroom."""
     requested = _thread_requested_capacity()
     hard = requested
     observed_threads = _process_physical_thread_count()
@@ -2251,10 +2122,12 @@ def _thread_hard_capacity(*, governed_in_use: int = 0) -> int:
 
 
 def _thread_capacity() -> int:
+    """Return the thread capacity."""
     return _thread_hard_capacity(governed_in_use=0)
 
 
 def _open_fd_count() -> int | None:
+    """Return the open fd count."""
     try:
         with os.scandir("/proc/self/fd") as entries:
             return sum(1 for _ in entries)
@@ -2276,6 +2149,7 @@ def _open_fd_count() -> int | None:
 
 
 def _fd_requested_capacity() -> int:
+    """Return the fd requested capacity."""
     configured = os.getenv("SCHEMA_SANITIZER_MAX_OPEN_FILES")
     if configured:
         try:
@@ -2292,11 +2166,13 @@ _PYTHON_GOVERNED_FDS_OPENED_LOCK = Lock()
 
 
 def _python_governed_fds_opened() -> int:
+    """Return descriptors currently opened through Python-governed leases."""
     with _PYTHON_GOVERNED_FDS_OPENED_LOCK:
         return _PYTHON_GOVERNED_FDS_OPENED
 
 
 def _mark_python_file_descriptors_opened_noexcept(amount: int) -> None:
+    """Mark python file descriptors opened without propagating exceptions."""
     global _PYTHON_GOVERNED_FDS_OPENED
     if amount <= 0:
         return
@@ -2308,6 +2184,7 @@ def _mark_python_file_descriptors_opened_noexcept(amount: int) -> None:
 
 
 def _mark_python_file_descriptors_closed_noexcept(amount: int) -> None:
+    """Mark python file descriptors closed without propagating exceptions."""
     global _PYTHON_GOVERNED_FDS_OPENED
     if amount <= 0:
         return
@@ -2339,11 +2216,10 @@ def record_physical_file_descriptors_closed(amount: int = 1) -> None:
     _mark_python_file_descriptors_closed_noexcept(amount)
 
 
-def _fd_hard_capacity(*, governed_in_use: int = 0) -> int:
-    # ``governed_in_use`` is retained for compatibility with historical test
-    # hooks, but capacity is derived from physically-open governed FDs rather
-    # than reservations that may not have reached ``open()`` yet.
-    del governed_in_use
+def _fd_hard_capacity() -> int:
+    # Capacity follows physically-open governed FDs rather than reservations
+    # that may not have reached ``open()`` yet.
+    """Return the fd hard capacity."""
     hard = _fd_requested_capacity()
     if resource is not None:
         try:
@@ -2356,36 +2232,28 @@ def _fd_hard_capacity(*, governed_in_use: int = 0) -> int:
             if open_now is None:
                 hard = min(hard, max(0, int(soft) - reserve))
             else:
-                # The native counter is canonical when available because Python
-                # opens are mirrored into it and C++ opens are recorded there
-                # directly. Falling back to the Python counter preserves source-only
-                # behavior without double-counting native governed descriptors as
-                # external RLIMIT pressure.
+                # Python opens are mirrored into the native counter and C++ opens
+                # are recorded there directly, so it is the canonical total.
                 opened_governed = _python_governed_fds_opened()
                 # This helper executes during module import before the public
                 # snapshot function is defined, so probe the native ABI lazily
                 # instead of calling a later global. Python-governed opens are
                 # mirrored into this native counter; C++ opens contribute only
                 # here, making it the canonical total when available.
-                try:
-                    from .native_runtime import native_core as _fd_native_core
+                from .native_runtime import native_core as _fd_native_core
 
-                    _snapshot = getattr(
-                        _fd_native_core, "process_file_descriptor_permits_snapshot", None
-                    )
-                    if type(_fd_native_core).__name__ != "_MissingNative" and callable(_snapshot):
-                        _values = tuple(_snapshot())
-                        if len(_values) >= 4:
-                            opened_governed = max(opened_governed, int(_values[1]))
-                except BaseException:
-                    pass
+                _values = tuple(_fd_native_core.process_file_descriptor_permits_snapshot())
+                if len(_values) != 6:
+                    raise RuntimeError("native FD snapshot returned invalid statistics")
+                opened_governed = max(opened_governed, int(_values[1]))
                 external_open = max(0, open_now - opened_governed)
                 hard = min(hard, max(0, int(soft) - reserve - external_open))
     return max(0, hard)
 
 
 def _fd_capacity() -> int:
-    return _fd_hard_capacity(governed_in_use=0)
+    """Return the fd capacity."""
+    return _fd_hard_capacity()
 
 
 _THREAD_CAPACITY = _thread_capacity()
@@ -2403,118 +2271,80 @@ _FD_GOVERNOR = _Governor(
 )
 
 
-def _native_file_descriptor_api() -> Any | None:
-    """Return the shared native FD authority when the ABI exposes Pass60 hooks."""
-    try:
-        from .native_runtime import native_core
-    except BaseException:
-        return None
-    # ``_MissingNative`` intentionally fabricates callables for arbitrary
-    # attributes, so reject it by exact implementation name before probing.
-    if type(native_core).__name__ == "_MissingNative":
-        return None
-    acquire = getattr(native_core, "process_file_descriptor_permits_acquire", None)
-    release = getattr(native_core, "process_file_descriptor_permits_release", None)
-    if not callable(acquire) or not callable(release):
-        return None
+def _native_file_descriptor_api() -> Any:
+    """Return the current shared native FD authority."""
+    from .native_runtime import native_core
+
     return native_core
 
 
 class _NativeFdPermitAcquisition:
     """Preallocated holder whose receipt owns native FD capacity exactly."""
 
-    __slots__ = ("native", "lease", "amount", "exact")
+    __slots__ = ("native", "lease", "amount")
 
     def __init__(self) -> None:
+        """Initialize the native fd permit acquisition and its owned runtime state."""
         self.native: Any | None = None
         self.lease: object | None = None
         self.amount = 0
-        self.exact = False
 
 
-def _native_fd_exact_supported(native: Any | None) -> bool:
-    return bool(
-        native is not None
-        and callable(getattr(native, "process_file_descriptor_permit_lease_acquire_wait", None))
-        and callable(getattr(native, "process_file_descriptor_permit_lease_resize", None))
-        and callable(getattr(native, "process_file_descriptor_permit_lease_amount", None))
-    )
-
-
-def _native_fd_exact_metadata(native: Any, receipt: object) -> tuple[int, int, int, int] | None:
-    method = getattr(native, "process_file_descriptor_permit_lease_metadata", None)
-    if not callable(method):
-        return None
-    values = method(receipt)
+def _native_fd_exact_metadata(native: Any, receipt: object) -> tuple[int, int, int, int]:
+    """Return the native fd exact metadata."""
+    values = native.process_file_descriptor_permit_lease_metadata(receipt)
     if not isinstance(values, tuple) or len(values) != 4:
         raise RuntimeError("native FD receipt returned invalid metadata")
     return tuple(int(value) for value in values)  # type: ignore[return-value]
 
 
 def _native_fd_exact_amount(native: Any, receipt: object) -> int:
-    metadata = _native_fd_exact_metadata(native, receipt)
-    if metadata is not None:
-        return max(0, metadata[2])
-    return max(0, int(native.process_file_descriptor_permit_lease_amount(receipt)))
+    """Return the native fd exact amount."""
+    return max(0, _native_fd_exact_metadata(native, receipt)[2])
 
 
 def _native_fd_exact_opened(native: Any, receipt: object) -> int:
+    """Return the exact opened-descriptor count from a native lease receipt."""
+    return max(0, _native_fd_exact_metadata(native, receipt)[3])
+
+
+def _native_fd_exact_resize(native: Any, receipt: object, target: int) -> tuple[int, int, int]:
+    """Resize a native descriptor receipt and validate its returned metadata."""
     metadata = _native_fd_exact_metadata(native, receipt)
-    if metadata is None:
-        return -1
-    return max(0, metadata[3])
+    result = native.process_file_descriptor_permit_lease_resize(
+        receipt, max(0, int(target)), metadata[1]
+    )
+    if not isinstance(result, tuple) or len(result) != 3:
+        raise RuntimeError("native FD receipt resize returned invalid metadata")
+    return int(result[0]), max(0, int(result[1])), max(0, int(result[2]))
 
 
-def _native_fd_exact_resize(
-    native: Any, receipt: object, target: int
-) -> tuple[int, int, int] | None:
-    method = native.process_file_descriptor_permit_lease_resize
+def _native_fd_exact_mark_opened(native: Any, receipt: object, amount: int) -> tuple[int, int, int]:
+    """Mark descriptors opened on a native receipt and validate the transition."""
     metadata = _native_fd_exact_metadata(native, receipt)
-    if metadata is not None:
-        result = method(receipt, max(0, int(target)), metadata[1])
-    else:
-        result = method(receipt, max(0, int(target)))
-    if isinstance(result, tuple) and len(result) == 3:
-        return int(result[0]), max(0, int(result[1])), max(0, int(result[2]))
-    return None
+    result = native.process_file_descriptor_permit_lease_mark_opened(
+        receipt, max(0, int(amount)), metadata[1]
+    )
+    if not isinstance(result, tuple) or len(result) != 3:
+        raise RuntimeError("native FD receipt open transition returned invalid metadata")
+    return int(result[0]), max(0, int(result[1])), max(0, int(result[2]))
 
 
-def _native_fd_exact_mark_opened(
-    native: Any, receipt: object, amount: int
-) -> tuple[int, int, int] | bool:
-    method = getattr(native, "process_file_descriptor_permit_lease_mark_opened", None)
-    if not callable(method):
-        return False
+def _native_fd_exact_mark_closed(native: Any, receipt: object, amount: int) -> tuple[int, int, int]:
+    """Mark exact descriptors closed and report whether the native transition committed."""
     metadata = _native_fd_exact_metadata(native, receipt)
-    if metadata is not None:
-        result = method(receipt, max(0, int(amount)), metadata[1])
-    else:
-        result = method(receipt, max(0, int(amount)))
-    if isinstance(result, tuple) and len(result) == 3:
-        return int(result[0]), max(0, int(result[1])), max(0, int(result[2]))
-    return True
-
-
-def _native_fd_exact_mark_closed(
-    native: Any, receipt: object, amount: int
-) -> tuple[int, int, int] | bool:
-    method = getattr(native, "process_file_descriptor_permit_lease_mark_closed", None)
-    if not callable(method):
-        return False
-    metadata = _native_fd_exact_metadata(native, receipt)
-    if metadata is not None:
-        result = method(receipt, max(0, int(amount)), metadata[1])
-    else:
-        result = method(receipt, max(0, int(amount)))
-    if isinstance(result, tuple) and len(result) == 3:
-        return int(result[0]), max(0, int(result[1])), max(0, int(result[2]))
-    return True
+    result = native.process_file_descriptor_permit_lease_mark_closed(
+        receipt, max(0, int(amount)), metadata[1]
+    )
+    if not isinstance(result, tuple) or len(result) != 3:
+        raise RuntimeError("native FD receipt close transition returned invalid metadata")
+    return int(result[0]), max(0, int(result[1])), max(0, int(result[2]))
 
 
 def _acquire_native_file_descriptor_permits(
     amount: int, *, timeout_seconds: float
 ) -> _NativeFdPermitAcquisition:
-    """Acquire canonical native FD authority, preferring an exact RAII receipt.
+    """Acquire canonical native FD authority through an exact RAII receipt.
 
     The result holder exists before the native commit.  With the exact ABI, a
     temporary capsule owns the committed permits before Python publishes any
@@ -2523,44 +2353,24 @@ def _acquire_native_file_descriptor_permits(
     result = _NativeFdPermitAcquisition()
     native = _native_file_descriptor_api()
     result.native = native
-    if native is None:
-        return result
     deadline = monotonic() + max(0.0, float(timeout_seconds))
-    exact_acquire = getattr(native, "process_file_descriptor_permit_lease_acquire_wait", None)
-    wait = getattr(native, "process_file_descriptor_permits_acquire_wait", None)
     first_attempt = True
     while first_attempt or monotonic() < deadline:
         check_operation_cancelled(stage="open_file_descriptors")
         remaining = max(0.0, deadline - monotonic())
         slice_ms = 0 if remaining <= 0 else max(1, min(50, int(remaining * 1000)))
         first_attempt = False
-        if callable(exact_acquire) and _native_fd_exact_supported(native):
-            exact = exact_acquire(amount, amount, slice_ms)
-            if exact is not None:
-                if not isinstance(exact, tuple) or len(exact) != 2:
-                    raise RuntimeError("native FD exact lease returned invalid receipt")
-                receipt, granted = exact
-                granted = int(granted)
-                if granted == amount:
-                    result.lease = receipt
-                    result.amount = granted
-                    result.exact = True
-                    return result
-                # Exact receipt is idempotent and self-owning.  Explicitly
-                # shrink to zero before retry; destruction is a second guard.
-                _native_fd_exact_resize(native, receipt, 0)
-        else:
-            if callable(wait):
-                granted = int(wait(amount, amount, slice_ms))
-            else:
-                granted = int(native.process_file_descriptor_permits_acquire(amount, amount))
+        exact = native.process_file_descriptor_permit_lease_acquire_wait(amount, amount, slice_ms)
+        if exact is not None:
+            if not isinstance(exact, tuple) or len(exact) != 2:
+                raise RuntimeError("native FD exact lease returned invalid receipt")
+            receipt, granted = exact
+            granted = int(granted)
             if granted == amount:
+                result.lease = receipt
                 result.amount = granted
                 return result
-            if granted > 0:
-                native.process_file_descriptor_permits_release(granted)
-            if not callable(wait):
-                break
+            _native_fd_exact_resize(native, receipt, 0)
         if remaining <= 0:
             break
     raise SchemaSanitizerResourceError(
@@ -2574,39 +2384,23 @@ def _acquire_native_file_descriptor_permits(
 
 
 def _mark_native_file_descriptors_opened_noexcept(amount: int) -> None:
+    """Mark native file descriptors opened without propagating exceptions."""
     native = _native_file_descriptor_api()
-    method = (
-        getattr(native, "process_file_descriptor_mark_opened", None) if native is not None else None
-    )
-    if callable(method) and amount > 0:
+    if amount > 0:
         try:
-            method(amount)
+            native.process_file_descriptor_mark_opened(amount)
         except BaseException as exc:
             clear_exception_traceback(exc)
 
 
 def _mark_native_file_descriptors_closed_noexcept(amount: int) -> None:
+    """Mark native file descriptors closed without propagating exceptions."""
     native = _native_file_descriptor_api()
-    method = (
-        getattr(native, "process_file_descriptor_mark_closed", None) if native is not None else None
-    )
-    if callable(method) and amount > 0:
+    if amount > 0:
         try:
-            method(amount)
+            native.process_file_descriptor_mark_closed(amount)
         except BaseException as exc:
             clear_exception_traceback(exc)
-
-
-def _release_native_file_descriptor_permits_noexcept(native: Any | None, amount: int) -> None:
-    if native is None or amount <= 0:
-        return
-    try:
-        native.process_file_descriptor_permits_release(amount)
-    except BaseException as exc:
-        # Native release is noexcept by contract. If the Python ABI wrapper is
-        # damaged, retain the native credit conservatively instead of reviving
-        # a Python lease whose logical release has already committed.
-        clear_exception_traceback(exc)
 
 
 def _attach_native_file_descriptor_permits(
@@ -2634,76 +2428,63 @@ def _attach_native_file_descriptor_permits(
 
 
 def _native_fd_receipt_for_python_lease(lease: _Lease) -> tuple[Any, object] | None:
-    # Lightweight legacy/test lease doubles intentionally have no governor
-    # identity. They stay on the pre-receipt aggregate accounting path.
-    governor = getattr(lease, "_governor", None)
-    lease_id = getattr(lease, "lease_id", None)
-    capability = getattr(lease, "_capability", None)
-    condition = getattr(governor, "_condition", None)
-    active = getattr(governor, "_active_leases", None)
-    if governor is None or condition is None or active is None or lease_id is None:
+    """Resolve the native receipt backing a live Python descriptor lease."""
+    governor = lease._governor
+    if governor is not _FD_GOVERNOR:
         return None
-    with condition:
-        entry = active.get(lease_id)
+    with governor._condition:
+        entry = governor._active_leases.get(lease.lease_id)
         if (
             entry is None
             or entry.owner_id != id(lease)
-            or entry.capability is not capability
+            or entry.capability is not lease._capability
             or entry.resource_released
             or entry.native_fd_lease is None
         ):
             return None
         receipt = entry.native_fd_lease
     native = _native_file_descriptor_api()
-    if native is None or not _native_fd_exact_supported(native):
-        return None
     return native, receipt
 
 
 def _mark_file_descriptor_lease_opened(lease: _Lease, amount: int) -> int | None:
+    """Mark file descriptor lease opened."""
     exact = _native_fd_receipt_for_python_lease(lease)
-    if exact is not None:
-        state = _native_fd_exact_mark_opened(exact[0], exact[1], amount)
-        if state is not False:
-            _mark_python_file_descriptors_opened_noexcept(amount)
-            return (
-                state[2] if isinstance(state, tuple) else _opened_for_file_descriptor_lease(lease)
-            )
-    record_physical_file_descriptors_opened(amount)
-    return None
+    if exact is None:
+        raise RuntimeError("file descriptor lease lacks exact native authority")
+    state = _native_fd_exact_mark_opened(exact[0], exact[1], amount)
+    _mark_python_file_descriptors_opened_noexcept(amount)
+    return state[2]
 
 
 def _mark_file_descriptor_lease_closed(lease: _Lease, amount: int) -> int | None:
+    """Mark descriptors closed and report whether exact accounting committed."""
     exact = _native_fd_receipt_for_python_lease(lease)
-    if exact is not None:
-        state = _native_fd_exact_mark_closed(exact[0], exact[1], amount)
-        if state is not False:
-            _mark_python_file_descriptors_closed_noexcept(amount)
-            return (
-                state[2] if isinstance(state, tuple) else _opened_for_file_descriptor_lease(lease)
-            )
-    record_physical_file_descriptors_closed(amount)
-    return None
+    if exact is None:
+        raise RuntimeError("file descriptor lease lacks exact native authority")
+    state = _native_fd_exact_mark_closed(exact[0], exact[1], amount)
+    _mark_python_file_descriptors_closed_noexcept(amount)
+    return state[2]
 
 
 def _opened_for_file_descriptor_lease(lease: _Lease) -> int | None:
+    """Return the exact opened count when a descriptor lease has a native receipt."""
     exact = _native_fd_receipt_for_python_lease(lease)
     if exact is None:
         return None
-    opened = _native_fd_exact_opened(exact[0], exact[1])
-    return None if opened < 0 else opened
+    return _native_fd_exact_opened(exact[0], exact[1])
 
 
 def _refresh_thread_governor_capacity() -> None:
+    """Refresh and return process thread-governor capacity."""
     with _THREAD_GOVERNOR._condition:
         in_use = _THREAD_GOVERNOR._in_use
     _THREAD_GOVERNOR.refresh_capacity(_thread_hard_capacity(governed_in_use=in_use))
 
 
 def _refresh_fd_governor_capacity() -> None:
-    with _FD_GOVERNOR._condition:
-        in_use = _FD_GOVERNOR._in_use
-    _FD_GOVERNOR.refresh_capacity(_fd_hard_capacity(governed_in_use=in_use))
+    """Refresh and return process descriptor-governor capacity."""
+    _FD_GOVERNOR.refresh_capacity(_fd_hard_capacity())
 
 
 _GUARDIAN_THREAD_GOVERNOR = _Governor(2, "release_guardian_emergency_threads")
@@ -2719,6 +2500,7 @@ def acquire_project_threads(desired: int, *, minimum: int = 1) -> _Lease:
 
 
 def _cleanup_operation_thread_borrow_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Cleanup operation thread borrow capsule."""
     budget = capsule.arg0
     claim_id = capsule.arg1
     capability = capsule.arg2
@@ -2753,6 +2535,7 @@ class _OperationThreadBorrowLease:
     def __init__(
         self, budget: "_OperationThreadBorrowBudget", claim_id: int, capability: object, amount: int
     ) -> None:
+        """Initialize the operation thread borrow lease and its owned runtime state."""
         self._budget = budget
         self._claim_id = int(claim_id)
         self._capability = capability
@@ -2769,6 +2552,7 @@ class _OperationThreadBorrowLease:
 
     @property
     def amount(self) -> int:
+        """Return the exact capacity retained by this operation thread borrow lease."""
         if self._released:
             return 0
         try:
@@ -2777,6 +2561,7 @@ class _OperationThreadBorrowLease:
             return 0
 
     def shrink_to(self, target: int) -> int:
+        """Shrink this borrow lease to an exact retained amount."""
         wanted = max(0, int(target))
         if os.getpid() != self._pid:
             ensure_runtime_fork_safe()
@@ -2793,6 +2578,7 @@ class _OperationThreadBorrowLease:
             return current
 
     def _ack_finalizer(self) -> None:
+        """Acknowledge and retire this lease's finalizer authority."""
         capsule = self._finalizer_capsule
         if self._finalizer_ticket and capsule is not None:
             acknowledge_prepared_finalizer_cleanup(capsule)
@@ -2800,6 +2586,7 @@ class _OperationThreadBorrowLease:
             self._finalizer_capsule = None
 
     def release(self) -> None:
+        """Release resources owned by this operation thread borrow lease."""
         if os.getpid() != self._pid:
             return
         with self._lock:
@@ -2814,6 +2601,7 @@ class _OperationThreadBorrowLease:
     close = release
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
@@ -2827,45 +2615,39 @@ class _OperationThreadBorrowLease:
 
 
 class _OperationThreadBorrowBudget:
-    """Exact child ledger for subdivisions of one operation thread lease.
-
-    Exact claims are the authority.  ``_legacy_borrowed`` exists solely for
-    historical private tests/callers that still exercise the pre-pass82 amount
-    API; production borrowing is represented by ``_OperationThreadBorrowLease``.
-    """
+    """Exact child ledger for subdivisions of one operation thread lease."""
 
     __slots__ = (
         "capacity",
         "_exact_reservation",
         "_claims",
         "_next_claim",
-        "_legacy_borrowed",
         "_lock",
     )
 
     def __init__(self, capacity: int, *, exact_reservation: int = 0) -> None:
+        """Initialize the operation thread borrow budget and its owned runtime state."""
         self.capacity = max(0, int(capacity))
         self._exact_reservation = max(0, int(exact_reservation))
         self._claims: dict[int, tuple[object, int]] = {}
         self._next_claim = 1
-        self._legacy_borrowed = 0
         self._lock = Lock()
 
     def _exact_borrowed_locked(self) -> int:
+        """Return exact borrowed capacity while holding the borrow-budget lock."""
         return sum(max(0, int(amount)) for _capability, amount in self._claims.values())
-
-    def _borrowed_locked(self) -> int:
-        return self._legacy_borrowed + self._exact_borrowed_locked()
 
     @property
     def borrowed(self) -> int:
+        """Return the exact thread capacity currently borrowed."""
         with self._lock:
-            return self._borrowed_locked()
+            return self._exact_borrowed_locked()
 
     def set_capacity(self, capacity: int) -> None:
+        """Set and return the exact operation-thread borrow capacity."""
         value = max(0, int(capacity))
         with self._lock:
-            if value < self._borrowed_locked():
+            if value < self._exact_borrowed_locked():
                 raise RuntimeError(
                     "cannot shrink operation thread lease below live external borrows"
                 )
@@ -2877,6 +2659,7 @@ class _OperationThreadBorrowBudget:
             self._exact_reservation = max(0, int(amount))
 
     def _next_claim_id_locked(self) -> int:
+        """Allocate the next claim identifier while holding the borrow-budget lock."""
         candidate = max(1, int(self._next_claim))
         start = candidate
         while candidate in self._claims:
@@ -2891,39 +2674,18 @@ class _OperationThreadBorrowBudget:
     def try_borrow_up_to_exact(
         self, desired: int, *, minimum: int = 1, exact: bool = False
     ) -> _OperationThreadBorrowLease | None:
+        """Borrow up to the requested exact thread capacity."""
         requested = max(0, int(desired))
         floor = max(0, int(minimum))
         if requested == 0:
             return None
 
-        # Historical adversarial tests monkeypatch ``try_borrow_up_to`` to stop
-        # inside the parent lease's linearization lock. Preserve that private
-        # test seam without making amount-only borrowing a production authority.
-        # The branch is unreachable unless the class method itself was replaced.
-        default_legacy = globals().get("_DEFAULT_OPERATION_THREAD_TRY_BORROW_UP_TO")
-        current_legacy = type(self).try_borrow_up_to
-        if default_legacy is not None and current_legacy is not default_legacy:
-            granted = int(current_legacy(self, requested, minimum=floor))
-            if granted < floor:
-                return None
-            capability = object()
-            with self._lock:
-                if granted > self._legacy_borrowed:
-                    raise RuntimeError("legacy borrow test seam lost its provisional authority")
-                self._legacy_borrowed -= granted
-                claim_id = self._next_claim_id_locked()
-                owner = _OperationThreadBorrowLease(self, claim_id, capability, granted)
-                self._claims[claim_id] = (capability, granted)
-                return owner
-
-        # Production path: prepare all fallible owner state before the
-        # authoritative dict commit. No amount-only borrow exists in between.
         capability = object()
         with self._lock:
             protected = 0 if exact else min(self.capacity, self._exact_reservation)
             available = max(
                 0,
-                self.capacity - self._borrowed_locked() - protected,
+                self.capacity - self._exact_borrowed_locked() - protected,
             )
             granted = min(requested, available)
             if granted < floor:
@@ -2934,6 +2696,7 @@ class _OperationThreadBorrowBudget:
             return owner
 
     def _claim_amount(self, claim_id: int, capability: object) -> int:
+        """Return the amount retained by an operation-thread claim."""
         with self._lock:
             entry = self._claims.get(int(claim_id))
             if entry is None or entry[0] is not capability:
@@ -2941,6 +2704,7 @@ class _OperationThreadBorrowBudget:
             return max(0, int(entry[1]))
 
     def _resize_claim(self, claim_id: int, capability: object, target: int) -> int:
+        """Resize one authoritative operation-thread borrow claim."""
         wanted = max(0, int(target))
         with self._lock:
             entry = self._claims.get(int(claim_id))
@@ -2957,144 +2721,21 @@ class _OperationThreadBorrowBudget:
             self._claims[int(claim_id)] = (capability, wanted)
             return wanted
 
-    # Legacy amount-only compatibility. Production must use exact child leases.
-    def try_borrow(self, amount: int) -> bool:
-        requested = max(0, int(amount))
-        if requested == 0:
-            return True
-        with self._lock:
-            if requested > self.capacity - self._borrowed_locked():
-                return False
-            self._legacy_borrowed += requested
-            return True
-
-    def try_borrow_up_to(self, desired: int, *, minimum: int = 1) -> int:
-        requested = max(0, int(desired))
-        floor = max(0, int(minimum))
-        with self._lock:
-            available = max(0, self.capacity - self._borrowed_locked())
-            granted = min(requested, available)
-            if granted < floor:
-                return 0
-            self._legacy_borrowed += granted
-            return granted
-
-    def release(self, amount: int) -> None:
-        returned = max(0, int(amount))
-        if returned == 0:
-            return
-        with self._lock:
-            if returned > self._legacy_borrowed:
-                raise RuntimeError(
-                    "amount-only external runtime release cannot consume exact borrow claims"
-                )
-            self._legacy_borrowed -= returned
-
-
-# Sentinel used only to recognize historical monkeypatches of the private
-# amount API. Production never enters that compatibility seam.
-_DEFAULT_OPERATION_THREAD_TRY_BORROW_UP_TO = _OperationThreadBorrowBudget.try_borrow_up_to
-
-
-def _operation_thread_borrow_budget(
-    execution_lease: object | None,
-) -> _OperationThreadBorrowBudget | None:
-    """Return the budget object without performing admission.
-
-    New callers must use ``_Lease.borrow_external_runtime_threads`` so parent
-    release/shrink and child publication are one transaction.
-    """
-    if type(execution_lease) is not _Lease or execution_lease._governor is not _THREAD_GOVERNOR:
-        return None
-    lease = execution_lease
-    if os.getpid() != lease._pid:
-        ensure_runtime_fork_safe()
-        raise RuntimeError("process resource lease belongs to a different process")
-    with lease._lock:
-        if lease._released:
-            return None
-        existing = lease.__dict__.get("_external_runtime_borrow_budget")
-        exact_reservation = max(
-            0,
-            int(lease.__dict__.get("_external_runtime_exact_reservation", 0)),
-        )
-        if isinstance(existing, _OperationThreadBorrowBudget):
-            existing.set_capacity(max(0, lease.amount - 1))
-            existing.set_exact_reservation(exact_reservation)
-            return existing
-        budget = _OperationThreadBorrowBudget(
-            max(0, lease.amount - 1),
-            exact_reservation=exact_reservation,
-        )
-        lease.__dict__["_external_runtime_borrow_budget"] = budget
-        capsule = lease._finalizer_capsule
-        if capsule is not None:
-            capsule.arg3 = budget
-        return budget
-
 
 class _ExternalNativeThreadAuthority:
-    """Normalize external-runtime active permits and resident-pool attribution."""
+    """Expose the current exact native thread authority through one small adapter."""
 
-    __slots__ = (
-        "_acquire",
-        "_release",
-        "_lease_acquire",
-        "_lease_resize",
-        "_lease_amount",
-        "_lease_metadata",
-        "_resident_add",
-        "_resident_release",
-        "_stack_debt_add",
-        "_stack_debt_release",
-        "_residency_update",
-    )
+    __slots__ = ("_core",)
 
-    def __init__(
-        self,
-        acquire: Callable[[int, int], int],
-        release: Callable[[int], None],
-        lease_acquire: Callable[[int, int], object] | None = None,
-        lease_resize: Callable[..., object] | None = None,
-        lease_amount: Callable[[object], int] | None = None,
-        resident_add: Callable[[int], object] | None = None,
-        resident_release: Callable[[int], object] | None = None,
-        stack_debt_add: Callable[[int], object] | None = None,
-        stack_debt_release: Callable[[int], object] | None = None,
-        residency_update: Callable[[int, int], object] | None = None,
-        lease_metadata: Callable[[object], tuple[int, int, int]] | None = None,
-    ) -> None:
-        self._acquire = acquire
-        self._release = release
-        self._lease_acquire = lease_acquire
-        self._lease_resize = lease_resize
-        self._lease_amount = lease_amount
-        self._lease_metadata = lease_metadata
-        self._resident_add = resident_add
-        self._resident_release = resident_release
-        self._stack_debt_add = stack_debt_add
-        self._stack_debt_release = stack_debt_release
-        self._residency_update = residency_update
-
-    def process_physical_thread_permits_acquire(self, desired: int, minimum: int) -> int:
-        return int(self._acquire(int(desired), int(minimum)))
-
-    def process_physical_thread_permits_release(self, amount: int) -> None:
-        self._release(int(amount))
-
-    @property
-    def supports_exact_permit_lease(self) -> bool:
-        return (
-            callable(self._lease_acquire)
-            and callable(self._lease_resize)
-            and callable(self._lease_amount)
-        )
+    def __init__(self, core: Any) -> None:
+        """Initialize the external native thread authority and its owned runtime state."""
+        self._core = core
 
     def acquire_exact_permit_lease(self, desired: int, minimum: int) -> tuple[object, int] | None:
-        lease_acquire = self._lease_acquire
-        if not callable(lease_acquire):
-            return None
-        result = lease_acquire(int(desired), int(minimum))
+        """Acquire exact permit lease."""
+        result = self._core.process_external_runtime_thread_permit_lease_acquire(
+            int(desired), int(minimum)
+        )
         if result is None:
             return None
         if not isinstance(result, tuple) or len(result) != 2:
@@ -3102,76 +2743,62 @@ class _ExternalNativeThreadAuthority:
         return result[0], int(result[1])
 
     def resize_exact_permit_lease(self, lease: object, target: int) -> int:
-        lease_resize = self._lease_resize
-        lease_amount = self._lease_amount
-        if not callable(lease_resize) or not callable(lease_amount):
-            raise RuntimeError("native external-runtime exact permit lease is unavailable")
-        lease_metadata = self._lease_metadata
-        if callable(lease_metadata):
-            values = lease_metadata(lease)
-            if not isinstance(values, tuple) or len(values) != 3:
-                raise RuntimeError(
-                    "native external-runtime permit receipt returned invalid metadata"
-                )
-            result = lease_resize(lease, int(target), int(values[1]))
-        else:
-            result = lease_resize(lease, int(target))
-        if isinstance(result, tuple) and len(result) == 2:
-            return max(0, int(result[1]))
-        return self.exact_permit_lease_amount(lease)
+        """Resize the runtime's exact physical-thread permit lease."""
+        values = self._metadata(lease)
+        result = self._core.process_external_runtime_thread_permit_lease_resize(
+            lease, int(target), values[1]
+        )
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise RuntimeError("native external-runtime permit resize returned invalid metadata")
+        return max(0, int(result[1]))
 
     def exact_permit_lease_amount(self, lease: object) -> int:
-        lease_amount = self._lease_amount
-        if not callable(lease_amount):
-            raise RuntimeError("native external-runtime exact permit lease is unavailable")
-        lease_metadata = self._lease_metadata
-        if callable(lease_metadata):
-            values = lease_metadata(lease)
-            if not isinstance(values, tuple) or len(values) != 3:
-                raise RuntimeError(
-                    "native external-runtime permit receipt returned invalid metadata"
-                )
-            return max(0, int(values[2]))
-        return max(0, int(lease_amount(lease)))
+        """Return the exact capacity retained by a native permit receipt."""
+        return max(0, self._metadata(lease)[2])
+
+    def _metadata(self, lease: object) -> tuple[int, int, int]:
+        """Return exact native permit metadata for the supplied receipt."""
+        values = self._core.process_external_runtime_thread_permit_lease_metadata(lease)
+        if not isinstance(values, tuple) or len(values) != 3:
+            raise RuntimeError("native external-runtime permit receipt returned invalid metadata")
+        return int(values[0]), int(values[1]), int(values[2])
 
     @property
     def supports_resident_attribution(self) -> bool:
-        return callable(self._resident_add) and callable(self._resident_release)
+        """Return whether the runtime reports resident-thread attribution."""
+        return True
 
     def external_runtime_resident_threads_add(self, amount: int) -> None:
-        resident_add = self._resident_add
-        if not callable(resident_add):
-            return
-        resident_add(int(amount))
+        """Add resident threads to external-runtime accounting."""
+        self._core.process_external_runtime_resident_threads_add(int(amount))
 
     def external_runtime_resident_threads_release(self, amount: int) -> None:
-        resident_release = self._resident_release
-        if not callable(resident_release):
-            return
-        resident_release(int(amount))
+        """Release resident threads from external-runtime accounting."""
+        self._core.process_external_runtime_resident_threads_release(int(amount))
 
     @property
     def supports_stack_debt(self) -> bool:
-        return callable(self._stack_debt_add) and callable(self._stack_debt_release)
+        """Return whether the runtime reports stack-debt threads."""
+        return True
 
     def external_runtime_stack_debt_threads_add(self, amount: int) -> None:
-        stack_debt_add = self._stack_debt_add
-        if callable(stack_debt_add):
-            stack_debt_add(int(amount))
+        """Add stack-debt threads to external-runtime accounting."""
+        self._core.process_external_runtime_stack_debt_threads_add(int(amount))
 
     def external_runtime_stack_debt_threads_release(self, amount: int) -> None:
-        stack_debt_release = self._stack_debt_release
-        if callable(stack_debt_release):
-            stack_debt_release(int(amount))
+        """Release stack-debt threads from external-runtime accounting."""
+        self._core.process_external_runtime_stack_debt_threads_release(int(amount))
 
     @property
     def supports_atomic_residency_update(self) -> bool:
-        return callable(self._residency_update)
+        """Return whether the runtime supports atomic residency updates."""
+        return True
 
     def external_runtime_residency_update(self, identity_delta: int, stack_debt_delta: int) -> None:
-        residency_update = self._residency_update
-        if callable(residency_update):
-            residency_update(int(identity_delta), int(stack_debt_delta))
+        """Apply one atomic external-runtime residency update."""
+        self._core.process_external_runtime_residency_update(
+            int(identity_delta), int(stack_debt_delta)
+        )
 
 
 class _ExactExternalRuntimeNativePermit:
@@ -3180,18 +2807,21 @@ class _ExactExternalRuntimeNativePermit:
     __slots__ = ("_native", "_lease", "_pid")
 
     def __init__(self, native: _ExternalNativeThreadAuthority, lease: object) -> None:
+        """Initialize the exact external runtime native permit and its owned runtime state."""
         self._native = native
         self._lease = lease
         self._pid = os.getpid()
 
     @property
     def amount(self) -> int:
+        """Return the exact capacity retained by this exact external runtime native permit."""
         if os.getpid() != self._pid:
             ensure_runtime_fork_safe()
             raise RuntimeError("external runtime exact permit owner belongs to a different process")
         return self._native.exact_permit_lease_amount(self._lease)
 
     def resize_physical_thread_permits(self, target: int) -> None:
+        """Resize the physical-thread permits owned by this runtime lease."""
         wanted = max(0, int(target))
         if os.getpid() != self._pid:
             ensure_runtime_fork_safe()
@@ -3201,13 +2831,6 @@ class _ExactExternalRuntimeNativePermit:
             raise RuntimeError("external runtime exact permit owner cannot grow")
         self._native.resize_exact_permit_lease(self._lease, wanted)
 
-    def process_physical_thread_permits_release(self, amount: int) -> None:
-        returned = max(0, int(amount))
-        if returned == 0:
-            return
-        current = self.amount
-        self.resize_physical_thread_permits(max(0, current - returned))
-
 
 class _ExternalNativePermitAcquisition:
     """Single-owner permit receipt allocated before native capacity commits."""
@@ -3215,67 +2838,20 @@ class _ExternalNativePermitAcquisition:
     __slots__ = ("owner", "amount")
 
     def __init__(self) -> None:
+        """Initialize the external native permit acquisition and its owned runtime state."""
         self.owner: Any | None = None
         self.amount = 0
 
-    def __iter__(self):  # compatibility; production reads fields directly
-        yield self.owner
-        yield self.amount
 
-
-def _native_external_thread_api() -> Any | None:
-    """Return the dedicated external-runtime physical-thread authority.
-
-    Pass67 prefers ABI methods that account already-existing external runtime
-    workers separately from managed thread starts. Older binaries retain the
-    shared-domain fallback for compatibility.
-    """
+def _native_external_thread_api() -> _ExternalNativeThreadAuthority | None:
+    """Return the current exact external-runtime physical-thread authority."""
     try:
         from .native_runtime import native_core
     except BaseException:
         return None
     if type(native_core).__name__ == "_MissingNative":
         return None
-    acquire = getattr(native_core, "process_external_runtime_thread_permits_acquire", None)
-    release = getattr(native_core, "process_external_runtime_thread_permits_release", None)
-    lease_acquire = getattr(
-        native_core, "process_external_runtime_thread_permit_lease_acquire", None
-    )
-    lease_resize = getattr(native_core, "process_external_runtime_thread_permit_lease_resize", None)
-    lease_amount = getattr(native_core, "process_external_runtime_thread_permit_lease_amount", None)
-    lease_metadata = getattr(
-        native_core, "process_external_runtime_thread_permit_lease_metadata", None
-    )
-    if callable(acquire) and callable(release):
-        resident_add = getattr(native_core, "process_external_runtime_resident_threads_add", None)
-        resident_release = getattr(
-            native_core, "process_external_runtime_resident_threads_release", None
-        )
-        stack_debt_add = getattr(
-            native_core, "process_external_runtime_stack_debt_threads_add", None
-        )
-        stack_debt_release = getattr(
-            native_core, "process_external_runtime_stack_debt_threads_release", None
-        )
-        residency_update = getattr(native_core, "process_external_runtime_residency_update", None)
-        return _ExternalNativeThreadAuthority(
-            acquire,
-            release,
-            lease_acquire if callable(lease_acquire) else None,
-            lease_resize if callable(lease_resize) else None,
-            lease_amount if callable(lease_amount) else None,
-            resident_add if callable(resident_add) else None,
-            resident_release if callable(resident_release) else None,
-            stack_debt_add if callable(stack_debt_add) else None,
-            stack_debt_release if callable(stack_debt_release) else None,
-            residency_update if callable(residency_update) else None,
-            lease_metadata if callable(lease_metadata) else None,
-        )
-    acquire = getattr(native_core, "process_physical_thread_permits_acquire", None)
-    release = getattr(native_core, "process_physical_thread_permits_release", None)
-    if not callable(acquire) or not callable(release):
-        return None
-    return _ExternalNativeThreadAuthority(acquire, release)
+    return _ExternalNativeThreadAuthority(native_core)
 
 
 def _acquire_external_native_thread_permits(amount: int) -> _ExternalNativePermitAcquisition:
@@ -3287,31 +2863,18 @@ def _acquire_external_native_thread_permits(amount: int) -> _ExternalNativePermi
     native = _native_external_thread_api()
     if native is None:
         return result
-    if bool(getattr(native, "supports_exact_permit_lease", False)):
-        exact = native.acquire_exact_permit_lease(requested, requested)
-        if exact is None:
-            return result
-        lease, granted = exact
-        if granted != requested:
-            native.resize_exact_permit_lease(lease, 0)
-            return result
-        # The wrapper is the only Python-side release authority. If interruption
-        # occurs before publication into ``result``, its native capsule dies and
-        # returns the permits automatically.
-        owner = _ExactExternalRuntimeNativePermit(native, lease)
-        result.owner = owner
-        result.amount = granted
+    exact = native.acquire_exact_permit_lease(requested, requested)
+    if exact is None:
         return result
-
-    # Compatibility only for pre-pass80 binaries. Current production ABI always
-    # exposes exact permit leases; amount authority is never selected there.
-    result.owner = native
-    granted = int(native.process_physical_thread_permits_acquire(requested, requested))
-    if granted == requested:
-        result.amount = granted
+    lease, granted = exact
+    if granted != requested:
+        native.resize_exact_permit_lease(lease, 0)
         return result
-    if granted > 0:
-        native.process_physical_thread_permits_release(granted)
+    # The wrapper is the only Python-side release authority. If interruption
+    # occurs before publication into ``result``, its native capsule dies and
+    # returns the permits automatically.
+    result.owner = _ExactExternalRuntimeNativePermit(native, lease)
+    result.amount = granted
     return result
 
 
@@ -3346,10 +2909,6 @@ class _ExternalRuntimePoolCoordinatorEntry:
     config_attempted_width: int | None = None
     runtime_key: tuple[str, object] | None = None
 
-    def __iter__(self):  # compatibility for historical focused tests
-        yield self.runtime_key
-        yield self
-
 
 _EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK = Lock()
 _EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION = Condition(_EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK)
@@ -3366,6 +2925,7 @@ class _ExternalRuntimeCoordinator(dict[tuple[str, object], _ExternalRuntimePoolC
     """Coordinator map whose explicit reset retires exact claim slots first."""
 
     def clear(self) -> None:
+        """Clear values and ownership retained by this external runtime coordinator."""
         global _EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS, _EXTERNAL_RUNTIME_TOTAL_LOGICAL_CLAIMS
         slot_pool = globals().get("_EXTERNAL_RUNTIME_CLAIM_SLOTS")
         if isinstance(slot_pool, BoundedGenerationPool):
@@ -3374,14 +2934,10 @@ class _ExternalRuntimeCoordinator(dict[tuple[str, object], _ExternalRuntimePoolC
                     owner = slot_pool.owner_for(claim_id)
                     if owner is not None:
                         slot_pool.release_for(owner)
-                    elif slot_pool.owns(claim_id):
-                        slot_pool.release(claim_id)
                 for claim_id in entry.logical_claims:
                     owner = slot_pool.owner_for(claim_id)
                     if owner is not None:
                         slot_pool.release_for(owner)
-                    elif slot_pool.owns(claim_id):
-                        slot_pool.release(claim_id)
         super().clear()
         _EXTERNAL_RUNTIME_TOTAL_PHYSICAL_CLAIMS = 0
         _EXTERNAL_RUNTIME_TOTAL_LOGICAL_CLAIMS = 0
@@ -3529,6 +3085,7 @@ def _external_runtime_pool_identity_key(runtime: Any) -> tuple[str, object]:
 def _external_runtime_entry_locked(
     runtime: Any, *, create: bool, runtime_key: tuple[str, object] | None = None
 ) -> _ExternalRuntimePoolCoordinatorEntry | None:
+    """Return the external-runtime entry while holding the coordinator lock."""
     if runtime_key is None:
         runtime_key = _external_runtime_pool_identity_key(runtime)
     entry = _EXTERNAL_RUNTIME_POOL_COORDINATOR.get(runtime_key)
@@ -3556,6 +3113,7 @@ def _external_runtime_entry_locked(
 def _retire_external_runtime_entry_locked(
     runtime_key: tuple[str, object], entry: _ExternalRuntimePoolCoordinatorEntry
 ) -> None:
+    """Retire external runtime entry while holding the governing lock."""
     if (
         not entry.physical_claims
         and entry.physical_amount == 0
@@ -3596,15 +3154,11 @@ def _external_runtime_total_claims_locked() -> int:
 
 
 def _release_external_runtime_claim_slot_locked(claim_id: int) -> None:
-    """Retire one exact claim slot by owner identity; tolerate legacy injections."""
+    """Retire one exact claim slot by owner identity."""
     owner = _EXTERNAL_RUNTIME_CLAIM_SLOTS.owner_for(claim_id)
     if owner is not None:
         if not _EXTERNAL_RUNTIME_CLAIM_SLOTS.release_for(owner):
             raise RuntimeError("external runtime exact claim slot retirement failed")
-        return
-    if _EXTERNAL_RUNTIME_CLAIM_SLOTS.owns(claim_id):
-        if not _EXTERNAL_RUNTIME_CLAIM_SLOTS.release(claim_id):
-            raise RuntimeError("external runtime legacy claim slot retirement failed")
 
 
 def _note_external_runtime_claim_inserted_locked(*, logical: bool) -> None:
@@ -3642,6 +3196,7 @@ def _note_external_runtime_claim_removed_locked(*, logical: bool) -> None:
 
 
 def _next_external_runtime_claim_id(claims: dict[int, int], candidate: int) -> int:
+    """Choose the next unused bounded claim identifier for an external runtime."""
     claim_id = max(1, int(candidate))
     while claim_id in claims:
         claim_id += 1
@@ -3653,6 +3208,7 @@ def _next_external_runtime_claim_id(claims: dict[int, int], candidate: int) -> i
 def _cleanup_shared_external_physical_claim_capsule(
     capsule: PreparedFinalizerCleanup,
 ) -> None:
+    """Cleanup shared external physical claim capsule."""
     runtime_id = capsule.arg0
     claim_id = capsule.arg1
     if not _is_external_runtime_key(runtime_id) or type(claim_id) is not int or claim_id <= 0:
@@ -3668,13 +3224,10 @@ def _cleanup_shared_external_physical_claim_capsule(
             # Safe-point processors retire a prepared generation only when its
             # callback returns. Raise after publishing the target-zero tombstone
             # so the exact finalizer authority remains PUBLISHED until the claim
-            # has really disappeared. Focused direct-call doubles are not escrow
-            # executions and retain the historical non-raising probe behavior.
-            # Safe-point execution receives the separately rooted authority,
-            # not the wrapper object.  Only an actually armed escrow authority
-            # must signal retry; focused/direct compatibility calls may observe
-            # the tombstone without owning a retry generation.
-            if bool(getattr(capsule, "_escrow_armed", False)):
+            # has really disappeared. Safe-point execution receives the
+            # separately rooted authority, not the wrapper object; only an armed
+            # escrow authority must signal retry.
+            if capsule._authority.is_armed_for(capsule.ticket):
                 raise _ExternalRuntimeCleanupDeferred(
                     "external runtime physical claim cleanup awaits configuration"
                 )
@@ -3695,6 +3248,7 @@ class _SharedExternalRuntimeNativePermit:
     )
 
     def __init__(self, runtime_id: _ExternalRuntimeKey, claim_id: int = 0) -> None:
+        """Initialize the shared external runtime native permit and its owned runtime state."""
         self._runtime_id = runtime_id
         self._claim_id = int(claim_id)
         self._pid = os.getpid()
@@ -3706,6 +3260,7 @@ class _SharedExternalRuntimeNativePermit:
         self._finalizer_capsule: PreparedFinalizerCleanup | None = capsule
 
     def _bind_claim_id(self, claim_id: int) -> None:
+        """Bind the authoritative external-runtime claim identifier."""
         claim_id = int(claim_id)
         if claim_id <= 0 or self._claim_id not in (0, claim_id):
             raise RuntimeError("external runtime physical claim binding mismatch")
@@ -3716,6 +3271,7 @@ class _SharedExternalRuntimeNativePermit:
 
     @property
     def amount(self) -> int:
+        """Return the exact capacity retained by this shared external runtime native permit."""
         if self._released:
             return 0
         if os.getpid() != self._pid:
@@ -3730,6 +3286,7 @@ class _SharedExternalRuntimeNativePermit:
             return max(0, int(entry.physical_claims.get(self._claim_id, 0)))
 
     def _ack_finalizer(self) -> None:
+        """Acknowledge and retire this lease's finalizer authority."""
         capsule = self._finalizer_capsule
         if self._finalizer_ticket and capsule is not None:
             acknowledge_prepared_finalizer_cleanup(capsule)
@@ -3742,6 +3299,7 @@ class _SharedExternalRuntimeNativePermit:
         self._ack_finalizer()
 
     def resize_physical_thread_permits(self, target: int) -> None:
+        """Resize the physical-thread permits owned by this runtime lease."""
         wanted = max(0, int(target))
         current = self.amount
         if wanted > current:
@@ -3775,21 +3333,14 @@ class _SharedExternalRuntimeNativePermit:
                 self._runtime_id, self._claim_id, wanted, missing_ok=False
             )
 
-    def process_physical_thread_permits_release(self, amount: int) -> None:
-        returned = max(0, int(amount))
-        if returned == 0:
-            return
-        current = self.amount
-        if returned > current:
-            raise RuntimeError("external runtime physical-pool claim over-release")
-        self.resize_physical_thread_permits(current - returned)
-
     def release(self) -> None:
+        """Release resources owned by this shared external runtime native permit."""
         self.resize_physical_thread_permits(0)
 
     close = release
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
@@ -3806,11 +3357,7 @@ def _sync_external_native_lease_amount_locked(entry: _ExternalRuntimePoolCoordin
     """Refresh mirrored capacity from the exact native owner after interruptions."""
     native = entry.native
     lease = entry.native_lease
-    if (
-        native is not None
-        and lease is not None
-        and bool(getattr(native, "supports_exact_permit_lease", False))
-    ):
+    if native is not None and lease is not None:
         entry.physical_amount = native.exact_permit_lease_amount(lease)
 
 
@@ -3891,21 +3438,9 @@ def _resize_shared_external_native_thread_claim(
             native = entry.native
             if native is None:
                 raise RuntimeError("external runtime physical pool lost native authority")
-            if entry.native_lease is not None and bool(
-                getattr(native, "supports_exact_permit_lease", False)
-            ):
-                # The exact ABI returns post-commit authority together with the
-                # new generation; older doubles fall back inside the wrapper.
-                resized_amount = native.resize_exact_permit_lease(entry.native_lease, new_max)
-                entry.physical_amount = (
-                    native.exact_permit_lease_amount(entry.native_lease)
-                    if resized_amount is None
-                    else max(0, int(resized_amount))
-                )
-            else:
-                release_amount = entry.physical_amount - new_max
-                native.process_physical_thread_permits_release(release_amount)
-                entry.physical_amount = new_max
+            if entry.native_lease is None:
+                raise RuntimeError("external runtime physical pool lost exact lease authority")
+            entry.physical_amount = native.resize_exact_permit_lease(entry.native_lease, new_max)
             if entry.physical_amount == 0:
                 entry.native_lease = None
                 entry.native = None
@@ -3921,31 +3456,13 @@ def _resize_shared_external_native_thread_claim(
         _retire_external_runtime_entry_locked(runtime_id, entry)
 
 
-def _release_shared_external_native_thread_permits(
-    runtime_id: _ExternalRuntimeKey, claim_id: int, amount: int
-) -> None:
-    """Compatibility delta release routed through the exact target primitive."""
-    returned = max(0, int(amount))
-    if returned == 0:
-        return
-    with _EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION:
-        entry = _EXTERNAL_RUNTIME_POOL_COORDINATOR.get(runtime_id)
-        if entry is None:
-            raise RuntimeError("unknown external runtime physical-pool claim")
-        current = entry.physical_claims.get(claim_id)
-        if current is None or returned > int(current):
-            raise RuntimeError("external runtime physical-pool claim over-release")
-        target = int(current) - returned
-    _resize_shared_external_native_thread_claim(runtime_id, claim_id, target)
-
-
 def _reported_external_runtime_resident_width(runtime: Any) -> int | None:
     """Return resident workers only from an explicit identity-bearing probe.
 
     ``cpu_count()`` and ``thread_pool_size()`` describe configured capacity for
     common runtimes; neither proves that those OS threads currently exist.
-    Treating either as resident identity would merely recreate Pass67's
-    attribution bug under a different name. A runtime integration may opt in by
+    Treating either as resident identity would misattribute capacity. A runtime
+    integration may opt in by
     exposing ``schema_sanitizer_resident_thread_count()`` when it can prove an
     actual resident-worker count.
     """
@@ -4045,7 +3562,8 @@ def _refresh_external_runtime_residency_stable(
         attempts += 1
         with _EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION:
             entry = _external_runtime_entry_locked(runtime, create=True, runtime_key=runtime_key)
-            assert entry is not None
+            if entry is None:
+                raise AssertionError("created external-runtime entry cannot be absent")
             while entry.config_inflight:
                 if entry.config_owner_thread_id == owner_thread:
                     raise SchemaSanitizerResourceError(
@@ -4062,7 +3580,8 @@ def _refresh_external_runtime_residency_stable(
                     entry = _external_runtime_entry_locked(
                         runtime, create=True, runtime_key=runtime_key
                     )
-                    assert entry is not None
+                    if entry is None:
+                        raise AssertionError("recreated external-runtime entry cannot be absent")
             generation = entry.config_generation
 
         reported_resident = _reported_external_runtime_resident_width(runtime)
@@ -4076,7 +3595,8 @@ def _refresh_external_runtime_residency_stable(
                 entry = _external_runtime_entry_locked(
                     runtime, create=True, runtime_key=runtime_key
                 )
-                assert entry is not None
+                if entry is None:
+                    raise AssertionError("recreated external-runtime entry cannot be absent")
             if entry.config_inflight or entry.config_generation != generation:
                 check_operation_cancelled(stage="external_runtime_threads")
                 continue
@@ -4154,8 +3674,7 @@ def _set_external_runtime_resident_width_locked(
         entry.resident_native = native if (identity_target or desired_debt) else None
         return
 
-    # Compatibility fallback preserves the same conservative ordering.
-    # Growth: debt first, identity second.
+    # Growth applies debt before identity; shrink reverses that order.
     if supports_debt and desired_debt > current_debt:
         native.external_runtime_stack_debt_threads_add(desired_debt - current_debt)
         entry.resident_stack_debt = desired_debt
@@ -4211,7 +3730,8 @@ def _acquire_shared_external_native_thread_permits(
     with _EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION:
         runtime_id = runtime_key
         entry = _external_runtime_entry_locked(runtime, create=True, runtime_key=runtime_key)
-        assert entry is not None
+        if entry is None:
+            raise AssertionError("created external-runtime entry cannot be absent")
         while entry.config_inflight:
             if entry.config_owner_thread_id == threading.get_ident():
                 raise SchemaSanitizerResourceError(
@@ -4228,7 +3748,8 @@ def _acquire_shared_external_native_thread_permits(
                 entry = _external_runtime_entry_locked(
                     runtime, create=True, runtime_key=runtime_key
                 )
-                assert entry is not None
+                if entry is None:
+                    raise AssertionError("recreated external-runtime entry cannot be absent")
         # Residency was already committed against a stable config generation.
         # The entry may have been retired if the observation was zero and idle;
         # the claim path above recreates it as needed.
@@ -4245,8 +3766,8 @@ def _acquire_shared_external_native_thread_permits(
             _retire_external_runtime_entry_locked(runtime_id, entry)
             return result
 
-        # Pass85: construct the cleanup owner *before* generation admission.
-        # If the token return is interrupted before a STORE, release_for(owner)
+        # Construct the cleanup owner before generation admission. If the token
+        # return is interrupted before publication, release_for(owner)
         # can still locate and retire the exact slot without the integer token.
         permit = _SharedExternalRuntimeNativePermit(runtime_id, 0)
         claim_id: int | None = None
@@ -4285,26 +3806,17 @@ def _acquire_shared_external_native_thread_permits(
                 if granted_width < overlap_minimum_width:
                     return result
             else:
-                if bool(getattr(native, "supports_exact_permit_lease", False)):
-                    exact = native.acquire_exact_permit_lease(requested, minimum_width)
-                    if exact is None:
-                        return result
-                    native_lease, granted_width = exact
-                    if granted_width < minimum_width or granted_width > requested:
-                        native.resize_exact_permit_lease(native_lease, 0)
-                        return result
-                    # Publish the capsule before mirrored scalar state. On an
-                    # asynchronous unwind the local/capsule destructor returns
-                    # permits even if the claim never commits.
-                    entry.native_lease = native_lease
-                else:
-                    granted_width = int(
-                        native.process_physical_thread_permits_acquire(requested, minimum_width)
-                    )
-                    if granted_width < minimum_width or granted_width > requested:
-                        if granted_width > 0:
-                            native.process_physical_thread_permits_release(granted_width)
-                        return result
+                exact = native.acquire_exact_permit_lease(requested, minimum_width)
+                if exact is None:
+                    return result
+                native_lease, granted_width = exact
+                if granted_width < minimum_width or granted_width > requested:
+                    native.resize_exact_permit_lease(native_lease, 0)
+                    return result
+                # Publish the capsule before mirrored scalar state. On an
+                # asynchronous unwind the local/capsule destructor returns
+                # permits even if the claim never commits.
+                entry.native_lease = native_lease
                 entry.native = native
                 entry.physical_amount = granted_width
                 entry.configured_width = None
@@ -4327,34 +3839,20 @@ def _acquire_shared_external_native_thread_permits(
                     _release_external_runtime_claim_slot_locked(claim_id)
                 # If this was the first/only claim and native acquisition had
                 # already committed, retire the exact envelope before forgetting
-                # its mirrored metadata. This closes the pass80 partial-publish
+                # its mirrored metadata. This closes the partial-publish
                 # state (native_lease + physical_amount with no logical claim).
                 has_live_claim = any(
                     max(0, int(value)) > 0 for value in entry.physical_claims.values()
                 )
                 if not has_live_claim and entry.native_lease is not None:
                     rollback_native = entry.native or native
-                    if bool(getattr(rollback_native, "supports_exact_permit_lease", False)):
-                        rollback_amount = rollback_native.resize_exact_permit_lease(
-                            entry.native_lease, 0
-                        )
-                        entry.physical_amount = (
-                            rollback_native.exact_permit_lease_amount(entry.native_lease)
-                            if rollback_amount is None
-                            else max(0, int(rollback_amount))
-                        )
-                        if entry.physical_amount == 0:
-                            entry.native_lease = None
-                            entry.native = None
-                            entry.configured_width = None
-                elif not has_live_claim and entry.native_lease is None and entry.physical_amount:
-                    # Legacy binaries cannot provide an exact receipt. Return the
-                    # amount conservatively while the entry is still rooted.
-                    rollback_native = entry.native or native
-                    rollback_native.process_physical_thread_permits_release(entry.physical_amount)
-                    entry.physical_amount = 0
-                    entry.native = None
-                    entry.configured_width = None
+                    entry.physical_amount = rollback_native.resize_exact_permit_lease(
+                        entry.native_lease, 0
+                    )
+                    if entry.physical_amount == 0:
+                        entry.native_lease = None
+                        entry.native = None
+                        entry.configured_width = None
                 _retire_external_runtime_entry_locked(runtime_id, entry)
 
 
@@ -4396,6 +3894,7 @@ def _sync_external_logical_lease_width_locked(
 def _cleanup_shared_external_logical_claim_capsule(
     capsule: PreparedFinalizerCleanup,
 ) -> None:
+    """Cleanup shared external logical claim capsule."""
     runtime_id = capsule.arg0
     claim_id = capsule.arg1
     if not _is_external_runtime_key(runtime_id) or type(claim_id) is not int or claim_id <= 0:
@@ -4405,7 +3904,7 @@ def _cleanup_shared_external_logical_claim_capsule(
         if entry is not None and entry.config_inflight and claim_id in entry.logical_claims:
             entry.logical_claims[claim_id] = 0
             _EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION.notify_all()
-            if bool(getattr(capsule, "_escrow_armed", False)):
+            if capsule._authority.is_armed_for(capsule.ticket):
                 raise _ExternalRuntimeCleanupDeferred(
                     "external runtime logical claim cleanup awaits configuration"
                 )
@@ -4427,6 +3926,7 @@ class _SharedExternalRuntimeLogicalLease:
     )
 
     def __init__(self, runtime_id: _ExternalRuntimeKey, claim_id: int = 0, amount: int = 0) -> None:
+        """Initialize the shared external runtime logical lease and its owned runtime state."""
         self._runtime_id = runtime_id
         self._claim_id = int(claim_id)
         self._amount = max(0, int(amount))
@@ -4439,6 +3939,7 @@ class _SharedExternalRuntimeLogicalLease:
         self._finalizer_capsule: PreparedFinalizerCleanup | None = capsule
 
     def _bind_claim_id(self, claim_id: int) -> None:
+        """Bind the authoritative external-runtime claim identifier."""
         claim_id = int(claim_id)
         if claim_id <= 0 or self._claim_id not in (0, claim_id):
             raise RuntimeError("external runtime logical claim binding mismatch")
@@ -4449,6 +3950,7 @@ class _SharedExternalRuntimeLogicalLease:
 
     @property
     def amount(self) -> int:
+        """Return the exact capacity retained by this shared external runtime logical lease."""
         if self._released:
             return 0
         if os.getpid() != self._pid:
@@ -4463,6 +3965,7 @@ class _SharedExternalRuntimeLogicalLease:
             return max(0, int(entry.logical_claims.get(self._claim_id, 0)))
 
     def _ack_finalizer(self) -> None:
+        """Acknowledge and retire this lease's finalizer authority."""
         capsule = self._finalizer_capsule
         if self._finalizer_ticket and capsule is not None:
             acknowledge_prepared_finalizer_cleanup(capsule)
@@ -4476,6 +3979,7 @@ class _SharedExternalRuntimeLogicalLease:
         self._ack_finalizer()
 
     def shrink(self, amount: int) -> None:
+        """Shrink this logical runtime lease to the requested capacity."""
         target = int(amount)
         if target <= 0:
             raise ValueError("shared external runtime logical lease shrink target must be > 0")
@@ -4488,6 +3992,7 @@ class _SharedExternalRuntimeLogicalLease:
         self._amount = target
 
     def release(self) -> None:
+        """Release resources owned by this shared external runtime logical lease."""
         if os.getpid() != self._pid:
             return
         if not self._released:
@@ -4516,6 +4021,7 @@ class _SharedExternalRuntimeLogicalLease:
     close = release
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
@@ -4636,7 +4142,8 @@ def _acquire_shared_external_logical_thread_lease(
 
     with _EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION:
         entry = _external_runtime_entry_locked(runtime, create=True, runtime_key=runtime_key)
-        assert entry is not None
+        if entry is None:
+            raise AssertionError("created external-runtime entry cannot be absent")
         while entry.logical_acquire_inflight or entry.config_inflight:
             if entry.config_inflight and entry.config_owner_thread_id == threading.get_ident():
                 raise SchemaSanitizerResourceError(
@@ -4653,7 +4160,8 @@ def _acquire_shared_external_logical_thread_lease(
                 entry = _external_runtime_entry_locked(
                     runtime, create=True, runtime_key=runtime_key
                 )
-                assert entry is not None
+                if entry is None:
+                    raise AssertionError("recreated external-runtime entry cannot be absent")
 
         try:
             total_claims = _external_runtime_total_claims_locked()
@@ -4885,6 +4393,7 @@ def _external_runtime_pool_can_reexpand(runtime: Any, target: int) -> bool:
 
 
 def _external_runtime_pool_mark_configured(runtime: Any, width: int) -> None:
+    """Record the worker width configured for an external runtime pool."""
     ensure_runtime_fork_safe()
     runtime_key = _external_runtime_pool_identity_key(runtime)
     with _EXTERNAL_RUNTIME_POOL_COORDINATOR_LOCK:
@@ -4994,16 +4503,8 @@ class _ExternalRuntimeCleanupState:
     Each field is cleared only after its authoritative release commits.
     """
 
-    # Exact owner object is authoritative. ``native``/``native_amount`` remain
-    # compatibility mirrors for historical test doubles and diagnostics.
-    native_lease: Any | None = None
     native: Any | None = None
-    native_amount: int = 0
-    # Exact borrow capability is authoritative. The budget/amount mirrors are
-    # retained only for compatibility with pre-pass82 test doubles.
     borrow_lease: _OperationThreadBorrowLease | None = None
-    borrow_budget: _OperationThreadBorrowBudget | None = None
-    borrowed: int = 0
     parent_lease: _Lease | None = None
     lease: Any | None = None
 
@@ -5011,6 +4512,7 @@ class _ExternalRuntimeCleanupState:
 def _external_runtime_cleanup_state(
     capsule: PreparedFinalizerCleanup,
 ) -> _ExternalRuntimeCleanupState:
+    """Return the typed cleanup state retained by a finalizer capsule."""
     state = capsule.arg0
     if isinstance(state, _ExternalRuntimeCleanupState):
         return state
@@ -5025,23 +4527,12 @@ def _cleanup_external_runtime_capsule(capsule: PreparedFinalizerCleanup) -> None
     if not isinstance(state, _ExternalRuntimeCleanupState):
         return
 
-    native = state.native_lease or state.native
-    native_amount = max(0, int(state.native_amount))
+    native = state.native
     if native is not None:
-        resize_native = getattr(native, "resize_physical_thread_permits", None)
-        if callable(resize_native):
-            # Exact-owner existence is authority; a stale zero mirror must never
-            # suppress cleanup. Target-zero is retry-idempotent.
-            resize_native(0)
-            observed = max(0, int(getattr(native, "amount", 0)))
-            state.native_amount = observed
-            if observed != 0:
-                raise RuntimeError("external runtime native owner failed to retire")
-        elif native_amount > 0:
-            native.process_physical_thread_permits_release(native_amount)
-        state.native_lease = None
+        native.resize_physical_thread_permits(0)
+        if native.amount != 0:
+            raise RuntimeError("external runtime native owner failed to retire")
         state.native = None
-        state.native_amount = 0
 
     borrow_lease = state.borrow_lease
     if borrow_lease is not None:
@@ -5049,18 +4540,7 @@ def _cleanup_external_runtime_capsule(capsule: PreparedFinalizerCleanup) -> None
         if borrow_lease.amount != 0:
             raise RuntimeError("external runtime exact borrow failed to retire")
         state.borrow_lease = None
-        state.borrow_budget = None
-        state.borrowed = 0
         state.parent_lease = None
-    else:
-        budget = state.borrow_budget
-        borrowed = max(0, int(state.borrowed))
-        if budget is not None and borrowed > 0:
-            budget.release(borrowed)
-            state.borrow_budget = None
-            state.borrowed = 0
-            # Keep the parent rooted until the child borrow has actually returned.
-            state.parent_lease = None
 
     lease = state.lease
     if lease is not None:
@@ -5079,6 +4559,7 @@ class _ExternalRuntimeConstructionEscrow:
     __slots__ = ("prepared", "state", "active")
 
     def __init__(self, prepared: PreparedFinalizerCleanup) -> None:
+        """Initialize the external runtime construction escrow and its owned runtime state."""
         self.prepared = prepared
         self.state = _external_runtime_cleanup_state(prepared)
         self.active = True
@@ -5086,62 +4567,41 @@ class _ExternalRuntimeConstructionEscrow:
     def set_borrow(
         self,
         parent_lease: _Lease | None,
-        borrow: _OperationThreadBorrowLease | _OperationThreadBorrowBudget | None,
-        amount: int | None = None,
+        borrow: _OperationThreadBorrowLease | None,
     ) -> None:
+        """Retain the logical borrow lease in this construction escrow."""
         self.state.parent_lease = parent_lease
-        if isinstance(borrow, _OperationThreadBorrowLease):
-            self.state.borrow_lease = borrow
-            self.state.borrow_budget = borrow._budget
-            self.state.borrowed = borrow.amount
-        else:
-            self.state.borrow_lease = None
-            self.state.borrow_budget = borrow
-            self.state.borrowed = max(0, int(amount or 0))
+        self.state.borrow_lease = borrow
 
-    def set_native(self, native: Any | None, amount: int) -> None:
-        self.state.native_lease = native
+    def set_native(self, native: Any | None) -> None:
+        """Retain the native permit receipt in this construction escrow."""
         self.state.native = native
-        self.state.native_amount = max(0, int(amount))
 
     def set_lease(self, lease: Any | None) -> None:
+        """Retain the process-thread lease in this construction escrow."""
         self.state.lease = lease
 
     def release_native_now(self) -> None:
-        native = self.state.native_lease or self.state.native
-        amount = max(0, int(self.state.native_amount))
+        """Release the retained native permit immediately."""
+        native = self.state.native
         if native is not None:
-            resize_native = getattr(native, "resize_physical_thread_permits", None)
-            if callable(resize_native):
-                resize_native(0)
-                observed = max(0, int(getattr(native, "amount", 0)))
-                self.state.native_amount = observed
-                if observed != 0:
-                    raise RuntimeError("external runtime native owner failed to retire")
-            elif amount:
-                native.process_physical_thread_permits_release(amount)
-            self.state.native_lease = None
+            native.resize_physical_thread_permits(0)
+            if native.amount != 0:
+                raise RuntimeError("external runtime native owner failed to retire")
             self.state.native = None
-            self.state.native_amount = 0
 
     def release_borrow_now(self) -> None:
+        """Release the retained logical borrow immediately."""
         borrow_lease = self.state.borrow_lease
         if borrow_lease is not None:
             borrow_lease.release()
+            if borrow_lease.amount != 0:
+                raise RuntimeError("external runtime exact borrow failed to retire")
             self.state.borrow_lease = None
-            self.state.borrow_budget = None
-            self.state.borrowed = 0
-            self.state.parent_lease = None
-            return
-        budget = self.state.borrow_budget
-        amount = max(0, int(self.state.borrowed))
-        if budget is not None and amount:
-            budget.release(amount)
-            self.state.borrow_budget = None
-            self.state.borrowed = 0
             self.state.parent_lease = None
 
     def release_lease_now(self) -> None:
+        """Release the retained process-thread lease immediately."""
         lease = self.state.lease
         if lease is not None:
             lease.release()
@@ -5150,27 +4610,26 @@ class _ExternalRuntimeConstructionEscrow:
     def release_all_now(self) -> None:
         # Match finalizer/close ordering. Each state field clears only after the
         # corresponding authoritative commit succeeds.
+        """Release every resource retained during runtime construction."""
         self.release_native_now()
         self.release_borrow_now()
         self.release_lease_now()
 
     def transfer_to_wrapper(self) -> PreparedFinalizerCleanup:
+        """Transfer construction resources to their published wrapper."""
         if not self.active:
             raise RuntimeError("external runtime construction escrow already retired")
         self.active = False
         return self.prepared
 
     def defer_after_failure(self, primary: BaseException) -> None:
+        """Transfer failed construction resources to governed deferred cleanup."""
         if not self.active:
             return
         self.active = False
         state = self.state
         has_resources = bool(
-            state.native_lease is not None
-            or state.native is not None
-            or state.borrow_lease is not None
-            or state.borrowed
-            or state.lease is not None
+            state.native is not None or state.borrow_lease is not None or state.lease is not None
         )
         capsule = self.prepared
         if not has_resources:
@@ -5185,6 +4644,7 @@ class _ExternalRuntimeConstructionEscrow:
 
 
 def _runtime_has_configurable_worker_pool(runtime: Any | None) -> bool:
+    """Return whether a runtime exposes a configurable worker-pool interface."""
     if runtime is None:
         return False
     return callable(getattr(runtime, "cpu_count", None)) and callable(
@@ -5206,10 +4666,7 @@ class ExternalRuntimeConcurrencyLease:
         "_lease",
         "_parent_lease",
         "_borrow_lease",
-        "_borrow_budget",
-        "_borrowed",
         "_native",
-        "_native_amount",
         "_lock",
         "workers",
         "parallel",
@@ -5228,12 +4685,10 @@ class ExternalRuntimeConcurrencyLease:
         parallel: bool,
         parent_lease: _Lease | None = None,
         borrow_lease: _OperationThreadBorrowLease | None = None,
-        borrow_budget: _OperationThreadBorrowBudget | None = None,
-        borrowed: int = 0,
         native: Any | None = None,
-        native_amount: int = 0,
         _prepared_finalizer: PreparedFinalizerCleanup | None = None,
     ) -> None:
+        """Initialize the external runtime concurrency lease and its owned runtime state."""
         self._pid = os.getpid()
         prepared = _prepared_finalizer
         if prepared is None:
@@ -5246,37 +4701,29 @@ class ExternalRuntimeConcurrencyLease:
         self._lease: Any | None = lease
         self._parent_lease: _Lease | None = parent_lease
         self._borrow_lease = borrow_lease
-        self._borrow_budget = borrow_lease._budget if borrow_lease is not None else borrow_budget
-        self._borrowed = borrow_lease.amount if borrow_lease is not None else max(0, int(borrowed))
         self._native = native
-        self._native_amount = max(0, int(native_amount))
         self._lock = Lock()
         self.workers = max(1, int(workers))
         self.parallel = bool(parallel and self.workers > 1)
         self._sync_finalizer_capsule_locked()
 
     def _sync_finalizer_capsule_locked(self) -> None:
+        """Sync finalizer capsule while holding the governing lock."""
         capsule = self._finalizer_capsule
         state = self._cleanup_state
         if capsule is None or state is None:
             return
-        state.native_lease = self._native
         state.native = self._native
-        state.native_amount = self._native_amount
         state.borrow_lease = self._borrow_lease
-        state.borrow_budget = self._borrow_budget
-        state.borrowed = (
-            self._borrow_lease.amount if self._borrow_lease is not None else self._borrowed
-        )
         state.parent_lease = self._parent_lease
         state.lease = self._lease
 
     def _retire_finalizer_locked(self) -> None:
+        """Retire finalizer while holding the governing lock."""
         if any(
             (
                 self._native is not None,
                 self._borrow_lease is not None,
-                self._borrowed,
                 self._lease is not None,
             )
         ):
@@ -5291,15 +4738,9 @@ class ExternalRuntimeConcurrencyLease:
         self._cleanup_state = None
         self._parent_lease = None
         self._borrow_lease = None
-        self._borrow_budget = None
 
     def shrink_to(self, workers: int) -> int:
-        """Return excess logical/native capacity after discovering real pool width.
-
-        Each resource component is committed independently and mirrored into
-        the prearmed finalizer immediately after the authoritative release.
-        This keeps GC retry exact even when a later component fails.
-        """
+        """Return excess logical and native capacity after discovering real pool width."""
         target = max(1, int(workers))
         if os.getpid() != self._pid:
             ensure_runtime_fork_safe()
@@ -5313,19 +4754,9 @@ class ExternalRuntimeConcurrencyLease:
 
             native = self._native
             if native is not None:
-                # Rebuild the mirror from the exact owner before deciding whether
-                # a shrink is needed. A stale scalar can never suppress cleanup.
-                self._native_amount = max(0, int(getattr(native, "amount", self._native_amount)))
-                if self._native_amount > keep:
-                    resize_native = getattr(native, "resize_physical_thread_permits", None)
-                    if callable(resize_native):
-                        resize_native(keep)
-                        self._native_amount = max(0, int(getattr(native, "amount", keep)))
-                    else:
-                        native_excess = self._native_amount - keep
-                        native.process_physical_thread_permits_release(native_excess)
-                        self._native_amount -= native_excess
-                if self._native_amount == 0:
+                if native.amount > keep:
+                    native.resize_physical_thread_permits(keep)
+                if native.amount == 0:
                     self._native = None
                 self._sync_finalizer_capsule_locked()
 
@@ -5333,19 +4764,8 @@ class ExternalRuntimeConcurrencyLease:
                 observed_borrowed = self._borrow_lease.amount
                 if observed_borrowed > keep:
                     observed_borrowed = self._borrow_lease.shrink_to(keep)
-                self._borrowed = observed_borrowed
                 if observed_borrowed == 0:
                     self._borrow_lease = None
-                    self._borrow_budget = None
-                    self._parent_lease = None
-                self._sync_finalizer_capsule_locked()
-            elif self._borrow_budget is not None and self._borrowed > keep:
-                # Legacy amount-only compatibility.
-                borrowed_excess = self._borrowed - keep
-                self._borrow_budget.release(borrowed_excess)
-                self._borrowed -= borrowed_excess
-                if self._borrowed == 0:
-                    self._borrow_budget = None
                     self._parent_lease = None
                 self._sync_finalizer_capsule_locked()
 
@@ -5364,23 +4784,17 @@ class ExternalRuntimeConcurrencyLease:
             return self.workers
 
     def close(self) -> None:
+        """Release resources owned by this external runtime concurrency lease."""
         if os.getpid() != self._pid:
             return
         # Clear each component only after its exact release commits, keeping the
         # prepared capsule synchronized so GC can retry a partially-failed close.
         with self._lock:
             native = self._native
-            native_amount = self._native_amount
             if native is not None:
-                resize_native = getattr(native, "resize_physical_thread_permits", None)
-                if callable(resize_native):
-                    resize_native(0)
-                    self._native_amount = max(0, int(getattr(native, "amount", 0)))
-                    if self._native_amount != 0:
-                        raise RuntimeError("external runtime native owner failed to retire")
-                elif native_amount:
-                    native.process_physical_thread_permits_release(native_amount)
-                    self._native_amount = 0
+                native.resize_physical_thread_permits(0)
+                if native.amount != 0:
+                    raise RuntimeError("external runtime native owner failed to retire")
                 self._native = None
                 self._sync_finalizer_capsule_locked()
 
@@ -5389,19 +4803,8 @@ class ExternalRuntimeConcurrencyLease:
                 if self._borrow_lease.amount != 0:
                     raise RuntimeError("external runtime exact borrow failed to retire")
                 self._borrow_lease = None
-                self._borrow_budget = None
-                self._borrowed = 0
                 self._parent_lease = None
                 self._sync_finalizer_capsule_locked()
-            else:
-                budget = self._borrow_budget
-                borrowed = self._borrowed
-                if budget is not None and borrowed:
-                    budget.release(borrowed)
-                    self._borrow_budget = None
-                    self._borrowed = 0
-                    self._parent_lease = None
-                    self._sync_finalizer_capsule_locked()
 
             lease = self._lease
             if lease is not None:
@@ -5412,12 +4815,15 @@ class ExternalRuntimeConcurrencyLease:
             self._retire_finalizer_locked()
 
     def __enter__(self) -> "ExternalRuntimeConcurrencyLease":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        """Release managed resources when leaving the context."""
         self.close()
 
     def __del__(self) -> None:
+        """Schedule best-effort cleanup during garbage collection."""
         try:
             if runtime_is_finalizing() or os.getpid() != getattr(self, "_pid", os.getpid()):
                 return
@@ -5431,10 +4837,7 @@ class ExternalRuntimeConcurrencyLease:
                     self._lease = None
                     self._parent_lease = None
                     self._borrow_lease = None
-                    self._borrow_budget = None
-                    self._borrowed = 0
                     self._native = None
-                    self._native_amount = 0
         except BaseException:
             pass
 
@@ -5481,15 +4884,14 @@ def acquire_external_runtime_threads(
                 exact=exact_pool,
             )
             borrow_lease = borrow_result.lease
-            borrow_budget = borrow_result.budget
-            borrowed = borrow_result.granted
-            if borrow_lease is None or borrow_budget is None or borrowed < 2:
+            if borrow_lease is None or borrow_lease.amount < 2:
                 return ExternalRuntimeConcurrencyLease(
                     None,
                     workers=1,
                     parallel=False,
                     _prepared_finalizer=escrow.transfer_to_wrapper(),
                 )
+            borrowed = borrow_lease.amount
             escrow.set_borrow(execution_lease, borrow_lease)
             native_result = (
                 _acquire_shared_external_native_thread_permits(
@@ -5504,7 +4906,7 @@ def acquire_external_runtime_threads(
             native = native_result.owner
             native_amount = native_result.amount
             if native is not None:
-                escrow.set_native(native, native_amount)
+                escrow.set_native(native)
                 if native_amount != borrowed:
                     if not exact_pool and 2 <= native_amount < borrowed:
                         borrowed = borrow_lease.shrink_to(native_amount)
@@ -5523,10 +4925,7 @@ def acquire_external_runtime_threads(
                 parallel=True,
                 parent_lease=execution_lease,
                 borrow_lease=borrow_lease,
-                borrow_budget=borrow_budget,
-                borrowed=borrowed,
                 native=native,
-                native_amount=native_amount,
                 _prepared_finalizer=escrow.transfer_to_wrapper(),
             )
 
@@ -5562,7 +4961,7 @@ def acquire_external_runtime_threads(
         native = native_result.owner
         native_amount = native_result.amount
         if native is not None:
-            escrow.set_native(native, native_amount)
+            escrow.set_native(native)
             if native_amount != lease.amount:
                 if not exact_pool and 2 <= native_amount < lease.amount:
                     # The physical authority committed first. Shrink the logical
@@ -5583,7 +4982,6 @@ def acquire_external_runtime_threads(
             workers=lease.amount,
             parallel=True,
             native=native,
-            native_amount=native_amount,
             _prepared_finalizer=escrow.transfer_to_wrapper(),
         )
     except BaseException as primary:
@@ -5619,6 +5017,7 @@ def constrain_external_runtime_worker_pool(runtime: Any, workers: int) -> int:
         )
 
     def read_width() -> int:
+        """Read the external runtime's current worker-pool width."""
         try:
             observed = int(getter())
         except BaseException as exc:
@@ -5649,7 +5048,8 @@ def constrain_external_runtime_worker_pool(runtime: Any, workers: int) -> int:
     can_reexpand = False
     with _EXTERNAL_RUNTIME_POOL_COORDINATOR_CONDITION:
         entry = _external_runtime_entry_locked(runtime, create=True, runtime_key=runtime_key)
-        assert entry is not None
+        if entry is None:
+            raise AssertionError("created external-runtime entry cannot be absent")
         while entry.config_inflight:
             if entry.config_owner_thread_id == owner_thread:
                 raise SchemaSanitizerResourceError(
@@ -5668,7 +5068,8 @@ def constrain_external_runtime_worker_pool(runtime: Any, workers: int) -> int:
                 entry = _external_runtime_entry_locked(
                     runtime, create=True, runtime_key=runtime_key
                 )
-                assert entry is not None
+                if entry is None:
+                    raise AssertionError("recreated external-runtime entry cannot be absent")
         # Config generations are fixed-width authority. Never permit unbounded
         # Python-int growth or wrap/ABA semantics in the control plane.
         if entry.config_generation >= _MAX_EXTERNAL_RUNTIME_CONFIG_GENERATION:
@@ -5827,6 +5228,7 @@ def unregister_project_thread_availability(event: AvailabilityEvent) -> None:
 def _acquire_file_descriptor_lease(
     amount: int, *, timeout_seconds: float, teardown: bool
 ) -> _Lease:
+    """Acquire file descriptor lease."""
     _refresh_fd_governor_capacity()
     lease = _FD_GOVERNOR.acquire(amount, timeout_seconds=timeout_seconds, _teardown=teardown)
     acquisition: _NativeFdPermitAcquisition | None = None
@@ -5838,37 +5240,12 @@ def _acquire_file_descriptor_lease(
             _attach_native_file_descriptor_permits(lease, acquisition)
         return lease
     except BaseException as primary:
-        # Exact receipts remain self-owning until attached.  Once attached,
-        # lease.release() retires that same idempotent receipt.  Never perform a
-        # second amount-based release for the exact path.
+        # Exact receipts remain self-owning until attached. Once attached,
+        # lease.release() retires that same idempotent receipt.
         try:
             lease.release()
         except BaseException as cleanup_error:
             add_bounded_note(primary, "file descriptor bridge rollback failed", cleanup_error)
-        finally:
-            if (
-                acquisition is not None
-                and acquisition.native is not None
-                and acquisition.amount > 0
-                and not acquisition.exact
-            ):
-                # Compatibility for pre-pass81 binaries: release manually only
-                # when the exact ledger did not attach the legacy amount.
-                attached = False
-                try:
-                    with _FD_GOVERNOR._condition:
-                        entry = _FD_GOVERNOR._active_leases.get(lease.lease_id)
-                        attached = bool(
-                            entry is not None
-                            and entry.capability is lease._capability
-                            and entry.native_fd_amount > 0
-                        )
-                except BaseException:
-                    attached = True  # fail closed: avoid a possible double-release
-                if not attached:
-                    _release_native_file_descriptor_permits_noexcept(
-                        acquisition.native, acquisition.amount
-                    )
         raise
 
 
@@ -5885,12 +5262,9 @@ def acquire_teardown_file_descriptors(amount: int = 1, *, timeout_seconds: float
 def _reconcile_uncertain_fd_close_count_locked() -> int:
     """Rebuild the diagnostic debt count from exact retained-owner slots."""
     global _UNCERTAIN_FD_CLOSE_COUNT
-    if isinstance(_UNCERTAIN_FD_CLOSE_DEBTS, dict):
-        _UNCERTAIN_FD_CLOSE_COUNT = len(_UNCERTAIN_FD_CLOSE_DEBTS)
-    else:
-        _UNCERTAIN_FD_CLOSE_COUNT = sum(
-            1 for slot in _UNCERTAIN_FD_CLOSE_DEBTS if slot.lease is not None
-        )
+    _UNCERTAIN_FD_CLOSE_COUNT = sum(
+        1 for slot in _UNCERTAIN_FD_CLOSE_DEBTS if slot.lease is not None
+    )
     return _UNCERTAIN_FD_CLOSE_COUNT
 
 
@@ -5913,43 +5287,31 @@ def retain_uncertain_fd_close(lease: object, *, label: str) -> bool:
         label = "uncertain-fd-close"
     key = id(lease)
     with _UNCERTAIN_FD_CLOSE_LOCK:
-        # Compatibility path for focused tests that replace the registry.
-        if isinstance(_UNCERTAIN_FD_CLOSE_DEBTS, dict):
-            if key in _UNCERTAIN_FD_CLOSE_DEBTS:
+        free: _UncertainFdCloseDebtSlot | None = None
+        for slot in _UNCERTAIN_FD_CLOSE_DEBTS:
+            if slot.lease is lease and slot.key == key:
+                # Slot membership is authority. Repair metadata/mirrors that
+                # may have lagged an asynchronous exception after publication.
+                if slot.created_ns <= 0:
+                    slot.created_ns = monotonic_ns()
+                if not slot.label:
+                    slot.label = label
                 count = _reconcile_uncertain_fd_close_count_locked()
                 _republish_uncertain_fd_terminal_owner_locked(key)
                 return count > 0
-            if len(_UNCERTAIN_FD_CLOSE_DEBTS) >= _FD_GOVERNOR.capacity:
-                _UNCERTAIN_FD_CLOSE_REJECTED += 1
-                raise RuntimeError("uncertain FD-close debt capacity exhausted")
-            _UNCERTAIN_FD_CLOSE_DEBTS[key] = (lease, monotonic_ns(), label)
-            count = len(_UNCERTAIN_FD_CLOSE_DEBTS)
-        else:
-            free: _UncertainFdCloseDebtSlot | None = None
-            for slot in _UNCERTAIN_FD_CLOSE_DEBTS:
-                if slot.lease is lease and slot.key == key:
-                    # Slot membership is authority. Repair metadata/mirrors that
-                    # may have lagged an asynchronous exception after publication.
-                    if slot.created_ns <= 0:
-                        slot.created_ns = monotonic_ns()
-                    if not slot.label:
-                        slot.label = label
-                    count = _reconcile_uncertain_fd_close_count_locked()
-                    _republish_uncertain_fd_terminal_owner_locked(key)
-                    return count > 0
-                if free is None and slot.lease is None:
-                    free = slot
-            if free is None:
-                _UNCERTAIN_FD_CLOSE_REJECTED += 1
-                raise RuntimeError("uncertain FD-close debt capacity exhausted")
-            # Prepare observability before publishing exact slot membership. Once
-            # ``lease`` is stored, every remaining scalar is repairable on retry.
-            created_ns = monotonic_ns()
-            free.key = key
-            free.created_ns = created_ns
-            free.label = label
-            free.lease = lease
-            count = _reconcile_uncertain_fd_close_count_locked()
+            if free is None and slot.lease is None:
+                free = slot
+        if free is None:
+            _UNCERTAIN_FD_CLOSE_REJECTED += 1
+            raise RuntimeError("uncertain FD-close debt capacity exhausted")
+        # Prepare observability before publishing exact slot membership. Once
+        # ``lease`` is stored, every remaining scalar is repairable on retry.
+        created_ns = monotonic_ns()
+        free.key = key
+        free.created_ns = created_ns
+        free.label = label
+        free.lease = lease
+        count = _reconcile_uncertain_fd_close_count_locked()
         _republish_uncertain_fd_terminal_owner_locked(key)
         return count > 0
 
@@ -5957,18 +5319,11 @@ def retain_uncertain_fd_close(lease: object, *, label: str) -> bool:
 def uncertain_fd_close_snapshot() -> UncertainFdCloseSnapshot:
     """Return diagnostics without allocating an O(n) temporary collection."""
     with _UNCERTAIN_FD_CLOSE_LOCK:
-        if isinstance(_UNCERTAIN_FD_CLOSE_DEBTS, dict):
-            oldest = 0
-            for _lease, created_ns, _label in _UNCERTAIN_FD_CLOSE_DEBTS.values():
-                if oldest == 0 or created_ns < oldest:
-                    oldest = created_ns
-            count = len(_UNCERTAIN_FD_CLOSE_DEBTS)
-        else:
-            oldest = 0
-            count = _reconcile_uncertain_fd_close_count_locked()
-            for slot in _UNCERTAIN_FD_CLOSE_DEBTS:
-                if slot.lease is not None and (oldest == 0 or slot.created_ns < oldest):
-                    oldest = slot.created_ns
+        oldest = 0
+        count = _reconcile_uncertain_fd_close_count_locked()
+        for slot in _UNCERTAIN_FD_CLOSE_DEBTS:
+            if slot.lease is not None and (oldest == 0 or slot.created_ns < oldest):
+                oldest = slot.created_ns
         return UncertainFdCloseSnapshot(
             count, _FD_GOVERNOR.capacity, oldest, _UNCERTAIN_FD_CLOSE_REJECTED
         )
@@ -5980,6 +5335,7 @@ class _FdOpenAttempt:
     __slots__ = ("committed", "native_before")
 
     def __init__(self) -> None:
+        """Initialize the fd open attempt and its owned runtime state."""
         self.committed = False
         self.native_before: int | None = None
 
@@ -6002,7 +5358,6 @@ class FileDescriptorCapability:
         "_lease",
         "_amount",
         "_opened",
-        "_opening",
         "_opening_attempts",
         "_lock",
         "_label",
@@ -6010,13 +5365,12 @@ class FileDescriptorCapability:
     )
 
     def __init__(self, lease: _Lease, amount: int, *, label: str) -> None:
+        """Initialize the file descriptor capability and its owned runtime state."""
         self._lease: _Lease | None = lease
         self._amount = amount
         self._opened = 0
-        # ``_opening_attempts`` is authoritative; ``_opening`` is a diagnostic
-        # compatibility mirror only. Exact attempt identity makes abort idempotent
-        # after asynchronous exceptions between commit and local publication.
-        self._opening = 0
+        # Exact attempt identity makes abort idempotent after asynchronous
+        # exceptions between commit and local publication.
         self._opening_attempts: set[_FdOpenAttempt] = set()
         self._lock = Lock()
         self._label = label
@@ -6024,26 +5378,30 @@ class FileDescriptorCapability:
 
     @property
     def amount(self) -> int:
+        """Return the exact capacity retained by this file descriptor capability."""
         return self._amount
 
     @property
     def opened(self) -> int:
+        """Return descriptors whose open transition has committed."""
         with self._lock:
             self._reconcile_opened_locked()
             return self._opened
 
     @property
     def opening(self) -> int:
+        """Return descriptors reserved for an in-flight open transition."""
         with self._lock:
-            self._opening = len(self._opening_attempts)
-            return self._opening
+            return len(self._opening_attempts)
 
     @property
     def retained_as_debt(self) -> bool:
+        """Return whether descriptor ownership remains as terminal cleanup debt."""
         with self._lock:
             return self._state == self._TERMINAL_DEBT
 
     def _ensure_active_locked(self) -> None:
+        """Ensure active while holding the governing lock."""
         if self._state == self._TERMINAL_DEBT:
             raise RuntimeError(
                 "file descriptor capability is terminally poisoned by uncertain close"
@@ -6054,6 +5412,7 @@ class FileDescriptorCapability:
             raise RuntimeError("file descriptor capability is already released")
 
     def _reconcile_opened_locked(self) -> None:
+        """Reconcile opened while holding the governing lock."""
         lease = self._lease
         if lease is None:
             return
@@ -6071,21 +5430,21 @@ class FileDescriptorCapability:
             if self._opened + len(self._opening_attempts) >= self._amount:
                 raise RuntimeError("file descriptor capability exhausted")
             self._opening_attempts.add(attempt)
-            self._opening = len(self._opening_attempts)
 
     def _abort_open(self, attempt: _FdOpenAttempt) -> None:
         """Idempotently retire one exact opening reservation."""
         with self._lock:
             self._opening_attempts.discard(attempt)
-            self._opening = len(self._opening_attempts)
 
     def _commit_opened(self, attempt: _FdOpenAttempt) -> None:
+        """Commit an in-flight descriptor-open transition."""
         with self._lock:
             if attempt not in self._opening_attempts:
                 raise RuntimeError("file descriptor capability open committed without reservation")
             self._ensure_active_locked()
             lease = self._lease
-            assert lease is not None
+            if lease is None:
+                raise AssertionError("active file-descriptor capability must retain its lease")
             before = _opened_for_file_descriptor_lease(lease)
             attempt.native_before = before
             try:
@@ -6099,7 +5458,6 @@ class FileDescriptorCapability:
                     attempt.committed = True
                     self._opened = max(0, int(after))
                 self._opening_attempts.discard(attempt)
-                self._opening = len(self._opening_attempts)
                 raise
             attempt.committed = True
             exact = committed_opened
@@ -6110,19 +5468,9 @@ class FileDescriptorCapability:
             else:
                 self._opened += 1
             self._opening_attempts.discard(attempt)
-            self._opening = len(self._opening_attempts)
-
-    def _mark_opened(self) -> None:
-        """Compatibility hook for already-reserved synthetic/test opens."""
-        attempt = _FdOpenAttempt()
-        self._begin_open(attempt)
-        try:
-            self._commit_opened(attempt)
-        except BaseException:
-            self._abort_open(attempt)
-            raise
 
     def _mark_closed(self) -> None:
+        """Mark the capability closed and report whether exact accounting committed."""
         with self._lock:
             if self._state == self._TERMINAL_DEBT:
                 raise RuntimeError("terminal FD debt cannot be committed as a proven close")
@@ -6160,6 +5508,7 @@ class FileDescriptorCapability:
             # the corresponding increment never reached the Python mirror.
 
     def _retain_uncertain(self, *, label: str) -> None:
+        """Retain uncertain descriptor ownership as terminal cleanup debt."""
         with self._lock:
             if self._state in (self._CLOSED, self._TERMINAL_DEBT):
                 return
@@ -6256,7 +5605,8 @@ class FileDescriptorCapability:
                         self._mark_closed()
             raise
         else:
-            assert iterator is not None
+            if iterator is None:
+                raise AssertionError("successful iterator construction cannot return None")
             try:
                 iterator.close()
             except BaseException:
@@ -6301,7 +5651,10 @@ class FileDescriptorCapability:
                         self._mark_closed()
             raise
         else:
-            assert iterator is not None
+            if iterator is None:
+                raise AssertionError(
+                    "successful directory iterator construction cannot return None"
+                )
             try:
                 iterator.close()
             except BaseException:
@@ -6322,7 +5675,6 @@ class FileDescriptorCapability:
             if self._state == self._RELEASING:
                 raise RuntimeError("concurrent file descriptor capability release")
             if self._opening_attempts:
-                self._opening = len(self._opening_attempts)
                 raise RuntimeError(
                     "cannot release file descriptor capability while descriptors are opening"
                 )
@@ -6345,14 +5697,12 @@ class FileDescriptorCapability:
                 self._lease = None
             self._state = self._CLOSED
 
-    def close(self) -> None:
-        """Close alias used by generic keepalive/finalizer cleanup."""
-        self.release()
-
     def __enter__(self) -> "FileDescriptorCapability":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, exc_type: object, exc: BaseException | None, tb: object) -> None:
+        """Release managed resources when leaving the context."""
         try:
             self.release()
         except BaseException as cleanup_error:
@@ -6401,9 +5751,11 @@ class ExternalFileCapability:
     __slots__ = ("_capability",)
 
     def __init__(self, capability: FileDescriptorCapability) -> None:
+        """Initialize the external file capability and its owned runtime state."""
         self._capability: FileDescriptorCapability | None = capability
 
     def close(self) -> None:
+        """Release resources owned by this external file capability."""
         capability = self._capability
         if capability is None:
             return
@@ -6411,9 +5763,11 @@ class ExternalFileCapability:
         self._capability = None
 
     def __enter__(self) -> "ExternalFileCapability":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        """Release managed resources when leaving the context."""
         self.close()
 
 
@@ -6471,37 +5825,18 @@ def process_file_descriptor_snapshot() -> ProcessResourceSnapshot:
 
 
 def native_file_descriptor_snapshot() -> dict[str, int | bool]:
-    """Return the canonical native FD reserved/opened counters when available."""
+    """Return the canonical native FD reserved/opened counters."""
     native = _native_file_descriptor_api()
-    method = (
-        getattr(native, "process_file_descriptor_permits_snapshot", None)
-        if native is not None
-        else None
-    )
-    empty = {
-        "available": False,
-        "reserved": 0,
-        "opened": 0,
-        "capacity": 0,
-        "rejections": 0,
-        "protocol_violations": 0,
-        "uncertain_close_debts": 0,
-    }
-    if not callable(method):
-        return empty
     try:
-        values = tuple(method())
+        values = tuple(native.process_file_descriptor_permits_snapshot())
     except BaseException as exc:
         clear_exception_traceback(exc)
-        return {**empty, "available": True, "snapshot_failed": True}
-    if len(values) == 2:
-        reserved, capacity = map(int, values)
-        return {**empty, "available": True, "reserved": reserved, "capacity": capacity}
-    if len(values) not in (4, 6):
-        return {**empty, "available": True, "snapshot_failed": True}
-    reserved, opened, capacity, rejections = map(int, values[:4])
-    protocol_violations = int(values[4]) if len(values) >= 5 else 0
-    uncertain_close_debts = int(values[5]) if len(values) >= 6 else 0
+        return {"available": True, "snapshot_failed": True}
+    if len(values) != 6:
+        return {"available": True, "snapshot_failed": True}
+    reserved, opened, capacity, rejections, protocol_violations, uncertain_close_debts = map(
+        int, values
+    )
     return {
         "available": True,
         "reserved": reserved,
@@ -6532,6 +5867,7 @@ def close_release_guardian_thread_admission() -> None:
 
 
 def _reopen_process_resource_admission_for_tests() -> None:
+    """Reopen process resource admission for an isolated test run."""
     _THREAD_GOVERNOR.reopen_admission_for_tests()
     _FD_GOVERNOR.reopen_admission_for_tests()
     _GUARDIAN_THREAD_GOVERNOR.reopen_admission_for_tests()
@@ -6540,6 +5876,7 @@ def _reopen_process_resource_admission_for_tests() -> None:
 
 
 def _reset_after_fork() -> None:
+    """Reset process-local state inherited across a fork."""
     global _NOTIFIER_RETRY_OWNERS_LOCK, _NOTIFIER_RETRY_OWNERS, _PYTHON_GOVERNED_FDS_OPENED
     from .fork_safety import fork_quarantine_generation
 
@@ -6592,6 +5929,7 @@ class _PhysicalFileOwner:
     )
 
     def __init__(self) -> None:
+        """Initialize the physical file owner and its owned runtime state."""
         self.stream: Any | None = None
         self.lease: _Lease | None = None
         self.physical_closed = False
@@ -6601,6 +5939,7 @@ class _PhysicalFileOwner:
         self._state = self._OPEN
 
     def bind(self, stream: Any, lease: _Lease) -> None:
+        """Bind the physical resource and exact lease to this physical file owner."""
         with self._condition:
             if self.stream is not None or self.lease is not None or self.native_opened:
                 raise RuntimeError("physical file owner is already bound")
@@ -6688,6 +6027,7 @@ class _PhysicalFileOwner:
 
 
 def _cleanup_governed_file_owner_capsule(capsule: PreparedFinalizerCleanup) -> None:
+    """Cleanup governed file owner capsule."""
     owner = capsule.arg0
     if isinstance(owner, _PhysicalFileOwner):
         owner.close()
@@ -6706,6 +6046,7 @@ class GovernedFile(io.IOBase):
         finalizer_ticket: int,
         finalizer_capsule: PreparedFinalizerCleanup,
     ) -> None:
+        """Initialize the governed file and its owned runtime state."""
         super().__init__()
         self._owner: _PhysicalFileOwner | None = owner
         self._finalizer_ticket = finalizer_ticket
@@ -6719,6 +6060,7 @@ class GovernedFile(io.IOBase):
         return owner.stream
 
     def __getattr__(self, name: str) -> Any:
+        """Delegate unresolved attributes to the wrapped object."""
         owner = self._owner
         if owner is None or owner.stream is None:
             raise AttributeError(name)
@@ -6728,54 +6070,70 @@ class GovernedFile(io.IOBase):
     # and then uses these standard methods directly. IOBase supplies stubs for
     # most of them, so __getattr__ alone cannot forward the protocol.
     def read(self, size: int = -1) -> Any:
+        """Read bytes through this governed file."""
         return self._open_stream().read(size)
 
     def readline(self, size: int | None = -1) -> Any:
+        """Read one line through the governed file wrapper."""
         stream = self._open_stream()
         return stream.readline() if size is None else stream.readline(size)
 
     def readlines(self, hint: int = -1) -> Any:
+        """Read lines through the governed file wrapper."""
         return self._open_stream().readlines(hint)
 
     def write(self, data: Any) -> Any:
+        """Write bytes through this governed file."""
         return self._open_stream().write(data)
 
     def writelines(self, lines: Any) -> None:
+        """Write an iterable of lines through the governed file wrapper."""
         self._open_stream().writelines(lines)
 
     def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        """Move the governed file's stream position."""
         return int(self._open_stream().seek(offset, whence))
 
     def tell(self) -> int:
+        """Return the governed file's current stream position."""
         return int(self._open_stream().tell())
 
     def truncate(self, size: int | None = None) -> int:
+        """Resize the governed file to the requested byte length."""
         stream = self._open_stream()
         return int(stream.truncate() if size is None else stream.truncate(size))
 
     def fileno(self) -> int:
+        """Return the governed file's native descriptor number."""
         return int(self._open_stream().fileno())
 
     def flush(self) -> None:
+        """Flush buffered data through the governed file wrapper."""
         self._open_stream().flush()
 
     def isatty(self) -> bool:
+        """Return whether the governed file is attached to a terminal."""
         return bool(self._open_stream().isatty())
 
     def readable(self) -> bool:
+        """Return whether the governed file supports reading."""
         return bool(self._open_stream().readable())
 
     def writable(self) -> bool:
+        """Return whether the governed file supports writing."""
         return bool(self._open_stream().writable())
 
     def seekable(self) -> bool:
+        """Return whether the governed file supports random access."""
         return bool(self._open_stream().seekable())
 
     def __iter__(self) -> "GovernedFile":
+        """Iterate over the retained values."""
         self._open_stream()
         return self
 
     def __next__(self) -> Any:
+        """Return the next retained value."""
         return next(self._open_stream())
 
     def close(self) -> None:
@@ -6794,6 +6152,7 @@ class GovernedFile(io.IOBase):
 
     @property
     def closed(self) -> bool:
+        """Return whether the governed file has been closed."""
         owner = self._owner
         if owner is None:
             return True
@@ -6801,9 +6160,11 @@ class GovernedFile(io.IOBase):
         return bool(getattr(stream, "closed", owner.physical_closed))
 
     def __enter__(self) -> "GovernedFile":
+        """Enter the managed resource context."""
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        """Release managed resources when leaving the context."""
         self.close()
 
     def __del__(self) -> None:

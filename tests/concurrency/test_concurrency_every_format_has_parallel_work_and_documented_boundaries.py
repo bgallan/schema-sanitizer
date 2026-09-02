@@ -1,4 +1,9 @@
-"""Regression coverage for concurrency every format has parallel work and documented boundaries."""
+"""Prove that each public format has real parallel work and a documented execution boundary.
+
+JSON parsing covers worker deferral, adaptive flat-array packets, small-input fallback, and exact
+errors; adapter checks then enforce threading policy for pandas and multi-worker support for every
+public output.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,6 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import assert_exceptions_equivalent
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl import results as result_adapters
@@ -44,12 +48,15 @@ def _user_csv_rows(path: Path) -> list[dict[str, str]]:
         ]
 
 
-def _materialization_stats() -> tuple[int, int]:
-    """Return submitted materialization tasks and peak active task count."""
+def _materialization_stats() -> tuple[int, int, int]:
+    """Return submitted, started, and finished materialization task counts."""
     stats = default_pool().get().performance_stats()
-    submitted = int(stats.get("tasks", {}).get("materialization", {}).get("submitted", 0))
-    peak = int(stats.get("counters", {}).get("peak_active_tasks", 0))
-    return submitted, peak
+    tasks = stats.get("tasks", {}).get("materialization", {})
+    return (
+        int(tasks.get("submitted", 0)),
+        int(tasks.get("started", 0)),
+        int(tasks.get("finished", 0)),
+    )
 
 
 def _write_flat_array(path: Path, *, rows: int = 4_096, columns: int = 24) -> None:
@@ -91,7 +98,7 @@ def test_coverage_matrix_declares_real_json_and_pandas_parallel_stages() -> None
 
 
 def test_json_sources_defer_authoritative_parse_to_workers() -> None:
-    """JSON document arrays no longer parse each row in both coordinator and worker."""
+    """JSON document arrays parse each row exactly once."""
     source = PARALLEL_SOURCE.read_text(encoding="utf-8")
     pipeline = TEXT_PIPELINE.read_text(encoding="utf-8")
     direct = DIRECT_ROWS.read_text(encoding="utf-8")
@@ -116,10 +123,11 @@ def test_flat_json_arrays_use_adaptive_columnar_packets() -> None:
 
 @pytest.mark.parametrize("input_format", ["json", "json_array"])
 def test_large_flat_arrays_parallelize_with_exact_user_data(
-    tmp_path: Path, input_format: str
+    tmp_path: Path,
+    input_format: str,
+    require_native: None,
 ) -> None:
     """Both JSON array routes publish work and preserve ordered user data."""
-    require_native()
     source = tmp_path / f"array-{input_format}.json"
     _write_flat_array(source)
 
@@ -140,16 +148,16 @@ def test_large_flat_arrays_parallelize_with_exact_user_data(
         telemetry[mode] = _materialization_stats()
 
     assert _user_csv_rows(outputs["multi"]) == _user_csv_rows(outputs["single"])
-    assert telemetry["single"][0] == 0
+    assert telemetry["single"] == (0, 0, 0)
     assert telemetry["multi"][0] >= 2
-    assert telemetry["multi"][1] >= 2
+    assert telemetry["multi"][0] == telemetry["multi"][1] == telemetry["multi"][2]
 
 
 def test_small_json_document_avoids_artificial_column_parallelism(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """One-row documents keep a single useful materialization task in multi mode."""
-    require_native()
     source = tmp_path / "single-document.json"
     source.write_text(
         json.dumps({f"field_{index:04d}": index for index in range(1_024)}),
@@ -164,16 +172,16 @@ def test_small_json_document_avoids_artificial_column_parallelism(
         memory_limit_bytes=128 * 1024 * 1024,
         parse_integers=True,
     )
-    submitted, peak = _materialization_stats()
+    submitted, started, finished = _materialization_stats()
     assert submitted == 1
-    assert peak == 1
+    assert submitted == started == finished
 
 
 def test_json_array_object_contract_has_exact_single_multi_error(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Deferred parsing preserves the json_array object-only public contract."""
-    require_native()
     source = tmp_path / "invalid-array.json"
     source.write_text('[{"value":1},2,{"value":3}]', encoding="utf-8")
 
@@ -195,11 +203,11 @@ class _RecordingArrowTable:
     """Minimal Arrow-like table recording pandas conversion policy."""
 
     def __init__(self) -> None:
-        """Initialize the recorded keyword arguments."""
+        """Initialize the recording Arrow table test double."""
         self.calls: list[dict[str, object]] = []
 
     def to_pandas(self, **kwargs: object) -> object:
-        """Record conversion keywords and return a sentinel object."""
+        """Record pandas conversion options and return a placeholder frame."""
         self.calls.append(dict(kwargs))
         return object()
 
@@ -208,16 +216,16 @@ class _ConfigurableArrowRuntime:
     """PyArrow double exposing a verifiable process-global CPU pool width."""
 
     def __init__(self) -> None:
-        """Start serial and retain every admitted pool reconfiguration."""
+        """Initialize the configurable Arrow runtime test double."""
         self._workers = 1
         self.configurations: list[int] = []
 
     def cpu_count(self) -> int:
-        """Return the currently configured worker-pool width."""
+        """Return the controlled CPU count reported by the runtime."""
         return self._workers
 
     def set_cpu_count(self, workers: int) -> None:
-        """Apply and record the exact width selected by shared admission."""
+        """Record the CPU count selected by the controlled runtime."""
         self._workers = int(workers)
         self.configurations.append(self._workers)
 

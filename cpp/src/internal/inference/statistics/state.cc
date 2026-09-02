@@ -1,4 +1,6 @@
-// Stats storage and lookup helpers for inference.
+// Implements inference statistics storage and lookup helpers. The code keeps
+// bounded shape discovery and scalar evidence consistent across serial and
+// parallel scans.
 
 #include "internal/inference/statistics/state.hh"
 
@@ -15,14 +17,16 @@
 namespace sanitize::internal {
 namespace {
 
-// Allocates an inference stats node and all of its dynamic storage from the
-// monotonic arena. No per-node heap ownership remains after the context dies.
+/// Allocates an inference statistics node and its dynamic storage from the
+/// monotonic arena.
 StatsNode *make_node(std::pmr::monotonic_buffer_resource *arena) {
   std::pmr::polymorphic_allocator<StatsNode> allocator(arena);
   StatsNode *node = allocator.allocate(1);
   return std::construct_at(node, arena);
 }
 
+/// Grows a statistics vector geometrically before its next append would
+/// reallocate.
 template <class T> void ensure_append_capacity(std::pmr::vector<T> *values) {
   if (!values || values->size() < values->capacity()) {
     return;

@@ -1,4 +1,6 @@
-// Adapts seekable Python readers to the native ChunkSource contract.
+// Adapts seekable Python readers to the native ChunkSource contract. The
+// adapter holds Python references under the GIL while serving bounded native
+// chunks.
 
 #include "internal/abi/python_abi3/base.hh"
 
@@ -15,6 +17,7 @@
 namespace core_abi3_internal {
 namespace {
 
+/// Converts the active Python exception into a native invalid-status message.
 sanitize::Status python_reader_error_status(const char *where) {
   PyObject *type = nullptr;
   PyObject *value = nullptr;
@@ -49,6 +52,7 @@ sanitize::Status python_reader_error_status(const char *where) {
   return sanitize::Status::Invalid(message);
 }
 
+/// Releases a retained Python object reference while holding the GIL.
 void decref_python_reader_object_with_gil(const void *value) {
   if (!value || !Py_IsInitialized()) {
     return;
@@ -60,6 +64,8 @@ void decref_python_reader_object_with_gil(const void *value) {
 
 class PythonReaderChunkSource final : public sanitize::ChunkSource {
 public:
+  /// Retains a seekable Python reader and initializes native chunk offset
+  /// tracking.
   explicit PythonReaderChunkSource(PyObject *reader) : reader_(reader) {
     Py_INCREF(reader_);
     read_ = PyObject_GetAttrString(reader_, "read");
@@ -72,6 +78,8 @@ public:
     }
   }
 
+  /// Releases resources retained by `PythonReaderChunkSource` without
+  /// propagating cleanup failures.
   ~PythonReaderChunkSource() override {
     if (!reader_ || !Py_IsInitialized()) {
       return;
@@ -83,6 +91,7 @@ public:
     PyGILState_Release(gil);
   }
 
+  /// Rewinds the Python source adapter and clears its per-pass state.
   sanitize::Status Reset() override {
     if (!seek_) {
       return sanitize::Status::Invalid(
@@ -102,6 +111,8 @@ public:
     return sanitize::Status::OK();
   }
 
+  /// Returns the next bounded byte chunk from the Python source adapter,
+  /// advancing its cursor.
   sanitize::Result<sanitize::Chunk> NextChunk(int64_t max_bytes) override {
     if (max_bytes <= 0) {
       return sanitize::Status::Invalid("NextChunk: max_bytes must be > 0");
@@ -168,6 +179,8 @@ public:
     return chunk;
   }
 
+  /// Exposes the current Python source adapter bytes without extending their
+  /// documented lifetime.
   sanitize::Result<sanitize::Chunk> View() override {
     if (!full_view_) {
       SAN_RETURN_NOT_OK(Reset());
@@ -203,6 +216,8 @@ private:
 
 } // namespace
 
+/// Creates a native chunk-source adapter that retains the supplied Python
+/// reader.
 std::shared_ptr<sanitize::ChunkSource>
 make_python_reader_chunk_source(PyObject *reader) {
   return std::make_shared<PythonReaderChunkSource>(reader);

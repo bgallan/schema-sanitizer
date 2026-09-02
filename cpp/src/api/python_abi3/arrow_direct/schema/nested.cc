@@ -1,4 +1,6 @@
-// Parses nested Arrow C schema nodes for direct ingestion.
+// Parses nested Arrow C schema nodes for direct ingestion. These routines keep
+// Arrow schema interpretation and buffer ownership explicit at the ABI
+// boundary.
 
 #include "api/python_abi3/arrow_direct/schema/parser_internal.hh"
 
@@ -9,6 +11,8 @@
 
 namespace core_abi3_internal::arrow_schema_internal {
 
+/// Parses a struct recursively into its logical fields and materialization
+/// nodes.
 sanitize::Result<sanitize::LogicalType>
 parse_struct_type(const ArrowSchema *schema, ArrowInputNode *node,
                   const ArrowDirectOptions &options) {
@@ -44,6 +48,7 @@ parse_struct_type(const ArrowSchema *schema, ArrowInputNode *node,
   return out;
 }
 
+/// Parses a list child into its logical type and materialization node.
 sanitize::Result<sanitize::LogicalType>
 parse_list_type(const ArrowSchema *schema, ArrowInputNode *node,
                 ArrowNodeKind kind, const ArrowDirectOptions &options) {
@@ -63,6 +68,7 @@ parse_list_type(const ArrowSchema *schema, ArrowInputNode *node,
   return sanitize::LogicalType::List(child_type);
 }
 
+/// Parses and records the element count encoded by a fixed-size-list format.
 sanitize::Result<sanitize::LogicalType>
 parse_fixed_size_list_type(const ArrowSchema *schema, ArrowInputNode *node,
                            const ArrowDirectOptions &options) {
@@ -82,6 +88,7 @@ parse_fixed_size_list_type(const ArrowSchema *schema, ArrowInputNode *node,
   return out;
 }
 
+/// Parses an Arrow map through its single entries child and list buffer layout.
 sanitize::Result<sanitize::LogicalType>
 parse_map_type(const ArrowSchema *schema, ArrowInputNode *node,
                const ArrowDirectOptions &options) {

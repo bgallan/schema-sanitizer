@@ -1,4 +1,6 @@
-// Implements schema inference for ingestion preparation.
+// Implements schema inference for ingestion preparation. The phases combine
+// inferred or supplied schemas with options before compiling the execution
+// plan.
 
 #include "ingest/prepare/prepare_internal.hh"
 
@@ -33,6 +35,7 @@ struct InferenceProgress {
   int64_t bytes = 0;
 };
 
+/// Accumulates one inferred row and its source-byte count with saturation.
 void record_inferred_bytes(InferenceProgress *progress,
                            std::size_t row_bytes) noexcept {
   if (progress->rows < std::numeric_limits<int64_t>::max()) {
@@ -46,11 +49,14 @@ void record_inferred_bytes(InferenceProgress *progress,
                         : progress->bytes + static_cast<int64_t>(bytes);
 }
 
+/// Accumulates one inferred row into bounded preparation diagnostics.
 void record_inferred_row(InferenceProgress *progress,
                          const RowRef &row) noexcept {
   record_inferred_bytes(progress, row.raw.size());
 }
 
+/// Scans one row batch into inference statistics and releases each completed
+/// row promptly.
 sanitize::Status scan_inference_batch(internal::InferenceContext *ctx,
                                       const RowBatch &batch,
                                       const PreparedOptions &opts,
@@ -87,6 +93,8 @@ using InferenceExecutor =
     internal::OrderedExecutor<internal::OwnedRowPacket,
                               internal::InferenceEvidencePacket>;
 
+/// Derives a smaller worker policy that bounds parallel inference memory
+/// amplification.
 [[nodiscard]] internal::ExecutionPolicy
 inference_execution_policy(const internal::ExecutionPolicy &policy) noexcept {
   if (policy.effective_workers <= 1) {
@@ -111,6 +119,8 @@ inference_execution_policy(const internal::ExecutionPolicy &policy) noexcept {
   return out;
 }
 
+/// Scans owned inference packet into validated ingestion preparation evidence
+/// without losing source context.
 sanitize::Status scan_owned_inference_packet(
     internal::InferenceContext *ctx, const internal::OwnedRowPacket &packet,
     const PreparedOptions &opts, IngestDiagnostics *diagnostics,
@@ -127,6 +137,7 @@ sanitize::Status scan_owned_inference_packet(
   return sanitize::Status::OK();
 }
 
+/// Folds flat evidence packet into deterministic ingestion preparation state.
 sanitize::Status
 reduce_flat_evidence_packet(internal::InferenceContext *ctx,
                             const internal::InferenceEvidencePacket &packet,
@@ -170,6 +181,7 @@ reduce_flat_evidence_packet(internal::InferenceContext *ctx,
   return sanitize::Status::OK();
 }
 
+/// Folds evidence packet into deterministic ingestion preparation state.
 sanitize::Status reduce_evidence_packet(
     internal::InferenceContext *ctx,
     const internal::InferenceEvidencePacket &packet,
@@ -191,6 +203,8 @@ sanitize::Status reduce_evidence_packet(
   return sanitize::Status::OK();
 }
 
+/// Adds byte or item counts while clamping overflow to the representable
+/// maximum.
 [[nodiscard]] std::size_t saturating_add(std::size_t left,
                                          std::size_t right) noexcept {
   const auto max = std::numeric_limits<std::size_t>::max();
@@ -204,6 +218,7 @@ struct InferenceBatchProfile {
   std::size_t nested_values = 0;
 };
 
+/// Samples an inference batch to select a memory-bounded execution strategy.
 [[nodiscard]] InferenceBatchProfile
 profile_inference_batch(std::string_view, const RowBatch &batch) noexcept {
   constexpr std::size_t kMaxSampleRows = 256;
@@ -236,6 +251,8 @@ profile_inference_batch(std::string_view, const RowBatch &batch) noexcept {
   return profile;
 }
 
+/// Chooses parallel inference only when row shape, byte volume, and worker
+/// capacity justify it.
 [[nodiscard]] bool
 should_parallelize_inference(std::string_view frontend_name,
                              const RowBatch &batch,
@@ -290,6 +307,8 @@ should_parallelize_inference(std::string_view frontend_name,
          std::max<std::size_t>(1, profile.sampled_rows / 8);
 }
 
+/// Finishes inference serially after the parallel prefix while preserving
+/// diagnostics.
 sanitize::Status scan_remaining_inference_serial(
     FrontendHandle &frontend, internal::InferenceContext *ctx,
     const PreparedOptions &opts, IngestDiagnostics *diagnostics,
@@ -315,6 +334,8 @@ sanitize::Status scan_remaining_inference_serial(
   }
 }
 
+/// Scans inference packets concurrently and reduces evidence in deterministic
+/// source order.
 sanitize::Status scan_inference_parallel(
     std::string_view frontend_name, FrontendHandle &frontend,
     internal::InferenceContext *ctx, const PreparedOptions &opts,
@@ -442,6 +463,8 @@ sanitize::Status scan_inference_parallel(
   return executor->FinishSubmission();
 }
 
+/// Applies inference diagnostics to the final ingestion preparation result
+/// after processing completes.
 void apply_inference_diagnostics(const InferenceProgress &progress,
                                  IngestDiagnostics *diagnostics) noexcept {
   if (!diagnostics) {

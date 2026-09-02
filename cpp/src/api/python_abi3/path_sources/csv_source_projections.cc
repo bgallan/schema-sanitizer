@@ -1,4 +1,6 @@
 // Pre-reads immutable CSV headers and builds per-source physical projections.
+// The helpers preserve source order, format grouping, and bounded ownership
+// across multi-file operations.
 
 #include "api/python_abi3/path_sources/path_sources.hh"
 
@@ -26,6 +28,7 @@
 namespace core_abi3_internal {
 namespace {
 
+/// Reads the first CSV record from one path source as an optional header.
 sanitize::Result<std::optional<std::vector<std::string>>>
 csv_header_from_path_source(const PathSourceSpec &source,
                             const sanitize::PreparedOptionsPtr &prepared) {
@@ -74,6 +77,7 @@ csv_header_from_path_source(const PathSourceSpec &source,
   }
 }
 
+/// Parses a decimal CSV column key into its zero-based physical index.
 std::string numeric_column_key(std::size_t index) {
   char buffer[std::numeric_limits<std::size_t>::digits10 + 2];
   const auto [end, error] =
@@ -84,6 +88,8 @@ std::string numeric_column_key(std::size_t index) {
   return std::string(buffer, end);
 }
 
+/// Adds byte or item counts while clamping overflow to the representable
+/// maximum.
 std::size_t saturating_add(std::size_t left, std::size_t right) noexcept {
   if (right > std::numeric_limits<std::size_t>::max() - left) {
     return std::numeric_limits<std::size_t>::max();
@@ -91,6 +97,8 @@ std::size_t saturating_add(std::size_t left, std::size_t right) noexcept {
   return left + right;
 }
 
+/// Multiplies byte or item counts while clamping overflow to the representable
+/// maximum.
 std::size_t saturating_multiply(std::size_t count, std::size_t width) noexcept {
   if (width != 0U && count > std::numeric_limits<std::size_t>::max() / width) {
     return std::numeric_limits<std::size_t>::max();
@@ -98,6 +106,7 @@ std::size_t saturating_multiply(std::size_t count, std::size_t width) noexcept {
   return count * width;
 }
 
+/// Estimates retained bytes for immutable per-source CSV projection metadata.
 std::size_t projection_set_resident_bytes(
     const sanitize::internal::CsvSourceProjectionSet &set) noexcept {
   auto total = sizeof(set);
@@ -131,12 +140,19 @@ std::size_t projection_set_resident_bytes(
 
 class ProjectionMemoryLease final {
 public:
+  /// Holds a projection metadata charge against the operation memory ledger.
   ProjectionMemoryLease(
       std::shared_ptr<sanitize::internal::OperationMemoryLedger> ledger,
       std::int64_t bytes) noexcept
       : ledger_(std::move(ledger)), bytes_(bytes) {}
+
+  /// Disables copying so the memory charge is released exactly once.
   ProjectionMemoryLease(const ProjectionMemoryLease &) = delete;
+
+  /// Disables copy assignment so ledger ownership cannot be duplicated.
   ProjectionMemoryLease &operator=(const ProjectionMemoryLease &) = delete;
+
+  /// Returns the retained projection charge to its operation ledger.
   ~ProjectionMemoryLease() {
     if (ledger_) {
       ledger_->Release(bytes_);
@@ -150,6 +166,7 @@ private:
 
 } // namespace
 
+/// Pre-reads CSV headers and builds immutable per-source union projections.
 sanitize::Result<sanitize::internal::CsvSourceProjectionSetPtr>
 csv_source_projections_from_path_sources(
     std::span<const PathSourceSpec> sources,
@@ -252,6 +269,7 @@ csv_source_projections_from_path_sources(
       "CSV union source projection allocation failed");
 }
 
+/// Preflights CSV headers for union projection or exact cross-file equality.
 sanitize::Status
 validate_csv_path_source_headers(const std::vector<PathSourceSpec> &sources,
                                  const sanitize::PreparedOptionsPtr &prepared) {

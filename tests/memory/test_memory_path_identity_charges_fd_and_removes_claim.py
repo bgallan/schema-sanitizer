@@ -1,4 +1,8 @@
-"""Regression coverage for memory path identity charges fd and removes claim."""
+"""Consolidate lifecycle contracts for path claims and asynchronously owned resources.
+
+The cases span descriptor charging, bridge and coordinator termination, callback retry,
+janitor lock separation, bounded work queues, process identity, and storage completion.
+"""
 
 from __future__ import annotations
 
@@ -8,12 +12,12 @@ import time
 from concurrent.futures import Future
 from contextvars import copy_context
 from pathlib import Path
-from threading import Event, Thread
+from threading import Condition, Event, RLock, Thread
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS
+from _support.synchronization import SCHEDULER_TIMEOUT_SECONDS, join_thread_or_fail
 
 pytestmark = pytest.mark.skipif(
     os.name == "nt", reason="POSIX descriptor-relative filesystem hardening suite"
@@ -29,6 +33,7 @@ _NATIVE_STUB_MODULES = (
 
 
 def test_path_identity_charges_fd_and_removes_claim(tmp_path: Path) -> None:
+    """Verify path identity charges FD and removes claim."""
     from schema_sanitizer.core_impl.path_identity import (
         claim_path_identity,
         release_path_identity,
@@ -54,8 +59,17 @@ def test_path_identity_charges_fd_and_removes_claim(tmp_path: Path) -> None:
 
 def test_async_bridge_retains_thread_lease_until_real_finally(
     native_stub: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from schema_sanitizer.remote_impl.async_bridge import _BridgeRunner
+    """Verify async bridge retains thread lease until real finally."""
+    from schema_sanitizer.remote_impl import async_bridge as module
+
+    def start_governed_thread(thread: Thread, *, registration: Any) -> None:
+        """Start a governed thread while recording its resource lease."""
+        thread.start()
+        registration.activate()
+
+    monkeypatch.setattr(module, "start_governed_thread", start_governed_thread)
 
     started = Event()
     cancellation_observed = Event()
@@ -64,12 +78,15 @@ def test_async_bridge_retains_thread_lease_until_real_finally(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     async def stubborn() -> None:
+        """Ignore cancellation until the test releases the cleanup path."""
         started.set()
         try:
             await asyncio.sleep(3600)
@@ -81,7 +98,7 @@ def test_async_bridge_retains_thread_lease_until_real_finally(
             finalized.set()
 
     lease = Lease()
-    runner = _BridgeRunner(stubborn(), copy_context(), lease)
+    runner = module._BridgeRunner(stubborn(), copy_context(), lease)
     runner.start()
     assert started.wait(SCHEDULER_TIMEOUT_SECONDS)
     runner.cancel()
@@ -90,18 +107,20 @@ def test_async_bridge_retains_thread_lease_until_real_finally(
     assert lease.releases == 0
     assert not finalized.is_set()
     release.set()
-    runner._thread.join(SCHEDULER_TIMEOUT_SECONDS)
+    join_thread_or_fail(runner._thread)
     assert finalized.is_set()
     assert lease.releases == 1
 
 
 def test_coordinator_timeout_keeps_live_host_retryable() -> None:
+    """Verify coordinator timeout keeps live host retryable."""
     from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
 
     started = Event()
     release = Event()
 
     async def stubborn(_context: Any) -> int:
+        """Ignore cancellation until the test releases the cleanup path."""
         started.set()
         try:
             await asyncio.sleep(3600)
@@ -123,7 +142,7 @@ def test_coordinator_timeout_keeps_live_host_retryable() -> None:
     assert coordinator._submissions
 
     release.set()
-    deadline = time.monotonic() + 1
+    deadline = time.monotonic() + SCHEDULER_TIMEOUT_SECONDS
     while coordinator._submissions and time.monotonic() < deadline:
         time.sleep(0.005)
     assert future.done()
@@ -133,6 +152,7 @@ def test_coordinator_timeout_keeps_live_host_retryable() -> None:
 
 
 def test_terminal_callback_runs_off_loop_and_is_retried() -> None:
+    """Verify terminal callback runs off loop and is retried."""
     from schema_sanitizer.remote_impl.io_coordinator import RemoteIoCoordinator
 
     first_failure = Event()
@@ -146,12 +166,14 @@ def test_terminal_callback_runs_off_loop_and_is_retried() -> None:
     )
 
     async def immediate(_context: Any) -> int:
+        """Return the immediately completed awaitable result."""
         return 1
 
     future = coordinator.submit(immediate)
     owner = getattr(future, "_schema_sanitizer_remote_submission")
 
     def cleanup(_future: Future[Any]) -> None:
+        """Record the cleanup thread, failing only the first attempt."""
         nonlocal calls
         calls += 1
         callback_thread.append(__import__("threading").get_ident())
@@ -173,6 +195,7 @@ def test_terminal_callback_runs_off_loop_and_is_retried() -> None:
 def test_callbackless_storage_waits_for_real_terminal(
     native_stub: None,
 ) -> None:
+    """Verify callbackless storage waits for real terminal."""
     from schema_sanitizer.api_impl.source_plan.remote import (
         RemoteChunkPrefetchIterator,
         _StorageLeaseRollbackOwner,
@@ -180,12 +203,16 @@ def test_callbackless_storage_waits_for_real_terminal(
 
     class Lease:
         def __init__(self) -> None:
+            """Initialize the lease test double."""
             self.releases = 0
 
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             self.releases += 1
 
     iterator = object.__new__(RemoteChunkPrefetchIterator)
+    iterator._close_lock = RLock()
+    iterator._close_condition = Condition(iterator._close_lock)
     iterator._callbackless_storage_futures = {}
     iterator._failed_storage_leases = __import__("collections").deque()
     future: Future[Any] = Future()
@@ -209,23 +236,26 @@ def test_callbackless_storage_waits_for_real_terminal(
 def test_janitor_filesystem_claim_does_not_hold_global_lock(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Verify janitor filesystem claim does not hold global lock."""
     from schema_sanitizer.core_impl import temporary_janitor as module
 
     entered = Event()
     allow = Event()
 
     def blocked_claim(_path: object) -> None:
+        """Pause at the blocked claim synchronization point."""
         entered.set()
         assert allow.wait(SCHEDULER_TIMEOUT_SECONDS)
         return None
 
     class Lease:
         def release(self) -> None:
+            """Release the resource held by the lease test double."""
             return None
 
     janitor = module._TemporaryArtifactJanitor()
     monkeypatch.setattr(module, "claim_path_identity", blocked_claim)
-    monkeypatch.setattr(janitor, "_ensure_thread_locked", lambda: None)
+    monkeypatch.setattr(janitor, "_ensure_worker", lambda: None)
     worker = Thread(
         target=lambda: janitor.quarantine(tmp_path / "missing", is_dir=False, lease=Lease())
     )
@@ -234,13 +264,13 @@ def test_janitor_filesystem_claim_does_not_hold_global_lock(
     assert janitor._lock.acquire(timeout=0.1)
     janitor._lock.release()
     allow.set()
-    worker.join(SCHEDULER_TIMEOUT_SECONDS)
-    assert not worker.is_alive()
+    join_thread_or_fail(worker)
 
 
 def test_permit_operation_queues_have_bounded_removal_work(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Verify permit operation queues have bounded removal work."""
     from collections import OrderedDict
 
     from schema_sanitizer.remote_impl.io_permits import (
@@ -265,6 +295,7 @@ def test_permit_operation_queues_have_bounded_removal_work(
             effective_weight = governor._effective_weight
 
             def counted_effective_weight(waiter: _Waiter) -> int:
+                """Record counted effective weight for the enclosing assertion."""
                 nonlocal examined
                 examined += 1
                 return effective_weight(waiter)
@@ -285,6 +316,7 @@ def test_permit_operation_queues_have_bounded_removal_work(
 
 
 def test_arena_plan_is_opaque_and_queue_is_byte_bounded() -> None:
+    """Verify arena plan is opaque and queue is byte bounded."""
     root = Path(__file__).resolve().parents[2]
     header = (root / "cpp/src/internal/runtime/operation_task_arena.hh").read_text()
     source = (root / "cpp/src/internal/runtime/operation_task_arena.cc").read_text()
@@ -306,6 +338,7 @@ def test_arena_plan_is_opaque_and_queue_is_byte_bounded() -> None:
 
 
 def test_external_claim_uses_process_instance_identity() -> None:
+    """Verify external claim uses process instance identity."""
     root = Path(__file__).resolve().parents[2]
     source = (root / "src/schema_sanitizer/core_impl/path_identity.py").read_text()
     assert '"process_token"' in source

@@ -1,4 +1,6 @@
 // Dispatches Arrow value serialization for the JSONL stream writer.
+// The code validates Arrow layouts and emits deterministic JSON with correct
+// null and logical-type semantics.
 
 #include "internal/json_output/jsonl_value_writer.hh"
 
@@ -9,10 +11,13 @@
 namespace sanitize::internal::jsonl_stream_writer {
 namespace {
 
+/// Reads one bit from a non-null Arrow validity bitmap.
 bool validity_bit_is_set(const uint8_t *bitmap, int64_t index) {
   return (bitmap[index >> 3] & static_cast<uint8_t>(1u << (index & 7))) != 0;
 }
 
+/// Tests Arrow validity at the logical index, treating an absent bitmap as all
+/// valid.
 bool array_is_null(const ArrowArray &array, int64_t row) {
   if (array.null_count == 0 || !array.buffers || !array.buffers[0]) {
     return false;

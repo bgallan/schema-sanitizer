@@ -1,4 +1,6 @@
 // Validates and exports native logical-schema payloads through Arrow C Data.
+// The bridge validates required fields and transfers Arrow schema ownership
+// back to Python safely.
 
 #include "api/python_abi3/logical_schema/payload.hh"
 
@@ -23,6 +25,7 @@ namespace {
 
 constexpr const char *kArrowSchemaCapsuleName = "arrow_schema";
 
+/// Deletes the native payload owned by the corresponding Python capsule.
 void arrow_schema_capsule_destructor(PyObject *capsule) {
   if (!sanitize::internal::runtime_owner_process()) {
     return;
@@ -37,6 +40,7 @@ void arrow_schema_capsule_destructor(PyObject *capsule) {
   delete schema;
 }
 
+/// Moves logical fields into Arrow C Data layouts without retaining the schema.
 std::vector<sanitize::internal::CDataFieldLayout>
 take_field_layouts(sanitize::LogicalSchema schema) {
   std::vector<sanitize::internal::CDataFieldLayout> fields;
@@ -56,6 +60,8 @@ take_field_layouts(sanitize::LogicalSchema schema) {
 
 namespace logical_schema_payload {
 
+/// Deserializes a required logical-schema payload from a read-only Python
+/// buffer.
 sanitize::Result<sanitize::LogicalSchema> read_required(PyObject *obj) {
   PyObject *owner = nullptr;
   const std::uint8_t *data = nullptr;
@@ -83,6 +89,7 @@ sanitize::Result<sanitize::LogicalSchema> read_required(PyObject *obj) {
 
 } // namespace logical_schema_payload
 
+/// Validates that Python bytes contain a decodable logical-schema payload.
 PyObject *py_logical_schema_payload_validate(PyObject *, PyObject *args) {
   PyObject *payload_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:logical_schema_payload_validate",
@@ -97,6 +104,7 @@ PyObject *py_logical_schema_payload_validate(PyObject *, PyObject *args) {
   Py_RETURN_NONE;
 }
 
+/// Decodes a logical-schema payload and returns its root field names in order.
 PyObject *py_logical_schema_payload_field_names(PyObject *, PyObject *args) {
   PyObject *payload_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:logical_schema_payload_field_names",
@@ -127,6 +135,7 @@ PyObject *py_logical_schema_payload_field_names(PyObject *, PyObject *args) {
   return names;
 }
 
+/// Exports a logical-schema payload as an owned Arrow C schema capsule.
 PyObject *py_logical_schema_payload_arrow_c_schema(PyObject *, PyObject *args) {
   PyObject *payload_obj = nullptr;
   if (!PyArg_ParseTuple(args, "O:logical_schema_payload_arrow_c_schema",

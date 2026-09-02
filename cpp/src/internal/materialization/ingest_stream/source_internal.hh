@@ -1,4 +1,6 @@
 // Declares private state for the materializing Arrow C ingest stream.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #pragma once
 
@@ -47,6 +49,8 @@ public:
   sanitize::Status GetSchema(struct ArrowSchema *out) override;
   sanitize::Status GetNext(struct ArrowArray *out) override;
   sanitize::Status Close() override;
+  /// Returns the operation task arena associated with this stream or source
+  /// instance.
   [[nodiscard]] std::shared_ptr<OperationTaskArena>
   TaskArena() const noexcept override {
     return task_arena_keepalive_;
@@ -59,13 +63,24 @@ private:
     int64_t capacity = 0;
   };
 
+  /// Derives row, output-byte, and input-capacity limits for the next batch.
   [[nodiscard]] BatchLimits batch_limits() const;
+  /// Reports whether the current appender has reached a row or byte limit.
   [[nodiscard]] bool appender_is_full(const BatchLimits &limits) const;
+  /// Reports whether a nonempty appender has reached its output-byte target.
   [[nodiscard]] bool byte_limit_reached(const BatchLimits &limits) const;
+  /// Fetches frontend batches until a current row is available or input ends.
   sanitize::Result<bool> ensure_current_row(const BatchLimits &limits);
+  /// Materializes and appends one current row while applying the configured
+  /// error policy.
   sanitize::Result<AppendRowResult> append_current_row(const RowRef &row);
+  /// Propagates execution-context cancellation and records interrupt
+  /// diagnostics.
   sanitize::Status check_interrupt() const;
+  /// Reads and appends rows until the output batch reaches its limits.
   sanitize::Status fill_appender(const BatchLimits &limits);
+  /// Updates output and memory diagnostics after exporting a completed Arrow
+  /// batch.
   void record_finished_batch(const ArrowArray *out);
 
   std::vector<RuntimeFieldLayout> fields_;

@@ -1,4 +1,8 @@
-"""Recursive native Parquet layout summary reducer."""
+"""Recursive native Parquet layout summary reducer.
+
+It reduces nested footer fields into bounded accumulators while tracking containers,
+nullability, unsupported forms, and recursive contract evidence.
+"""
 
 from __future__ import annotations
 

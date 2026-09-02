@@ -1,4 +1,8 @@
-"""Host, Arrow C Stream, and matrix helpers for concurrency telemetry benchmarks."""
+"""Host, Arrow C Stream, and matrix helpers for concurrency telemetry benchmarks.
+
+It normalizes CPU affinity and NUMA topology, manages Arrow C streams, and constructs
+benchmark matrices.
+"""
 
 from __future__ import annotations
 
@@ -8,9 +12,10 @@ import os
 import platform
 import re
 import shutil
-import subprocess
 from pathlib import Path
 from typing import Any, Iterable
+
+from benchmarks.support.command import CAPTURE, MERGE_WITH_STDOUT, CommandError, run_command
 
 
 def parse_cpu_list(raw: str) -> tuple[int, ...]:
@@ -93,6 +98,7 @@ def apply_exact_affinity(cpus: tuple[int, ...]) -> tuple[int, ...]:
 
 
 def _read_text(path: Path) -> str | None:
+    """Read an optional host-information file, returning nothing when unavailable."""
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError:
@@ -111,6 +117,7 @@ def numa_nodes() -> dict[int, tuple[int, ...]]:
 
 
 def _core_key(cpu: int) -> tuple[int, int]:
+    """Return the physical-core identity for a logical CPU."""
     root = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology")
     package = _read_text(root / "physical_package_id")
     core = _read_text(root / "core_id")
@@ -198,16 +205,16 @@ def binding_snapshot() -> dict[str, Any]:
     executable = shutil.which("numactl")
     if executable is not None:
         try:
-            completed = subprocess.run(
+            completed = run_command(
                 [executable, "--show"],
                 check=False,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+                stdout=CAPTURE,
+                stderr=MERGE_WITH_STDOUT,
                 text=True,
                 timeout=5,
             )
             numactl_policy = completed.stdout.strip() or None
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, CommandError):
             numactl_policy = None
     return {
         "cpu_affinity": list(current_affinity()),
@@ -296,6 +303,7 @@ ArrowArrayStream._fields_ = [
 
 
 def _stream_error(stream: ctypes.POINTER(ArrowArrayStream), operation: str) -> RuntimeError:
+    """Decode an Arrow C Stream release error if one was reported."""
     message = stream.contents.get_last_error(stream) if stream.contents.get_last_error else None
     detail = message.decode("utf-8", errors="replace") if message else "unknown error"
     return RuntimeError(f"Arrow C Stream {operation} failed: {detail}")

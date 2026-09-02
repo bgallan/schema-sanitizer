@@ -1,4 +1,7 @@
 // Coordinates native task execution across concurrent public operations.
+// Fair registrations share visible CPU capacity while stop-aware leases
+// bound activity.
+
 #pragma once
 
 #include "internal/runtime/cpu_capacity.hh"
@@ -18,12 +21,17 @@ class ProcessCpuGovernor final {
 public:
   class TaskLease final {
   public:
+    /// Creates an empty process CPU task lease.
     TaskLease() = default;
+    /// Owns one admitted CPU task slot and its measured wait state.
     TaskLease(ProcessCpuGovernor *owner, std::int64_t wait_ns,
               bool waited) noexcept
         : owner_(owner), wait_ns_(wait_ns), waited_(waited) {}
+    /// Disables copying the process CPU task lease.
     TaskLease(const TaskLease &) = delete;
+    /// Disables copy assignment for the process CPU task lease.
     TaskLease &operator=(const TaskLease &) = delete;
+    /// Transfers ownership from another process CPU task lease.
     TaskLease(TaskLease &&other) noexcept
         : owner_(other.owner_), wait_ns_(other.wait_ns_),
           waited_(other.waited_) {
@@ -31,6 +39,7 @@ public:
       other.wait_ns_ = 0;
       other.waited_ = false;
     }
+    /// Transfers owned state from another process CPU task lease.
     TaskLease &operator=(TaskLease &&other) noexcept {
       if (this != &other) {
         Release();
@@ -43,12 +52,16 @@ public:
       }
       return *this;
     }
+    /// Returns the admitted task slot to the process CPU governor.
     ~TaskLease() { Release(); }
 
+    /// Returns nanoseconds spent waiting for process CPU admission.
     [[nodiscard]] std::int64_t wait_ns() const noexcept { return wait_ns_; }
+    /// Reports whether CPU admission required blocking.
     [[nodiscard]] bool waited() const noexcept { return waited_; }
 
   private:
+    /// Returns this lease's admitted task slot when one is owned.
     void Release() noexcept {
       if (owner_) {
         owner_->ReleaseTask();
@@ -63,20 +76,32 @@ public:
 
   class Registration final {
   public:
+    /// Creates an empty operation registration with the process
+    /// CPU governor.
     Registration() = default;
+    /// Registers multi-worker operation demand with the process
+    /// CPU governor.
     Registration(ProcessCpuGovernor *owner, std::size_t worker_count) noexcept
         : owner_(worker_count > 1U ? owner : nullptr), width_(worker_count) {
       if (owner_) {
         owner_->Register();
       }
     }
+    /// Disables copying the operation registration with the process
+    /// CPU governor.
     Registration(const Registration &) = delete;
+    /// Disables copy assignment for the operation registration with the
+    /// process CPU governor.
     Registration &operator=(const Registration &) = delete;
+    /// Transfers ownership from another operation registration with the
+    /// process CPU governor.
     Registration(Registration &&other) noexcept
         : owner_(other.owner_), width_(other.width_) {
       other.owner_ = nullptr;
       other.width_ = 0U;
     }
+    /// Transfers owned state from another operation registration with the
+    /// process CPU governor.
     Registration &operator=(Registration &&other) noexcept {
       if (this != &other) {
         Release();
@@ -87,14 +112,17 @@ public:
       }
       return *this;
     }
+    /// Removes this operation from process CPU demand accounting.
     ~Registration() { Release(); }
 
+    /// Waits cooperatively for one process CPU task slot.
     [[nodiscard]] TaskLease
     Acquire(sanitize::internal::StopToken stop) noexcept {
       return owner_ ? owner_->AcquireTask(stop, width_) : TaskLease{};
     }
 
   private:
+    /// Removes this operation from process CPU demand accounting once.
     void Release() noexcept {
       if (owner_) {
         owner_->Unregister();
@@ -106,10 +134,12 @@ public:
     std::size_t width_ = 0U;
   };
 
+  /// Registers an operation's logical worker demand with the CPU governor.
   [[nodiscard]] Registration
   MakeRegistration(std::size_t worker_count) noexcept {
     return Registration(this, worker_count);
   }
+  /// Returns the process CPU task capacity currently enforced.
   [[nodiscard]] std::int64_t capacity() noexcept { return RefreshCapacity(); }
 
 private:
@@ -117,15 +147,18 @@ private:
     Waiter *next = nullptr;
   };
 
+  /// Initializes an empty process-wide CPU admission queue.
   ProcessCpuGovernor() = default;
 
   static constexpr auto kCapacityRefreshPeriod = std::chrono::milliseconds(250);
 
+  /// Returns the last published positive process CPU capacity.
   [[nodiscard]] std::int64_t CachedCapacity() const noexcept {
     return std::max<std::int64_t>(
         1, cached_capacity_.load(std::memory_order_acquire));
   }
 
+  /// Detects and publishes current CPU capacity, waking waiters on changes.
   [[nodiscard]] std::int64_t RefreshCapacity() noexcept {
     // available_cpu_capacity() may inspect affinity and, periodically, the
     // cgroup hierarchy. Always sample before acquiring mutex_ so OS I/O cannot
@@ -140,16 +173,19 @@ private:
     return detected;
   }
 
+  /// Adds one multi-worker operation to process CPU demand accounting.
   void Register() noexcept {
     registered_arenas_.fetch_add(1, std::memory_order_acq_rel);
     ready_.notify_all();
   }
 
+  /// Removes one multi-worker operation from process CPU demand accounting.
   void Unregister() noexcept {
     registered_arenas_.fetch_sub(1, std::memory_order_acq_rel);
     ready_.notify_all();
   }
 
+  /// Appends a waiter to the process CPU admission FIFO.
   void Enqueue(Waiter *waiter) noexcept {
     if (tail_) {
       tail_->next = waiter;
@@ -159,6 +195,7 @@ private:
     tail_ = waiter;
   }
 
+  /// Removes a waiter from the process CPU admission FIFO if still present.
   void Remove(Waiter *waiter) noexcept {
     Waiter *previous = nullptr;
     auto *current = head_;
@@ -180,6 +217,7 @@ private:
     current->next = nullptr;
   }
 
+  /// Acquires one stop-aware CPU task lease using fair process-wide admission.
   [[nodiscard]] TaskLease AcquireTask(sanitize::internal::StopToken stop,
                                       std::size_t arena_width) noexcept {
     const auto current_capacity = RefreshCapacity();
@@ -247,6 +285,7 @@ private:
     return TaskLease(this, std::max<std::int64_t>(0, elapsed), contended);
   }
 
+  /// Returns one active task slot and wakes queued CPU waiters.
   void ReleaseTask() noexcept {
     {
       std::lock_guard lock(mutex_);
@@ -266,6 +305,7 @@ private:
   friend ProcessCpuGovernor &process_cpu_governor() noexcept;
 };
 
+/// Returns the singleton coordinating CPU capacity across operations.
 [[nodiscard]] inline ProcessCpuGovernor &process_cpu_governor() noexcept {
   static auto *governor = new ProcessCpuGovernor();
   return *governor;

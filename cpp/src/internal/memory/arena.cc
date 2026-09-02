@@ -1,4 +1,6 @@
-// Provides a bump arena for short-lived ingestion allocations.
+// Implements stable bump allocation for short-lived ingestion data.
+// Ordinary blocks are reused across resets while exceptional blocks return
+// to the pool.
 
 #include "internal/memory/arena.hh"
 
@@ -15,7 +17,7 @@ namespace sanitize::internal {
 
 namespace {
 
-// Adds sizes or throws when the result cannot be represented.
+/// Adds two block sizes or throws when the result cannot be represented.
 std::size_t checked_add(std::size_t a, std::size_t b) {
   if (a > std::numeric_limits<std::size_t>::max() - b) {
     throw std::bad_alloc();
@@ -23,7 +25,7 @@ std::size_t checked_add(std::size_t a, std::size_t b) {
   return a + b;
 }
 
-// Normalizes alignment.
+/// Rounds a positive alignment up to a representable power of two.
 std::size_t normalize_alignment(std::size_t align) {
   if (align == 0) {
     return 1;

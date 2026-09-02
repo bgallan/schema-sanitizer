@@ -42,6 +42,7 @@ class ControlPlaneBudgetSnapshot:
 
     @property
     def governed_bytes(self) -> int:
+        """Return the governed bytes."""
         return self.static_baseline_bytes + self.reserved_bytes
 
 
@@ -57,6 +58,7 @@ class _ControlPlaneCapability:
     __slots__ = ("pid", "token", "released", "retire_requested")
 
     def __init__(self, pid: int) -> None:
+        """Initialize the control plane capability and its owned runtime state."""
         self.pid = int(pid)
         self.token = 0
         self.released = False
@@ -87,6 +89,7 @@ class ControlPlaneTicket:
         retire_requested: bool = False,
         capability: object | None = None,
     ) -> None:
+        """Initialize the control plane ticket and its owned runtime state."""
         self.amount = amount
         self.kind = kind
         self.pid = pid
@@ -103,6 +106,7 @@ class ControlPlaneTicket:
 
     @property
     def released(self) -> bool:
+        """Return whether the resource has been released."""
         capability = self.capability
         if isinstance(capability, _ControlPlaneCapability):
             return bool(capability.released)
@@ -110,6 +114,7 @@ class ControlPlaneTicket:
 
     @released.setter
     def released(self, value: bool) -> None:
+        """Set whether this ticket has released its control-plane capability."""
         self._released_mirror = bool(value)
         capability = self.capability
         if isinstance(capability, _ControlPlaneCapability):
@@ -117,6 +122,7 @@ class ControlPlaneTicket:
 
     @property
     def retire_requested(self) -> bool:
+        """Return whether terminal retirement was requested."""
         capability = self.capability
         if isinstance(capability, _ControlPlaneCapability):
             return bool(capability.retire_requested)
@@ -124,6 +130,7 @@ class ControlPlaneTicket:
 
     @retire_requested.setter
     def retire_requested(self, value: bool) -> None:
+        """Set whether terminal retirement was requested."""
         self._retire_requested_mirror = bool(value)
         capability = self.capability
         if isinstance(capability, _ControlPlaneCapability):
@@ -145,32 +152,22 @@ class ControlPlaneTicket:
 
 
 class _ControlPlaneOwnerEntry:
-    """Ledger-rooted capability plus a weak compatibility view of its wrapper."""
+    """Ledger-rooted capability plus a weak view of its caller wrapper."""
 
     __slots__ = ("capability", "amount", "ticket_ref")
 
     def __init__(
         self, ticket: ControlPlaneTicket, capability: _ControlPlaneCapability, amount: int
     ) -> None:
+        """Initialize the control plane owner entry and its owned runtime state."""
         self.capability = capability
         self.amount = amount
         self.ticket_ref = weakref.ref(ticket)
 
-    def __getitem__(self, index: int) -> object:
-        # Historical focused tests treated owner entries as
-        # ``(ticket, capability, amount)``. Preserve that read-only shape without
-        # strongly rooting the wrapper and reopening commit->handoff leaks.
-        if index == 0:
-            return self.ticket_ref()
-        if index == 1:
-            return self.capability
-        if index == 2:
-            return self.amount
-        raise IndexError(index)
-
 
 class _ProcessControlPlaneBudget:
     def __init__(self, *, include_static_baseline: bool = False) -> None:
+        """Initialize the process control plane budget and its owned runtime state."""
         self._lock = Lock()
         self._include_static_baseline = include_static_baseline
         self._pid = os.getpid()
@@ -212,6 +209,7 @@ class _ProcessControlPlaneBudget:
         self._native_shadow_dirty = False
 
     def _ensure_process_locked(self) -> None:
+        """Ensure the owner belongs to the active process while holding its lock."""
         pid = os.getpid()
         if self._pid == pid:
             return
@@ -244,6 +242,7 @@ class _ProcessControlPlaneBudget:
         self._fork_fresh_owners = owners
 
     def clear_fork_preparation(self) -> None:
+        """Clear state established while preparing for a fork."""
         self._fork_fresh_lock = None
         self._fork_fresh_init_lock = None
         self._fork_fresh_owners = None
@@ -332,6 +331,7 @@ class _ProcessControlPlaneBudget:
         return not self._corrupted
 
     def _static_baseline_bytes_locked(self) -> int:
+        """Return static control-plane bytes while holding the budget lock."""
         if not self._include_static_baseline:
             return 0
         from .static_control_plane import static_control_plane_bytes
@@ -340,34 +340,19 @@ class _ProcessControlPlaneBudget:
 
     def prewarm_native_shadow(self) -> bool:
         """Resolve/create the zero-byte native shadow outside admission locks."""
-        if getattr(self, "_native_shadow_capsule", None) is not None:
+        if self._native_shadow_capsule is not None:
             return True
         with self._native_init_lock:
-            if self._native_shadow_capsule is not None:
+            initialized: object | None = getattr(self, "_native_shadow_capsule")
+            if initialized is not None:
                 return True
-            try:
-                from types import ModuleType
+            from .native_runtime import native_core
 
-                from .native_runtime import native_core
-
-                if not isinstance(native_core, ModuleType):
-                    return False
-                create = getattr(native_core, "operation_memory_ledger_create", None)
-                reserve_snapshot = getattr(
-                    native_core, "operation_memory_ledger_reserve_snapshot", None
-                )
-                release = getattr(native_core, "operation_memory_ledger_release", None)
-                snapshot = getattr(native_core, "operation_memory_ledger_snapshot", None)
-                if (
-                    not callable(create)
-                    or not callable(reserve_snapshot)
-                    or not callable(release)
-                    or not callable(snapshot)
-                ):
-                    return False
-                capsule = create(_MAX_CAPACITY_BYTES)
-            except BaseException:
-                return False
+            create = native_core.operation_memory_ledger_create
+            reserve_snapshot = native_core.operation_memory_ledger_reserve_snapshot
+            release = native_core.operation_memory_ledger_release
+            snapshot = native_core.operation_memory_ledger_snapshot
+            capsule = create(_MAX_CAPACITY_BYTES)
             self._native_create = create
             self._native_reserve_snapshot = reserve_snapshot
             self._native_release = release
@@ -378,22 +363,15 @@ class _ProcessControlPlaneBudget:
             return True
 
     def _sync_native_shadow_locked(self, target: int) -> bool:
-        """Mirror ``target`` governed bytes into the exact native process pool.
-
-        This method is called only while the process governed-admission lock is
-        held. Focused source-only tests intentionally lack the ABI3 extension and
-        keep the previous independently bounded Python-only behavior.
-        """
-        if self._native_shadow_capsule is None and not self.prewarm_native_shadow():
-            return False
+        """Mirror ``target`` governed bytes into the exact native process pool."""
+        if self._native_shadow_capsule is None:
+            self.prewarm_native_shadow()
         reserve_snapshot = self._native_reserve_snapshot
         release = self._native_release
         snapshot = self._native_snapshot
-        if not callable(reserve_snapshot) or not callable(release) or not callable(snapshot):
-            return False
         capsule = self._native_shadow_capsule
-        if capsule is None:
-            return False
+        if reserve_snapshot is None or release is None or snapshot is None or capsule is None:
+            raise RuntimeError("native control-plane shadow was not initialized")
         if self._native_shadow_dirty:
             values = snapshot(capsule)
             if not isinstance(values, tuple) or len(values) != 3:
@@ -440,6 +418,7 @@ class _ProcessControlPlaneBudget:
             return active, self._native_shadow_bytes if active else 0
 
     def configure(self, capacity_bytes: int) -> None:
+        """Configure this process control plane budget from the active operation limits."""
         if type(capacity_bytes) is not int:
             raise TypeError("control-plane capacity must be an exact integer")
         if capacity_bytes <= 0 or capacity_bytes > _MAX_CAPACITY_BYTES:
@@ -459,16 +438,18 @@ class _ProcessControlPlaneBudget:
             self._capacity = capacity_bytes
 
     def reserve(self, kind: str, amount: int) -> ControlPlaneTicket:
+        """Reserve governed capacity through this process control plane budget."""
         if type(kind) is not str or type(amount) is not int:
             raise TypeError("control-plane reservation metadata must be exact")
         if amount < _MIN_TICKET_BYTES:
             raise ValueError(f"control-plane reservation must be >= {_MIN_TICKET_BYTES} bytes")
-        from .memory_budget import _optional_process_resident_memory_snapshot
+        from .memory_budget import _raw_process_resident_memory_snapshot
 
         self.prewarm_native_shadow()
         ticket = ControlPlaneTicket(amount, kind, os.getpid())
         capability = ticket.capability
-        assert isinstance(capability, _ControlPlaneCapability)
+        if not isinstance(capability, _ControlPlaneCapability):
+            raise AssertionError("control-plane ticket must carry its private capability")
         with _GOVERNED_MEMORY_ADMISSION_LOCK:
             with self._lock:
                 self._ensure_process_locked()
@@ -503,16 +484,13 @@ class _ProcessControlPlaneBudget:
                     or (self._free_token_count == 0 and self._sequence >= _MAX_TICKET_TOKEN)
                 )
                 if not exhausted:
-                    resident = _optional_process_resident_memory_snapshot()
-                    if resident is not None:
-                        combined = resident.reserved_bytes + (
-                            amount if native_shadow_active else next_governed_control
-                        )
-                        if combined > resident.capacity_bytes:
-                            exhausted = True
-                            limit_name = "process_governed_memory_bytes"
-                            limit_bytes = resident.capacity_bytes
-                            actual_bytes = combined
+                    resident = _raw_process_resident_memory_snapshot()
+                    combined = resident.reserved_bytes + amount
+                    if combined > resident.capacity_bytes:
+                        exhausted = True
+                        limit_name = "process_governed_memory_bytes"
+                        limit_bytes = resident.capacity_bytes
+                        actual_bytes = combined
                 if exhausted:
                     try:
                         self._rejected += 1
@@ -616,6 +594,7 @@ class _ProcessControlPlaneBudget:
         return ticket
 
     def _release_capability(self, capability: _ControlPlaneCapability, token: int) -> bool:
+        """Release one exact control-plane ticket capability."""
         if capability.released:
             return True
         if capability.pid != os.getpid():
@@ -690,7 +669,6 @@ class _ProcessControlPlaneBudget:
                 # membership or manufacture headroom.
                 self._release_native_shadow_locked(authoritative_amount)
                 if can_recycle:
-                    # pass50 compatibility breadcrumb: self._free_tokens[self._free_token_tail]
                     self._free_tokens[recycle_tail] = token
                     self._free_token_tail = next_recycle_tail
                     self._free_token_count = next_recycle_count
@@ -767,6 +745,7 @@ class _ProcessControlPlaneBudget:
         return progressed
 
     def snapshot(self) -> ControlPlaneBudgetSnapshot:
+        """Return a bounded snapshot of the current process control plane budget."""
         with self._lock:
             self._ensure_process_locked()
             self._reconcile_counters_locked()
@@ -806,12 +785,8 @@ def register_static_control_plane(kind: str, amount: int) -> None:
 
     register(kind, amount)
     # Registration is a mutation, so shadow reconciliation belongs here rather
-    # than in diagnostic snapshots. Early import/source-only runtimes simply
-    # defer reconciliation until the first governed admission.
-    try:
-        synchronize_control_plane_native_shadow()
-    except BaseException:
-        pass
+    # than in diagnostic snapshots.
+    synchronize_control_plane_native_shadow()
 
 
 from .static_control_plane import (  # noqa: E402
@@ -847,10 +822,12 @@ def defer_control_plane_release(ticket: ControlPlaneTicket | None) -> bool:
 
 
 def drain_deferred_control_plane_releases(*, limit: int = 256) -> int:
+    """Drain deferred control plane releases."""
     return _PROCESS_CONTROL_PLANE_BUDGET.drain_requested_retirements(limit=limit)
 
 
 def _synchronize_control_plane_native_shadow_under_admission_lock() -> tuple[bool, int]:
+    """Synchronize native control-plane accounting under the admission lock."""
     return _PROCESS_CONTROL_PLANE_BUDGET.ensure_native_shadow_under_admission_lock()
 
 
@@ -897,18 +874,21 @@ _FORK_FRESH_ADMISSION_LOCK: Lock | None = None
 
 
 def _prepare_control_plane_for_fork() -> None:
+    """Prepare control plane for fork."""
     global _FORK_FRESH_ADMISSION_LOCK
     _FORK_FRESH_ADMISSION_LOCK = _FORK_ADMISSION_LOCK_BANK[_FORK_ADMISSION_LOCK_BANK_INDEX]
     _PROCESS_CONTROL_PLANE_BUDGET.prepare_for_fork()
 
 
 def _clear_control_plane_fork_preparation() -> None:
+    """Clear control plane fork preparation."""
     global _FORK_FRESH_ADMISSION_LOCK
     _FORK_FRESH_ADMISSION_LOCK = None
     _PROCESS_CONTROL_PLANE_BUDGET.clear_fork_preparation()
 
 
 def _reset_control_plane_after_fork() -> None:
+    """Reset control plane after fork."""
     global \
         _GOVERNED_MEMORY_ADMISSION_LOCK, \
         _FORK_FRESH_ADMISSION_LOCK, \

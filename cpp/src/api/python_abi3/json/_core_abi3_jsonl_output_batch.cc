@@ -1,9 +1,10 @@
 /*
- * ABI3 JSONL Arrow batch extraction helpers.
+ * Implements ABI3 JSONL Arrow batch extraction helpers.
  *
  * This translation unit owns the PyArrow `__arrow_c_array__` protocol handling
  * used by both single-batch and multi-batch JSONL byte encoders.
  */
+
 #include "api/python_abi3/json/_core_abi3_jsonl_output_parts.hh"
 
 #include "nanoarrow/nanoarrow.h"

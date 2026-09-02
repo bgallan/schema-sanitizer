@@ -1,3 +1,7 @@
+// Builds recursive Arrow map, struct, and list schemas for native Parquet
+// output. This fragment is included by the consolidated footer reader inside
+// its private implementation namespace.
+
 sanitize::Status build_native_recursive_map_schema(
     const NativeRecursiveSchemaSource &source,
     const NativeRecursiveMaterializationTree &tree,
@@ -34,6 +38,8 @@ sanitize::Status build_native_recursive_map_schema(
   return {};
 }
 
+/// Builds native recursive struct schema from validated Parquet metadata while
+/// preserving Arrow ownership and nesting contracts.
 sanitize::Status build_native_recursive_struct_schema(
     const NativeRecursiveSchemaSource &source,
     const NativeRecursiveMaterializationTree &tree,
@@ -69,6 +75,8 @@ sanitize::Status build_native_recursive_struct_schema(
   return {};
 }
 
+/// Builds native recursive complex list schema from validated Parquet metadata
+/// while preserving Arrow ownership and nesting contracts.
 sanitize::Status build_native_recursive_complex_list_schema(
     const NativeRecursiveSchemaSource &source,
     const NativeRecursiveMaterializationTree &tree,

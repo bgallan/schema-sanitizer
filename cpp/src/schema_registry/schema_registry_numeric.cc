@@ -1,4 +1,6 @@
-// Normalizes durable integer/float families in schema-registry trees.
+// Normalizes durable integer and float families in schema-registry trees.
+// Recursive promotion prevents repeated numeric drift while retaining container
+// shape and nonnumeric field semantics.
 
 #include "schema_registry/schema_registry_internal.hh"
 
@@ -15,27 +17,27 @@
 namespace sanitize {
 namespace {
 
-// Returns whether a field stores a scalar signed integer.
+/// Returns whether a field stores a scalar signed integer.
 bool is_scalar_integer_type(const LogicalField &field) noexcept {
   return field.type && field.type->kind == LogicalKind::kInt64;
 }
 
-// Returns whether a field stores a scalar double-precision value.
+/// Returns whether a field stores a scalar double-precision value.
 bool is_scalar_float_type(const LogicalField &field) noexcept {
   return field.type && field.type->kind == LogicalKind::kFloat64;
 }
 
-// Returns whether a field belongs to the promotable integer/float family.
+/// Returns whether a field belongs to the promotable integer/float family.
 bool is_scalar_numeric_type(const LogicalField &field) noexcept {
   return is_scalar_integer_type(field) || is_scalar_float_type(field);
 }
 
-// Returns the borrowed base name used to group one version family.
+/// Returns the borrowed base name used to group one version family.
 std::string_view family_base_name(const LogicalField &field) noexcept {
   return internal::variant_family_base(field.name);
 }
 
-// Rewrites a generated version suffix only when its semantic type changed.
+/// Rewrites a generated version suffix only when its semantic type changed.
 void canonicalize_versioned_name_for_type(LogicalField &field) {
   const auto parsed = internal::parse_versioned_field_name(field.name);
   if (!parsed || !field.type)
@@ -53,7 +55,7 @@ struct NumericFamilyPlan {
   std::optional<std::size_t> first_float_position;
   std::optional<std::size_t> unversioned_numeric_position;
 
-  // Returns the one numeric field retained when a family contains floats.
+  /// Returns the one numeric field retained when a family contains floats.
   [[nodiscard]] std::optional<std::size_t> keep_position() const noexcept {
     if (!has_float)
       return std::nullopt;
@@ -62,10 +64,10 @@ struct NumericFamilyPlan {
   }
 };
 
-// Normalizes integer/float families nested below one logical type.
+/// Normalizes integer/float families nested below one logical type.
 void normalize_integer_float_type(LogicalType &type);
 
-// Collapses promotable numeric siblings while preserving field order.
+/// Collapses promotable numeric siblings while preserving field order.
 void normalize_integer_float_fields(std::vector<LogicalField> &fields) {
   for (auto &field : fields) {
     if (field.type)
@@ -132,7 +134,7 @@ void normalize_integer_float_fields(std::vector<LogicalField> &fields) {
   fields = std::move(out);
 }
 
-// Recursively normalizes numeric families in struct and list children.
+/// Recursively normalizes numeric families in struct and list children.
 void normalize_integer_float_type(LogicalType &type) {
   if (type.kind == LogicalKind::kStruct) {
     normalize_integer_float_fields(type.fields);

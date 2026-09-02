@@ -1,4 +1,8 @@
-"""Regression coverage for the reader linear-complexity contract."""
+"""Regression coverage for the reader linear-complexity contract.
+
+It checks recorded evidence, round-robin measurement, noise resistance,
+persistent-regression detection, provenance, and documented native-reader budgets.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,6 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from conftest import require_native
 
 from benchmarks.readers import linear_scaling
 
@@ -20,12 +23,15 @@ BUDGET = ROOT / "benchmarks" / "readers" / "linear_scaling_budget.json"
 
 class _ManualClock:
     def __init__(self) -> None:
+        """Initialize manual clock state for now."""
         self.now = 0
 
     def __call__(self) -> int:
+        """Return the current value of the manual benchmark clock."""
         return self.now
 
     def advance(self, duration: int) -> None:
+        """Advance the manual benchmark clock by the requested duration."""
         self.now += duration
 
 
@@ -51,9 +57,8 @@ def test_recorded_reader_linear_scaling_evidence_stays_within_budget() -> None:
     )
 
 
-def test_reader_linear_scaling_harness_runs_all_text_frontends() -> None:
+def test_reader_linear_scaling_harness_runs_all_text_frontends(require_native: None) -> None:
     """A tiny smoke run protects the executable benchmark contract."""
-    require_native()
     initial_sys_path = list(sys.path)
     report = linear_scaling.run(ROOT, sizes=[8, 16], repeats=1)
     assert sys.path == initial_sys_path
@@ -110,6 +115,7 @@ def test_round_robin_median_rejects_one_shared_runner_noise_epoch() -> None:
     cases = ("csv_single", "csv_multi", "jsonl_single")
 
     def timed_call(ordinal: int) -> None:
+        """Record and return the configured synthetic timing sample."""
         clock.advance(10_000 if ordinal == 0 else 10)
 
     samples = linear_scaling._measure_round_robin(
@@ -130,9 +136,11 @@ def test_round_robin_median_preserves_a_persistent_300x_regression() -> None:
     clock = _ManualClock()
 
     def normal(_: int) -> None:
+        """Return the baseline timing sample."""
         clock.advance(10)
 
     def regressed(_: int) -> None:
+        """Return the intentionally regressed timing sample."""
         clock.advance(3_000)
 
     samples = linear_scaling._measure_round_robin(
@@ -147,6 +155,7 @@ def test_round_robin_median_preserves_a_persistent_300x_regression() -> None:
 
 
 def _synthetic_report(budget: dict[str, object], *, ratios: dict[str, float]) -> dict[str, object]:
+    """Build a deterministic reader-scaling report for latency-gate tests."""
     reference = budget["reference"]
     assert isinstance(reference, dict)
     cases = reference["cases"]
@@ -181,7 +190,7 @@ def _synthetic_report(budget: dict[str, object], *, ratios: dict[str, float]) ->
 
 
 def test_static_latency_gate_catches_constant_30x_regression_with_linear_slope() -> None:
-    """Linear-but-slow readers must fail even when the old slope gate stays green."""
+    """Linear-but-slow readers fail even when normalized growth stays green."""
     budget = linear_scaling.load_latency_budget(BUDGET)
     report = linear_scaling.evaluate_report(
         _synthetic_report(budget, ratios={"xml_single": 30.0}),
@@ -231,6 +240,94 @@ def test_static_latency_gate_scales_reference_and_tolerates_runner_variance() ->
         assert all(sample["within_budget"] for sample in case["samples"])
 
 
+def test_failure_confirmation_accepts_one_transient_runner_slowdown() -> None:
+    """One noisy hosted-runner sample cannot become a product regression."""
+    budget = linear_scaling.load_latency_budget(BUDGET)
+    measurements = iter(
+        (
+            _synthetic_report(budget, ratios={"csv_multi": 30.0}),
+            _synthetic_report(budget, ratios={}),
+        )
+    )
+
+    report = linear_scaling.evaluate_with_failure_confirmations(
+        lambda: next(measurements),
+        maximum_normalized_growth=8.0,
+        latency_budget=budget,
+        failure_confirmations=2,
+    )
+
+    confirmation = report["failure_confirmation"]
+    assert report["within_budget"] is True
+    assert report["failures"] == {}
+    assert confirmation["attempts_executed"] == 2
+    assert confirmation["required_consecutive_failures"] == 3
+    assert [attempt["within_budget"] for attempt in confirmation["attempts"]] == [False, True]
+    assert set(confirmation["attempts"][0]["failures"]["absolute_latency"]) == {"csv_multi"}
+
+
+def test_failure_confirmation_rejects_a_persistent_regression() -> None:
+    """A repeatable slowdown remains blocking after every fresh measurement."""
+    budget = linear_scaling.load_latency_budget(BUDGET)
+    calls = 0
+
+    def measure() -> dict[str, object]:
+        """Return another synthetic report containing the persistent slowdown."""
+        nonlocal calls
+        calls += 1
+        return _synthetic_report(budget, ratios={"csv_multi": 30.0})
+
+    report = linear_scaling.evaluate_with_failure_confirmations(
+        measure,
+        maximum_normalized_growth=8.0,
+        latency_budget=budget,
+        failure_confirmations=2,
+    )
+
+    confirmation = report["failure_confirmation"]
+    assert calls == 3
+    assert report["within_budget"] is False
+    assert set(report["failures"]["absolute_latency"]) == {"csv_multi"}
+    assert confirmation["attempts_executed"] == 3
+    assert all(not attempt["within_budget"] for attempt in confirmation["attempts"])
+
+
+def test_failure_confirmation_does_not_repeat_a_healthy_measurement() -> None:
+    """The normal CI path still executes the benchmark exactly once."""
+    budget = linear_scaling.load_latency_budget(BUDGET)
+    calls = 0
+
+    def measure() -> dict[str, object]:
+        """Return another healthy synthetic report for the fast-path assertion."""
+        nonlocal calls
+        calls += 1
+        return _synthetic_report(budget, ratios={})
+
+    report = linear_scaling.evaluate_with_failure_confirmations(
+        measure,
+        maximum_normalized_growth=8.0,
+        latency_budget=budget,
+        failure_confirmations=2,
+    )
+
+    assert calls == 1
+    assert report["within_budget"] is True
+    assert report["failure_confirmation"]["attempts_executed"] == 1
+
+
+def test_failure_confirmation_rejects_a_negative_retry_count() -> None:
+    """Invalid confirmation policy cannot silently disable the performance gate."""
+    budget = linear_scaling.load_latency_budget(BUDGET)
+
+    with pytest.raises(ValueError, match="must be non-negative"):
+        linear_scaling.evaluate_with_failure_confirmations(
+            lambda: _synthetic_report(budget, ratios={}),
+            maximum_normalized_growth=8.0,
+            latency_budget=budget,
+            failure_confirmations=-1,
+        )
+
+
 def test_static_latency_budget_is_versioned_and_covers_every_case() -> None:
     """The independent policy identifies the known-good release and exact cases."""
     budget = linear_scaling.load_latency_budget(BUDGET)
@@ -267,9 +364,8 @@ def test_static_latency_budget_requires_every_platform_artifact(tmp_path: Path) 
         linear_scaling.load_latency_budget(path)
 
 
-def test_provenance_hashes_the_measured_native_extension() -> None:
+def test_provenance_hashes_the_measured_native_extension(require_native: None) -> None:
     """Reports identify native bits even when CI cannot conveniently pass a wheel path."""
-    require_native()
     provenance = linear_scaling.collect_provenance(ROOT)
     native = provenance["native_extension"]
 
@@ -278,6 +374,15 @@ def test_provenance_hashes_the_measured_native_extension() -> None:
     assert native["filename"]
     assert native["size_bytes"] > 0
     assert len(native["sha256"]) == 64
+
+
+def test_actions_commit_sha_is_validated_without_launching_git(tmp_path: Path) -> None:
+    """Actions can inject its immutable SHA while local runs still inspect .git."""
+    supplied = "AB" * 20
+
+    assert linear_scaling._git_commit(tmp_path, supplied) == supplied.lower()
+    with pytest.raises(ValueError, match="40 hexadecimal"):
+        linear_scaling._git_commit(tmp_path, "not-a-commit")
 
 
 def test_wheel_provenance_proves_the_loaded_native_bytes(tmp_path: Path) -> None:

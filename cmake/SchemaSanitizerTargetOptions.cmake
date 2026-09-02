@@ -3,17 +3,77 @@
 # These functions keep warning, sanitizer, clang-tidy, and reproducibility
 # settings consistent across native targets.
 
-# Compiles the translation units within an MSVC target concurrently. Visual
-# Studio generators otherwise invoke cl.exe once with every source but leave its
-# multi-process mode disabled; /MPN preserves the target graph and LTO while
-# distributing those independent compilations across N processes.
+# Adds a target-private, Release-only precompiled header for one native layer.
+# Separate profiles prevent Python's ABI declarations from leaking into the
+# standalone core while still sharing the headers parsed most often per layer.
+function(schema_sanitizer_enable_release_pch target profile)
+  if(NOT SCHEMA_SANITIZER_ENABLE_PCH)
+    return()
+  endif()
+
+  if(profile STREQUAL "core")
+    set(_schema_sanitizer_pch_headers
+        algorithm
+        array
+        charconv
+        cstddef
+        cstdint
+        cstring
+        limits
+        memory
+        memory_resource
+        new
+        optional
+        string
+        string_view
+        utility
+        vector)
+  elseif(profile STREQUAL "python_abi3")
+    set(_schema_sanitizer_pch_headers
+        Python.h
+        algorithm
+        array
+        cstddef
+        cstdint
+        cstring
+        limits
+        memory
+        new
+        optional
+        string
+        string_view
+        utility
+        vector)
+  else()
+    message(FATAL_ERROR "Unknown schema-sanitizer PCH profile: ${profile}")
+  endif()
+
+  set(_schema_sanitizer_pch_entries)
+  foreach(_schema_sanitizer_pch_header IN LISTS _schema_sanitizer_pch_headers)
+    list(
+      APPEND
+      _schema_sanitizer_pch_entries
+      "$<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Release>>:<${_schema_sanitizer_pch_header}$<ANGLE-R>>"
+    )
+  endforeach()
+  target_precompile_headers(${target} PRIVATE ${_schema_sanitizer_pch_entries})
+endfunction()
+
+# Compiles the translation units within an MSVC target concurrently. The auto
+# mode delegates the worker count to cl.exe; numeric overrides remain available
+# for callers that own a stricter resource envelope.
 function(schema_sanitizer_enable_msvc_parallel_compile target)
   if(NOT MSVC)
     return()
   endif()
 
-  target_compile_options(
-    ${target} PRIVATE "/MP${SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES}")
+  set(_schema_sanitizer_msvc_parallel_flag "/MP")
+  if(NOT SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES STREQUAL "auto")
+    string(APPEND _schema_sanitizer_msvc_parallel_flag
+           "${SCHEMA_SANITIZER_MSVC_COMPILE_PROCESSES}")
+  endif()
+  target_compile_options(${target}
+                         PRIVATE "${_schema_sanitizer_msvc_parallel_flag}")
 endfunction()
 
 # Enables compiler warnings and optional Werror for a target.

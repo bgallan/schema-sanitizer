@@ -1,3 +1,9 @@
+// Builds recursive native Arrow output fields from Parquet paths, repetition
+// levels, and logical annotations. This fragment is included by the
+// consolidated footer reader inside its private implementation namespace.
+
+/// Adds native output field with checked offsets, counts, and retained-capacity
+/// accounting.
 sanitize::Status add_native_output_field(
     std::vector<NativeParquetOutputField> *fields,
     sanitize::internal::StringLookupMap<std::size_t> *field_index_by_name,
@@ -63,6 +69,7 @@ sanitize::Status add_native_output_field(
   return {};
 }
 
+/// Verifies that output fields cover every projected leaf exactly once.
 sanitize::Status validate_native_recursive_output_layout(
     const std::vector<NativeParquetOutputField> &fields,
     std::size_t expected_leaf_count) {
@@ -132,6 +139,7 @@ struct NativeRecursiveMetadataValidationState {
   std::optional<std::size_t> expected_struct_validity_repeated_layout_index;
 };
 
+/// Verifies recursive parentage, repeated indexes, and struct-validity domains.
 sanitize::Status validate_native_recursive_materialization_tree_metadata(
     const NativeRecursiveMaterializationTree &tree) {
   if (!tree.valid || tree.root >= tree.nodes.size()) {
@@ -258,6 +266,8 @@ sanitize::Status validate_native_recursive_materialization_tree_metadata(
   return {};
 }
 
+/// Selects native recursive layout column index deterministically from
+/// supported layout and resource candidates.
 sanitize::Result<std::size_t> select_native_recursive_layout_column_index(
     const std::vector<ColumnChunkInfo> &columns,
     const NativeRecursiveMaterializationTree &tree, std::size_t node_index) {
@@ -342,6 +352,8 @@ sanitize::Result<std::size_t> select_native_recursive_layout_column_index(
   return shallowest_repeated_fallback.value_or(fallback.value());
 }
 
+/// Plans native recursive layout columns iteratively while enforcing supported
+/// nesting and bounded resources.
 sanitize::Status plan_native_recursive_layout_columns(
     const std::vector<ColumnChunkInfo> &columns,
     NativeRecursiveMaterializationTree *tree) {
@@ -367,6 +379,8 @@ sanitize::Status plan_native_recursive_layout_columns(
   return {};
 }
 
+/// Finalizes native output layout only after required children and layout
+/// metadata are complete.
 sanitize::Status
 finalize_native_output_layout(std::vector<NativeParquetOutputField> *fields,
                               std::size_t expected_leaf_count) {
@@ -392,6 +406,8 @@ finalize_native_output_layout(std::vector<NativeParquetOutputField> *fields,
   return {};
 }
 
+/// Builds native output layout from validated Parquet metadata while preserving
+/// Arrow ownership and nesting contracts.
 sanitize::Status
 build_native_output_layout(const std::vector<ColumnChunkInfo> &columns,
                            std::vector<NativeParquetOutputField> *fields) {
@@ -418,6 +434,8 @@ build_native_output_layout(const std::vector<ColumnChunkInfo> &columns,
   return {};
 }
 
+/// Builds native output layout from validated Parquet metadata while preserving
+/// Arrow ownership and nesting contracts.
 sanitize::Status
 build_native_output_layout(const std::vector<LeafLevelInfo> &leaves,
                            std::vector<NativeParquetOutputField> *fields) {
@@ -438,6 +456,7 @@ build_native_output_layout(const std::vector<LeafLevelInfo> &leaves,
   return finalize_native_output_layout(fields, leaves.size());
 }
 
+/// Returns the diagnostic label for a recursive materialization node kind.
 const char *native_recursive_materialization_node_kind_label(
     NativeRecursiveMaterializationNodeKind kind) {
   switch (kind) {

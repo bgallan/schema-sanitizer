@@ -1,4 +1,8 @@
-"""Stable, reusable configuration for public sanitizer operations."""
+"""Provide stable, reusable configuration for public sanitizer operations.
+
+Immutable option groups collect parsing, CSV, resource, and Parquet settings and flatten them
+into validated keyword arguments for repeatable sanitizer calls.
+"""
 
 from __future__ import annotations
 

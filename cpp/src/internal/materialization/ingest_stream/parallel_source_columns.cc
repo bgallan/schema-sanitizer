@@ -1,4 +1,6 @@
 // Implements bounded assembly for column-partitioned packet results.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
 
 #include "internal/materialization/ingest_stream/parallel_source_impl.hh"
 

@@ -1,4 +1,8 @@
-"""Strictly blocking HTTP transport for single-threaded remote execution."""
+"""Strictly blocking HTTP transport for single-threaded remote execution.
+
+It performs blocking DNS and HTTP through governed descriptors, bounded retries, strict
+status handling, and escrowed connection cleanup.
+"""
 
 from __future__ import annotations
 
@@ -130,9 +134,11 @@ class _HttpConnectionOwner:
     __slots__ = ("connection",)
 
     def __init__(self) -> None:
+        """Create an empty authoritative slot for one blocking HTTP connection."""
         self.connection: http.client.HTTPConnection | None = None
 
     def close(self) -> None:
+        """Close the socket-backed connection before clearing its authoritative slot."""
         connection = self.connection
         if connection is None:
             return
@@ -146,17 +152,20 @@ class _EscrowedHttpConnection:
     __slots__ = ("_owner", "_reservation", "_closed")
 
     def __init__(self, owner: _HttpConnectionOwner, reservation: Any) -> None:
+        """Bind the HTTP owner to its pre-reserved terminal cleanup slot."""
         self._owner = owner
         self._reservation = reservation
         self._closed = False
 
     def __getattr__(self, name: str) -> Any:
+        """Delegate unresolved attributes to the wrapped object."""
         connection = self._owner.connection
         if connection is None:
             raise AttributeError(name)
         return getattr(connection, name)
 
     def close(self) -> None:
+        """Close through escrow, retaining the slot for retry if physical cleanup fails."""
         if self._closed:
             return
         try:

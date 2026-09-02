@@ -1,10 +1,12 @@
-"""Regression coverage for concurrency arena steal counter has one writer per worker."""
+"""Define telemetry ownership contracts for sharded arena steal counters.
+
+The cases ensure each worker writes only its own counter and mixed native lanes aggregate
+shard totals without reintroducing shared writes.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
-
-from conftest import require_native
 
 from schema_sanitizer.core_impl.native_runtime import native_core
 
@@ -17,7 +19,7 @@ TELEMETRY_JSON = ROOT / "cpp/src/internal/runtime/performance_telemetry_json.cc.
 
 
 def test_arena_steal_counter_has_one_writer_per_worker() -> None:
-    """A successful steal no longer writes one operation-global atomic."""
+    """Each worker publishes steals through its own counter."""
     arena = ARENA.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
 
@@ -52,9 +54,8 @@ def test_performance_telemetry_uses_the_same_worker_ownership() -> None:
     assert "shard.stolen.load(std::memory_order_relaxed)" in json_source
 
 
-def test_native_mixed_lanes_accumulate_multiple_worker_shards() -> None:
+def test_native_mixed_lanes_accumulate_multiple_worker_shards(require_native: None) -> None:
     """Mixed input/output lanes still drain while compatible workers steal."""
-    require_native()
     _elapsed, stolen, started, peak, finished, queued, submitted = (
         native_core.operation_task_arena_mixed_lane_probe(4, 8_000)
     )

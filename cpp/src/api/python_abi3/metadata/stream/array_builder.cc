@@ -1,4 +1,7 @@
-// Arrow schema and array builders for generated metadata columns.
+// Builds Arrow schemas and arrays for generated metadata columns. The
+// implementation accounts retained buffers before exposing generated columns
+// through Arrow C Data.
+
 #include "api/python_abi3/metadata/stream/stream.hh"
 #include "internal/arrow_c/cdata_stream_callbacks.hh"
 #include "sanitize/abi/cdata_types.hh"
@@ -47,22 +50,35 @@ struct MetadataArrayState {
   std::vector<ArrowArray *> children;
   const void *struct_buffers[1]{nullptr};
 };
+
+/// Releases any Arrow schema callback and restores the structure to an empty
+/// state.
 void clear_schema(ArrowSchema *schema) noexcept {
   sanitize::internal::cdata_stream::clear_schema(schema);
 }
+
+/// Releases any Arrow array callback and restores the structure to an empty
+/// state.
 void clear_array(ArrowArray *array) noexcept {
   sanitize::internal::cdata_stream::clear_array(array);
 }
+
+/// Clears a metadata child schema through its installed Arrow release callback.
 void metadata_schema_child_release(ArrowSchema *schema) noexcept {
   if (schema && schema->release) {
     clear_schema(schema);
   }
 }
+
+/// Clears a metadata child array through its installed Arrow release callback.
 void metadata_array_child_release(ArrowArray *array) noexcept {
   if (array && array->release) {
     clear_array(array);
   }
 }
+
+/// Releases the metadata stream callback state and clears all transferred Arrow
+/// ownership.
 void metadata_schema_release(ArrowSchema *schema) noexcept {
   if (!schema || !schema->release) {
     return;
@@ -70,6 +86,9 @@ void metadata_schema_release(ArrowSchema *schema) noexcept {
   delete static_cast<MetadataSchemaState *>(schema->private_data);
   clear_schema(schema);
 }
+
+/// Releases the metadata stream callback state and clears all transferred Arrow
+/// ownership.
 void metadata_array_release(ArrowArray *array) noexcept {
   if (!array || !array->release) {
     return;
@@ -77,10 +96,14 @@ void metadata_array_release(ArrowArray *array) noexcept {
   delete static_cast<MetadataArrayState *>(array->private_data);
   clear_array(array);
 }
+
+/// Marks one position present in a generated Arrow validity bitmap.
 void set_validity_bit(std::vector<std::uint8_t> *validity, std::int64_t index) {
   (*validity)[static_cast<std::size_t>(index >> 3)] |=
       static_cast<std::uint8_t>(1u << (index & 7));
 }
+
+/// Marks a contiguous row range present in a generated Arrow validity bitmap.
 void set_validity_range(std::vector<std::uint8_t> *validity, std::int64_t start,
                         std::int64_t count) {
   if (count <= 0) {
@@ -107,6 +130,8 @@ void set_validity_range(std::vector<std::uint8_t> *validity, std::int64_t start,
   (*validity)[last_byte] |= last_mask;
 }
 
+/// Rejects repeated UTF-8 payloads that would exceed Arrow's 32-bit offset
+/// limit.
 sanitize::Status ensure_utf8_capacity(std::string_view value,
                                       std::int64_t count) {
   if (count > 0 && !value.empty() &&
@@ -118,6 +143,9 @@ sanitize::Status ensure_utf8_capacity(std::string_view value,
   }
   return sanitize::Status::OK();
 }
+
+/// Accumulates repeated UTF-8 payload bytes while enforcing Arrow 32-bit
+/// offsets.
 sanitize::Status add_utf8_data_bytes(std::uint64_t *total,
                                      std::string_view value,
                                      std::int64_t count) {
@@ -134,6 +162,7 @@ sanitize::Status add_utf8_data_bytes(std::uint64_t *total,
   return sanitize::Status::OK();
 }
 
+/// Appends a repeated UTF-8 value while updating validity and 32-bit offsets.
 void append_utf8_run(Utf8ColumnData *out, std::string_view value,
                      std::int64_t row_offset, std::int64_t count) {
   if (count <= 0) {
@@ -158,6 +187,8 @@ void append_utf8_run(Utf8ColumnData *out, std::string_view value,
   }
 }
 
+/// Appends a null run while advancing UTF-8 offsets without adding payload
+/// bytes.
 void append_null_run(Utf8ColumnData *out, std::int64_t row_offset,
                      std::int64_t count) {
   const std::int32_t offset =
@@ -167,6 +198,7 @@ void append_null_run(Utf8ColumnData *out, std::int64_t row_offset,
   }
 }
 
+/// Builds the generated value emitted only on the first row of a source.
 sanitize::Status build_first_row_value(Utf8ColumnData *out,
                                        std::string_view value,
                                        std::int64_t length,
@@ -199,6 +231,7 @@ sanitize::Status build_first_row_value(Utf8ColumnData *out,
   return sanitize::Status::OK();
 }
 
+/// Builds the generated value repeated on every row of a source.
 sanitize::Status build_all_row_value(Utf8ColumnData *out,
                                      std::string_view value,
                                      std::int64_t length) {
@@ -215,6 +248,7 @@ sanitize::Status build_all_row_value(Utf8ColumnData *out,
   return sanitize::Status::OK();
 }
 
+/// Builds the generated value selected by the current row-span interval.
 sanitize::Status build_row_span_value(Utf8ColumnData *out,
                                       MetadataColumn *column,
                                       std::int64_t length) {
@@ -294,6 +328,7 @@ sanitize::Status build_row_span_value(Utf8ColumnData *out,
   return sanitize::Status::OK();
 }
 
+/// Builds one UTF-8 child using its first-row, repeated, or span placement.
 sanitize::Status build_utf8_metadata_array(Utf8ColumnData *out,
                                            MetadataColumn *column,
                                            std::int64_t length,
@@ -320,6 +355,8 @@ sanitize::Status build_utf8_metadata_array(Utf8ColumnData *out,
   return sanitize::Status::OK();
 }
 
+/// Constructs a timestamp-microsecond array with buffers owned by the metadata
+/// stream.
 sanitize::Status build_timestamp_micros_array(TimestampMicrosColumnData *out,
                                               std::int64_t length,
                                               std::int64_t timestamp) {
@@ -337,6 +374,7 @@ sanitize::Status build_timestamp_micros_array(TimestampMicrosColumnData *out,
   return sanitize::Status::OK();
 }
 
+/// Interleaves base and generated schema children in the prepared output order.
 void build_metadata_schema_children(MetadataSchemaState *state,
                                     MetadataStreamState *stream_state) {
   ArrowSchema &base = state->base.value();
@@ -360,6 +398,8 @@ void build_metadata_schema_children(MetadataSchemaState *state,
 }
 
 } // namespace
+
+/// Extends the base Arrow schema with owned generated-metadata children.
 sanitize::Status build_metadata_schema(MetadataStreamState *stream_state,
                                        ArrowSchema *out) {
   if (!stream_state || !stream_state->inner) {
@@ -403,6 +443,8 @@ sanitize::Status build_metadata_schema(MetadataStreamState *stream_state,
   return sanitize::Status::OK();
 }
 
+/// Constructs a metadata array whose callback state owns every generated
+/// buffer.
 sanitize::Status build_metadata_array(MetadataStreamState *stream_state,
                                       ArrowArray *out) {
   if (!stream_state || !stream_state->inner) {

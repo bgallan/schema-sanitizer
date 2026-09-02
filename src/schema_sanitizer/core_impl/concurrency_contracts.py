@@ -2,7 +2,7 @@
 
 Coverage metadata must be backed by a concrete implementation object rather
 than a literal boolean.  Implementing modules register the exact callable that
-owns each invariant; tests and diagnostics can then prove that all 56 format
+owns each invariant; tests and diagnostics can then prove that all 49 format
 pairs inherit live mechanisms from the common pipeline runtime.
 """
 
@@ -77,6 +77,7 @@ _CURRENT_ROUTE_PROFILES: ContextVar[tuple[str, ...]] = ContextVar(
 
 
 def _same_callable_contract(left: Callable[..., object], right: Callable[..., object]) -> bool:
+    """Return whether two callables have the same stable contract."""
     return callable_contract(left) == callable_contract(right)
 
 
@@ -119,8 +120,7 @@ def observe_runtime_concurrency_contract(name: str) -> None:
             if pair_current < (1 << 63) - 1:
                 counts[name] = pair_current + 1
             # Separate evidence for real payload/runtime work. Bootstrap pair
-            # admission remains visible to pass50 compatibility diagnostics but
-            # cannot satisfy the stronger pass51 end-to-end proof.
+            # admission cannot satisfy the stronger end-to-end proof.
             if not _PAIR_BOOTSTRAP.get():
                 payload_counts = _PAIR_PAYLOAD_OBSERVED.get(pair)
                 if payload_counts is None:
@@ -493,6 +493,7 @@ def require_observed_runtime_concurrency_contracts(
 
 
 def _prepare_contracts_for_fork() -> None:
+    """Prepare contracts for fork."""
     global \
         _FORK_FRESH_LOCK, \
         _FORK_FRESH_OBSERVED, \
@@ -516,6 +517,7 @@ def _prepare_contracts_for_fork() -> None:
 
 
 def _clear_contracts_fork_preparation() -> None:
+    """Clear contracts fork preparation."""
     global \
         _FORK_FRESH_LOCK, \
         _FORK_FRESH_OBSERVED, \
@@ -532,6 +534,7 @@ def _clear_contracts_fork_preparation() -> None:
 
 
 def _reset_contracts_after_fork() -> None:
+    """Reset contracts after fork."""
     global \
         _LOCK, \
         _FORK_FRESH_LOCK, \

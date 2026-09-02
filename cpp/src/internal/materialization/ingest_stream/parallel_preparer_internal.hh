@@ -1,4 +1,7 @@
 // Defines private worker state shared by packet-preparer translation units.
+// The code converts validated rows into memory-accounted Arrow C Data batches
+// for ordered ingestion.
+
 #pragma once
 
 #include "internal/materialization/direct_rows.hh"

@@ -1,4 +1,8 @@
-"""Current public-API and offline smoke coverage for example 08."""
+"""Current public-API and offline smoke coverage for example 08.
+
+It exercises the offline and cloud entry points, validates provider and credential
+configuration, and checks resource transfer and supported public imports.
+"""
 
 from __future__ import annotations
 
@@ -147,7 +151,7 @@ def test_local_validation_transfers_frame_and_closes_result(
         clean_data = frame
 
         def close(self) -> None:
-            """Record the explicit ownership handoff."""
+            """Close the result double and release its retained resources."""
             state["closed"] = True
 
     def fake_to_polars(path: Path, **kwargs: Any) -> ResultDouble:
@@ -263,29 +267,36 @@ def test_bigquery_adapter_closes_query_owners_and_uses_current_ddl_api(
         """Context-managed ADBC cursor double."""
 
         def __enter__(self) -> Cursor:
+            """Return the managed cursor value from context entry."""
             events.append("cursor-enter")
             return self
 
         def __exit__(self, *_exc: object) -> None:
+            """Finalize the cursor context without suppressing exceptions."""
             events.append("cursor-exit")
 
         def execute(self, query: str) -> None:
+            """Record the submitted SQL statement and return the recording cursor."""
             executed["schema_query"] = query
 
         def fetch_arrow_table(self) -> Any:
+            """Return the configured Arrow result table."""
             return SimpleNamespace(schema="arrow-schema")
 
     class Connection:
         """Context-managed ADBC connection double."""
 
         def __enter__(self) -> Connection:
+            """Return the managed connection value from context entry."""
             events.append("connection-enter")
             return self
 
         def __exit__(self, *_exc: object) -> None:
+            """Finalize the connection context without suppressing exceptions."""
             events.append("connection-exit")
 
         def cursor(self) -> Cursor:
+            """Return the recording database cursor used by this scenario."""
             return Cursor()
 
     dbapi = SimpleNamespace(connect=lambda **_kwargs: Connection())

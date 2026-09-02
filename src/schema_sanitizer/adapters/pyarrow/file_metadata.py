@@ -1,4 +1,8 @@
-"""Planning, lifecycle, and route telemetry for file-output metadata columns."""
+"""Planning and lifecycle for file-output metadata columns.
+
+It validates requested metadata columns and wraps streams so source paths, row spans,
+and generated timestamps are injected with correct ownership.
+"""
 
 from __future__ import annotations
 
@@ -22,19 +26,6 @@ from .metadata_specs import (
     validate_row_span_columns,
     validate_timestamp_columns,
 )
-
-_LAST_METADATA_ROUTE = "none"
-
-
-def last_metadata_route() -> str:
-    """Return the route used by the most recent metadata stream preparation."""
-    return _LAST_METADATA_ROUTE
-
-
-def mark_metadata_route(route: str) -> None:
-    """Record the metadata route used by a file-output writer."""
-    global _LAST_METADATA_ROUTE
-    _LAST_METADATA_ROUTE = route
 
 
 def has_metadata_columns(
@@ -126,7 +117,6 @@ def prepare_file_output_metadata_stream(
         row_span_columns,
         timestamp_columns,
     )
-    mark_metadata_route("none")
     if metadata_args is None:
         if has_metadata_columns(
             first_row_columns,
@@ -151,7 +141,6 @@ def prepare_file_output_metadata_stream(
             "Metadata columns require the native C++ metadata stream wrapper; "
             "this metadata configuration is not supported by native metadata injection."
         )
-    mark_metadata_route("native")
     return PreparedFileOutputMetadataStream(
         schema=reader.schema,
         batches=reader,

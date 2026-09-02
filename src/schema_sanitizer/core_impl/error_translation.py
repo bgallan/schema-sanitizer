@@ -1,4 +1,8 @@
-"""Translate native execution failures to public schema-sanitizer errors."""
+"""Translate native execution failures into public schema-sanitizer errors.
+
+Reader context and native detail payloads are decoded and mapped to stable exception classes
+without leaking ABI-specific failure shapes through the public API.
+"""
 
 from __future__ import annotations
 
@@ -38,7 +42,7 @@ def reader_error_context(
     """Build privacy-safe reader context without copying in-memory payloads."""
     detail: dict[str, Any] = {}
     normalized_format = str(format_name or "").strip().lower()
-    if normalized_format in {"jsonl", "json_lines", "json-lines"}:
+    if normalized_format == "jsonl":
         normalized_format = "json"
     if normalized_format:
         detail["format"] = normalized_format

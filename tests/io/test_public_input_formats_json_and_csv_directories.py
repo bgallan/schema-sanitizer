@@ -1,4 +1,8 @@
-"""Tests explicit public input formats, extensions, and directory mode."""
+"""Tests explicit public input formats, extensions, and directory mode.
+
+It covers explicit format and suffix validation, JSON arrays, directory coalescing,
+source tracking, CSV headers, and malformed input cleanup.
+"""
 
 from __future__ import annotations
 
@@ -11,17 +15,8 @@ from _support.public_input_modes import data_rows as _data_rows
 import schema_sanitizer as ss
 
 
-def test_auto_input_format_is_rejected(tmp_path: Path) -> None:
-    """Verify the removed auto selector is not accepted."""
-    path = tmp_path / "rows.jsonl"
-    path.write_text('{"a":1}\n', encoding="utf-8")
-
-    with pytest.raises(ValueError, match="auto"):
-        ss.to_pyarrow(path, input_format="auto")
-
-
 def test_none_input_format_is_rejected(tmp_path: Path) -> None:
-    """Verify the default None selector never infers from the extension."""
+    """Verify none input format is rejected."""
     path = tmp_path / "rows.jsonl"
     path.write_text('{"a":1}\n', encoding="utf-8")
 
@@ -31,14 +26,14 @@ def test_none_input_format_is_rejected(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     ("input_format", "failure"),
-    [("jsonl", MemoryError), (" NDJSON ", KeyboardInterrupt)],
+    [("jsonl", MemoryError), (" parquet ", KeyboardInterrupt)],
 )
-def test_format_normalization_fault_cannot_abandon_prepared_ownership(
+def test_format_normalization_fault_precedes_prepared_ownership(
     monkeypatch: pytest.MonkeyPatch,
     input_format: str,
     failure: type[BaseException],
 ) -> None:
-    """Verify format normalization completes before preparation can acquire ownership."""
+    """Format validation fails before an input owner can be acquired."""
     from schema_sanitizer.api_impl.input import preparation as public_input
     from schema_sanitizer.input_impl.prepared import PreparedPublicInput
 
@@ -48,17 +43,21 @@ def test_format_normalization_fault_cannot_abandon_prepared_ownership(
         """Track whether an acquired preparation owner is closed."""
 
         def __init__(self) -> None:
+            """Initialize keepalive state for closed."""
             self.closed = False
 
         def close(self) -> None:
+            """Close the keepalive and update closed."""
             self.closed = True
 
     def materialize(*_args: object, **_kwargs: object) -> PreparedPublicInput:
+        """Materialize the prepared fake result."""
         owner = Keepalive()
         acquired.append(owner)
         return PreparedPublicInput(b"{}\n", "jsonl", "stream", owner)
 
     def fail_normalization(_input_format: str | None) -> str:
+        """Raise the normalization error used to verify ownership cleanup."""
         raise failure("injected format-normalization fault")
 
     monkeypatch.setattr(public_input, "_prepare_public_input_impl", materialize)
@@ -66,7 +65,7 @@ def test_format_normalization_fault_cannot_abandon_prepared_ownership(
 
     with pytest.raises(failure, match="format-normalization fault"):
         public_input.prepare_public_input(
-            "unused.ndjson",
+            "unused.jsonl",
             input_format=input_format,
             input_mode="single_file",
             input_text_encoding="utf-8",
@@ -76,7 +75,7 @@ def test_format_normalization_fault_cannot_abandon_prepared_ownership(
             memory_limit_bytes=None,
         )
 
-    assert not acquired or all(getattr(owner, "closed") for owner in acquired)
+    assert acquired == []
 
 
 @pytest.mark.parametrize(
@@ -85,8 +84,7 @@ def test_format_normalization_fault_cannot_abandon_prepared_ownership(
         ("csv", "rows.jsonl"),
         ("json", "rows.jsonl"),
         ("json_array", "rows.jsonl"),
-        ("jsonl", "rows.ndjson"),
-        ("ndjson", "rows.jsonl"),
+        ("jsonl", "rows.json"),
         ("xml", "rows.json"),
         ("parquet", "rows.json"),
     ],
@@ -94,7 +92,7 @@ def test_format_normalization_fault_cannot_abandon_prepared_ownership(
 def test_single_file_requires_matching_extension(
     tmp_path: Path, input_format: str, filename: str
 ) -> None:
-    """Verify every explicit format checks its source extension."""
+    """Verify single file requires matching extension."""
     path = tmp_path / filename
     path.write_text("{}", encoding="utf-8")
 
@@ -103,7 +101,7 @@ def test_single_file_requires_matching_extension(
 
 
 def test_json_array_materializes_top_level_objects(tmp_path: Path) -> None:
-    """Verify json_array emits one row per top-level object."""
+    """Verify JSON array materializes top level objects."""
     path = tmp_path / "rows.json"
     path.write_text(
         '[\n  {"id":1,"name":"Ana"},\n  {"id":2,"name":"Luis"}\n]\n',
@@ -117,7 +115,7 @@ def test_json_array_materializes_top_level_objects(tmp_path: Path) -> None:
 
 
 def test_json_array_single_file_uses_native_path_source(tmp_path: Path) -> None:
-    """Verify single-file json_array remains native path input."""
+    """Verify JSON array single file uses native path source."""
     from schema_sanitizer.api_impl.input.preparation import prepare_public_input
 
     path = tmp_path / "rows.json"
@@ -143,7 +141,7 @@ def test_json_array_single_file_uses_native_path_source(tmp_path: Path) -> None:
 
 
 def test_json_array_rejects_non_object_elements(tmp_path: Path) -> None:
-    """Verify json_array only accepts object rows."""
+    """Verify JSON array rejects non object elements."""
     path = tmp_path / "rows.json"
     path.write_text('[{"id":1}, 2]\n', encoding="utf-8")
 
@@ -152,7 +150,7 @@ def test_json_array_rejects_non_object_elements(tmp_path: Path) -> None:
 
 
 def test_json_array_rejects_trailing_characters(tmp_path: Path) -> None:
-    """Verify json_array rejects non-whitespace after the top-level array."""
+    """Verify JSON array rejects trailing characters."""
     path = tmp_path / "rows.json"
     path.write_text('[{"id":1}] trailing\n', encoding="utf-8")
 
@@ -161,7 +159,7 @@ def test_json_array_rejects_trailing_characters(tmp_path: Path) -> None:
 
 
 def test_json_top_level_array_rejects_trailing_characters(tmp_path: Path) -> None:
-    """Verify native JSON array scanning validates the document tail."""
+    """Verify JSON top level array rejects trailing characters."""
     path = tmp_path / "rows.json"
     path.write_text('[{"id":1}] trailing\n', encoding="utf-8")
 
@@ -170,7 +168,7 @@ def test_json_top_level_array_rejects_trailing_characters(tmp_path: Path) -> Non
 
 
 def test_json_wide_top_level_rows_materialize_all_fields(tmp_path: Path) -> None:
-    """Verify wide top-level rows materialize through the native root snapshot."""
+    """Verify JSON wide top level rows materialize all fields."""
     path = tmp_path / "rows.json"
     path.write_text(
         '[{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8}]',
@@ -183,7 +181,7 @@ def test_json_wide_top_level_rows_materialize_all_fields(tmp_path: Path) -> None
 
 
 def test_json_directory_source_file_tracks_multirow_documents(tmp_path: Path) -> None:
-    """Verify native JSON directory source_file tracking remains per produced row."""
+    """Verify JSON directory source file tracks multirow documents."""
     folder = tmp_path / "json"
     folder.mkdir()
     (folder / "a.json").write_text('[{"id":1},{"id":2}]', encoding="utf-8")
@@ -201,7 +199,7 @@ def test_json_directory_source_file_tracks_multirow_documents(tmp_path: Path) ->
 
 
 def test_jsonl_directory_coalesces_with_native_source_file_tracking(tmp_path: Path) -> None:
-    """Verify JSONL directory materialization groups files without losing row origins."""
+    """Verify JSONL directory coalesces with native source file tracking."""
     folder = tmp_path / "jsonl"
     folder.mkdir()
     (folder / "a.jsonl").write_text('{"id":1}\n{"id":2}\n', encoding="utf-8")
@@ -223,7 +221,7 @@ def test_jsonl_directory_coalesces_with_native_source_file_tracking(tmp_path: Pa
 def test_json_directory_coalesces_object_documents_with_source_file_tracking(
     tmp_path: Path,
 ) -> None:
-    """Verify object-style JSON documents can share one native stream."""
+    """Verify JSON directory coalesces object documents with source file tracking."""
     folder = tmp_path / "json"
     folder.mkdir()
     (folder / "a.json").write_text('{"id":1}', encoding="utf-8")
@@ -242,7 +240,7 @@ def test_json_directory_coalesces_object_documents_with_source_file_tracking(
 def test_json_directory_coalesces_array_documents_with_source_file_tracking(
     tmp_path: Path,
 ) -> None:
-    """Verify JSON array documents can share one native stream in json mode."""
+    """Verify JSON directory coalesces array documents with source file tracking."""
     folder = tmp_path / "json"
     folder.mkdir()
     (folder / "a.json").write_text('[{"id":1},{"id":2}]', encoding="utf-8")
@@ -260,7 +258,7 @@ def test_json_directory_coalesces_array_documents_with_source_file_tracking(
 
 
 def test_json_directory_preserves_scalar_array_documents(tmp_path: Path) -> None:
-    """Verify json-mode scalar array documents keep default-key semantics."""
+    """Verify JSON directory preserves scalar array documents."""
     folder = tmp_path / "json"
     folder.mkdir()
     (folder / "a.json").write_text("[1,2]", encoding="utf-8")
@@ -284,7 +282,7 @@ def test_json_directory_preserves_scalar_array_documents(tmp_path: Path) -> None
 def test_json_directory_scalar_array_documents_preserve_values_with_registry(
     tmp_path: Path,
 ) -> None:
-    """Verify scalar array documents keep default-key values with an existing registry."""
+    """Verify JSON directory scalar array documents preserve values with registry."""
     seed = tmp_path / "seed.json"
     seed.write_text("1", encoding="utf-8")
     registry = ss.to_pyarrow(seed, input_format="json").schema_registry
@@ -312,7 +310,7 @@ def test_json_directory_scalar_array_documents_preserve_values_with_registry(
 def test_native_json_path_source_probe_coalesces_with_best_effort_fallback(
     tmp_path: Path,
 ) -> None:
-    """Verify grouped JSON registry probing falls back to per-file invalid skips."""
+    """Verify native JSON path source probe coalesces with best effort fallback."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     folder = tmp_path / "json"
@@ -344,7 +342,7 @@ def test_native_json_path_source_probe_coalesces_with_best_effort_fallback(
 def test_native_json_probe_and_materialization_share_array_boundary_plan(
     tmp_path: Path,
 ) -> None:
-    """Verify JSON array documents and object documents use one source-plan rule."""
+    """Verify native JSON probe and materialization share array boundary plan."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
 
     folder = tmp_path / "json"
@@ -380,7 +378,7 @@ def test_native_json_probe_and_materialization_share_array_boundary_plan(
 
 
 def test_native_path_source_probe_state_feeds_materialization(tmp_path: Path) -> None:
-    """Verify two-phase native materialization reuses compiled registry state."""
+    """Verify native path source probe state feeds materialization."""
     from schema_sanitizer.api_impl.execution_context import ExecutionContext
     from schema_sanitizer.api_impl.streams import Stream
 
@@ -419,19 +417,16 @@ def test_native_path_source_probe_state_feeds_materialization(tmp_path: Path) ->
         assert stream.to_table().to_pylist() == [{"id": 1, "source_file": str(source)}]
 
 
-@pytest.mark.parametrize(("input_format", "suffix"), [("jsonl", ".jsonl"), ("ndjson", ".ndjson")])
-def test_line_delimited_json_formats_share_content_model(
-    tmp_path: Path, input_format: str, suffix: str
-) -> None:
-    """Verify JSONL and NDJSON differ only by extension validation."""
-    path = tmp_path / f"rows{suffix}"
+def test_jsonl_materializes_line_delimited_objects(tmp_path: Path) -> None:
+    """Verify JSONL materializes line delimited objects."""
+    path = tmp_path / "rows.jsonl"
     path.write_text('{"a":1}\n{"a":2}\n', encoding="utf-8")
 
-    assert _data_rows(ss.to_pyarrow(path, input_format=input_format)) == [{"a": 1}, {"a": 2}]
+    assert _data_rows(ss.to_pyarrow(path, input_format="jsonl")) == [{"a": 1}, {"a": 2}]
 
 
 def test_directory_mode_is_non_recursive_and_deterministic(tmp_path: Path) -> None:
-    """Verify directory mode reads matching direct children only."""
+    """Verify directory mode is non recursive and deterministic."""
     folder = tmp_path / "rows"
     folder.mkdir()
     (folder / "b.jsonl").write_text('{"a":2}\n', encoding="utf-8")
@@ -439,7 +434,7 @@ def test_directory_mode_is_non_recursive_and_deterministic(tmp_path: Path) -> No
     nested = folder / "nested"
     nested.mkdir()
     (nested / "ignored.jsonl").write_text('{"a":99}\n', encoding="utf-8")
-    (folder / "ignored.ndjson").write_text('{"a":98}\n', encoding="utf-8")
+    (folder / "ignored.txt").write_text('{"a":98}\n', encoding="utf-8")
 
     result = ss.to_pyarrow(folder, input_format="jsonl", input_mode="directory")
     assert _data_rows(result) == [{"a": 1}, {"a": 2}]
@@ -450,7 +445,7 @@ def test_directory_mode_is_non_recursive_and_deterministic(tmp_path: Path) -> No
 
 
 def test_directory_mode_requires_explicit_format(tmp_path: Path) -> None:
-    """Verify directory mode also rejects the default None format."""
+    """Verify directory mode requires explicit format."""
     folder = tmp_path / "rows"
     folder.mkdir()
 
@@ -459,7 +454,7 @@ def test_directory_mode_requires_explicit_format(tmp_path: Path) -> None:
 
 
 def test_csv_directory_validates_shared_header(tmp_path: Path) -> None:
-    """Verify CSV directory mode removes matching repeated headers."""
+    """Verify CSV directory validates shared header."""
     folder = tmp_path / "csv"
     folder.mkdir()
     (folder / "a.csv").write_text("id,name\n1,Ana\n", encoding="utf-8")

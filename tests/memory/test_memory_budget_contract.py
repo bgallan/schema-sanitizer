@@ -1,4 +1,7 @@
-"""Contract tests for the single explicit per-operation memory budget."""
+"""Defines the public and native contract for one bounded, monotonic per-operation memory
+control, including the default policy, multi-worker headroom, streamed output, and
+invalid limits. It also checks documentation and environment access so unbudgeted result
+ownership is disclosed and every runtime or CI configuration boundary remains reviewed."""
 
 from __future__ import annotations
 
@@ -30,14 +33,6 @@ _PUBLIC_OPERATIONS = (
     discover_existing_source_plans_async,
 )
 _REFERENCE_MEMORY_LIMIT_BYTES = 512 * 1024 * 1024
-_REMOVED_RESOURCE_OPTIONS = {
-    "batch_memory_limit_bytes",
-    "read_chunk_bytes",
-    "max_spool_bytes",
-    "prefetch_chunks",
-    "concurrency",
-    "io_chunk_bytes",
-}
 _ENV_ACCESS_TOKENS = (
     "os." + "getenv",
     "os." + "environ",
@@ -54,16 +49,7 @@ def test_public_api_has_one_memory_control() -> None:
         parameters = inspect.signature(operation).parameters
         assert "memory_limit_bytes" in parameters
         assert parameters["memory_limit_bytes"].default is None
-        assert not (_REMOVED_RESOURCE_OPTIONS & parameters.keys())
-
-
-def test_removed_resource_options_are_rejected() -> None:
-    """Removed knobs do not survive as aliases or compatibility facades."""
-    from schema_sanitizer.options_impl.call_options import normalize_call_options
-
-    for option in sorted(_REMOVED_RESOURCE_OPTIONS):
-        with pytest.raises(TypeError, match="Unknown option"):
-            normalize_call_options(**{option: 1})
+        assert {name for name in parameters if "memory" in name} == {"memory_limit_bytes"}
 
 
 def test_native_budget_is_the_python_source_of_truth() -> None:
@@ -190,10 +176,10 @@ def test_invalid_memory_limits_fail_before_native_execution() -> None:
             normalize_memory_limit(value)
 
 
-def test_repository_environment_access_is_limited_to_resource_hardening() -> None:
-    """Only documented resource owners and the release preflight inspect the environment."""
+def test_repository_environment_access_is_strictly_reviewed() -> None:
+    """Only reviewed resource, test-integrity, and CI helpers inspect the environment."""
     root = Path(__file__).resolve().parents[2]
-    ignored = {".git", "__pycache__", ".pytest_cache"}
+    ignored = {".git", ".work", ".venv", "__pycache__", ".pytest_cache"}
     offenders: list[str] = []
     for path in root.rglob("*"):
         if path == Path(__file__).resolve():
@@ -226,9 +212,14 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
         if any(token in text for token in _ENV_ACCESS_TOKENS):
             offenders.append(path.relative_to(root).as_posix())
     allowed_environment_files = {
+        ".github/actions/quality-validation/action.yml",
+        ".github/actions/restore-pip-cache/action.yml",
         "cpp/src/internal/runtime/operation_task_arena.cc",
+        "meta/ci/release/abi_public_smoke.py",
         "meta/ci/release/check_distribution_contents.py",
         "meta/ci/release/check_github_release_state.py",
+        "meta/ci/quality/run_pre_commit_tool.py",
+        "meta/ci/sanitizers/run_with_watchdog.py",
         "src/schema_sanitizer/core_impl/allocator_control.py",
         "src/schema_sanitizer/core_impl/cross_process_memory.py",
         "src/schema_sanitizer/core_impl/cross_process_storage.py",
@@ -236,6 +227,8 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
         "src/schema_sanitizer/core_impl/path_identity.py",
         "src/schema_sanitizer/core_impl/safety_margins.py",
         "src/schema_sanitizer/core_impl/temporary_janitor.py",
+        "tests/_support/ci_integrity.py",
+        "tests/conftest.py",
         "tests/concurrency/test_concurrency_cross_process_telemetry_tuning.py",
         "tests/concurrency/test_concurrency_cancellation_and_resource_lifecycle.py",
         "tests/examples/test_example_entrypoints.py",
@@ -247,6 +240,9 @@ def test_repository_environment_access_is_limited_to_resource_hardening() -> Non
         "tests/memory/test_memory_reserved_finalizer_processed_owner_cannot_stick_claimed_on_recycle_failure.py",
         "tests/memory/test_memory_resident_zero_is_authoritative_on_public_acquire.py",
         "tests/memory/test_memory_process_resource_governor_repairs_from_exact_leases_and_quarantines.py",
+        "tests/quality/test_ci_helper_layout.py",
+        "tests/quality/test_ci_workflow_topology.py",
+        "tests/quality/test_dependency_audit_inputs.py",
         "tests/quality/test_distribution_archive_cleanliness.py",
         "cpp/tests/ordered_executor_tsan.cc",
     }

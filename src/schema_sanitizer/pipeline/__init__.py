@@ -1,4 +1,8 @@
-"""Configured public API for partitioned Parquet pipelines."""
+"""Configured public API for partitioned Parquet pipelines.
+
+It exposes the configured Hive and modified-time facades plus an advanced namespace,
+without importing private orchestration details into user code.
+"""
 
 from __future__ import annotations
 

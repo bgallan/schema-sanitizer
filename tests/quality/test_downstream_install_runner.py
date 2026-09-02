@@ -1,9 +1,17 @@
-"""Tests for compact isolated downstream installation checks."""
+"""Tests for compact isolated downstream installation checks.
+
+It validates isolated base, typed, and optional-extra consumer profiles plus complete
+constraints for every published dependency group.
+"""
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import os
+import shutil
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -24,48 +32,294 @@ def _module():
     return module
 
 
-def test_every_extra_is_installed_and_imported_in_isolation(
-    monkeypatch: pytest.MonkeyPatch,
+def _seed_wheels(module, root: Path) -> Path:
+    """Create one test-owned pip seed and align the loaded helper's digest."""
+    seed_root = root / "seed-wheels"
+    seed_root.mkdir()
+    payload = b"deterministic virtualenv seed"
+    (seed_root / module._PIP_WHEEL_NAME).write_bytes(payload)
+    module._PIP_WHEEL_SHA256 = hashlib.sha256(payload).hexdigest()
+    return seed_root
+
+
+def test_downstream_planner_cli_imports_repository_helpers_from_any_directory(
     tmp_path: Path,
 ) -> None:
-    """The compact job preserves the former one-environment-per-extra guarantee."""
+    """The absolute-path entry point bootstraps its imports outside the checkout."""
+    completed = subprocess.run(
+        [sys.executable, "-I", os.fspath(SCRIPT), "--help"],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "usage:" in completed.stdout
+
+
+def test_every_extra_is_installed_and_imported_in_isolation(
+    tmp_path: Path,
+) -> None:
+    """The compact job gives every extra its own isolated environment."""
     module = _module()
     wheel = tmp_path / "schema_sanitizer-0.4.0-cp311-abi3-linux.whl"
     wheel.write_bytes(b"wheel")
     constraints = ROOT / "meta/ci/requirements/downstream.txt"
-    calls: list[tuple[list[str], Path | None]] = []
+    seed_wheels = _seed_wheels(module, tmp_path)
+    plan = module.shell_plan(wheel, tmp_path, SCRIPT.parent, constraints, seed_wheels)
 
-    def fake_environment(root: Path, name: str) -> Path:
-        """Return a distinct fake interpreter without creating a venv."""
-        assert root == tmp_path
-        return Path("/isolated") / name / "python"
+    assert plan.count(" -m virtualenv ") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("--seeder app-data") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("--no-download") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("--copies") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("--pip 26.2.1") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("pip.__version__") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("[downstream-extra]") == len(module.EXTRA_IMPORTS)
+    for extra, imports in module.EXTRA_IMPORTS.items():
+        assert f"[downstream-extra] {extra}" in plan
+        requirement_file = tmp_path / f"requirements-extra-{extra}.txt"
+        requirement = requirement_file.read_text(encoding="utf-8")
+        project = "schema-sanitizer" if extra == "core" else f"schema-sanitizer[{extra}]"
+        assert requirement.startswith(f"{project} @ {wheel.as_uri()}")
+        assert "--hash=sha256:" in requirement
+        assert requirement_file.as_posix() in plan
+        for imported in imports:
+            assert f"import {imported}" in plan
+    assert plan.count("--require-hashes") == len(module.EXTRA_IMPORTS) + 1
+    assert plan.count("--only-binary=:all:") == len(module.EXTRA_IMPORTS) + 1
+    consumer = (tmp_path / "requirements-consumer.txt").read_text(encoding="utf-8")
+    assert "mypy==1.19.1 \\" in consumer
+    assert "pyarrow==25.0.1 \\" in consumer
+    assert consumer.count("--hash=sha256:") > 2
+    assert plan.index("downstream_typecheck.py") < plan.index("[downstream-extra] core")
 
-    def fake_run(
-        command: list[str],
-        *,
-        check: bool,
-        cwd: Path | None = None,
-    ) -> None:
-        """Capture a checked subprocess call."""
-        assert check is True
-        calls.append((command, cwd))
 
-    monkeypatch.setattr(module, "create_environment", fake_environment)
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+def test_downstream_plan_quotes_paths_and_owns_cleanup(tmp_path: Path) -> None:
+    """Hostile path characters stay inside argv boundaries and owned cleanup."""
+    module = _module()
+    wheel_root = tmp_path / "wheel dir; touch injected"
+    wheel_root.mkdir()
+    wheel = wheel_root / "schema sanitizer.whl"
+    wheel.write_bytes(b"wheel")
+    constraints = ROOT / "meta/ci/requirements/downstream.txt"
+    seed_wheels = _seed_wheels(module, tmp_path)
 
-    module.validate_extras(wheel, tmp_path, constraints)
+    plan = module.shell_plan(wheel, tmp_path / "work root", SCRIPT.parent, constraints, seed_wheels)
 
-    installs = [command for command, _cwd in calls if command[1:4] == ["-m", "pip", "install"]]
-    imports = [command for command, _cwd in calls if command[1:3] == ["-I", "-c"]]
-    assert len(installs) == len(module.EXTRA_IMPORTS)
-    assert len(imports) == len(module.EXTRA_IMPORTS)
-    for extra, command in zip(module.EXTRA_IMPORTS, installs, strict=True):
-        assert command[4:6] == ["-c", os.fspath(constraints)]
-        requirement = command[-1]
-        if extra == "core":
-            assert requirement == os.fspath(wheel)
-        else:
-            assert requirement == f"{wheel}[{extra}]"
+    requirement = (tmp_path / "work root" / "requirements-consumer.txt").read_text(encoding="utf-8")
+    assert wheel.as_uri() in requirement
+    assert "trap cleanup_downstream EXIT" in plan
+    assert 'rm -rf -- "${isolated_root}"' in plan
+    assert plan == module.shell_plan(
+        wheel, tmp_path / "work root", SCRIPT.parent, constraints, seed_wheels
+    )
+
+
+def test_downstream_command_output_is_atomic_and_rejects_symlinks(tmp_path: Path) -> None:
+    """Repeated writes preserve identical output while symlink targets fail closed."""
+    module = _module()
+    output = tmp_path / "commands.sh"
+    module._write_text_atomically(output, "set -e\n")
+    first_mtime = output.stat().st_mtime_ns
+    module._write_text_atomically(output, "set -e\n")
+
+    assert output.read_text(encoding="utf-8") == "set -e\n"
+    assert output.stat().st_mtime_ns == first_mtime
+
+    target = tmp_path / "target.sh"
+    target.write_text("preserve\n", encoding="utf-8")
+    output.unlink()
+    try:
+        output.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+    with pytest.raises(ValueError, match="symlinked command output"):
+        module._write_text_atomically(output, "replace\n")
+    assert target.read_text(encoding="utf-8") == "preserve\n"
+
+
+def test_downstream_virtualenv_seed_is_exact_and_digest_verified(tmp_path: Path) -> None:
+    """Extra, renamed, or corrupted seed wheels fail before plan publication."""
+    module = _module()
+    seed_root = tmp_path / "seeds"
+    seed_root.mkdir()
+    expected = seed_root / module._PIP_WHEEL_NAME
+    expected.write_bytes(b"corrupt")
+
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        module._validated_seed_directory(seed_root)
+
+    module._PIP_WHEEL_SHA256 = hashlib.sha256(b"corrupt").hexdigest()
+    (seed_root / "unexpected.whl").write_bytes(b"extra")
+    with pytest.raises(ValueError, match="must contain exactly"):
+        module._validated_seed_directory(seed_root)
+
+
+def test_downstream_virtualenv_seed_rejects_symlinked_wheel(tmp_path: Path) -> None:
+    """A matching seed filename cannot redirect validation outside its root."""
+    module = _module()
+    seed_root = tmp_path / "seeds"
+    seed_root.mkdir()
+    target = tmp_path / "target.whl"
+    target.write_bytes(b"seed")
+    seed = seed_root / module._PIP_WHEEL_NAME
+    try:
+        seed.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks are unavailable")
+
+    with pytest.raises(ValueError, match="regular file"):
+        module._validated_seed_directory(seed_root)
+
+
+def test_downstream_plan_rejects_overlapping_owned_inputs_and_outputs(tmp_path: Path) -> None:
+    """Owned cleanup and plan publication cannot consume or replace plan inputs."""
+    module = _module()
+    work_root = tmp_path / "work"
+    isolated_root = work_root / "downstream"
+    isolated_root.mkdir(parents=True)
+    owned_wheel = isolated_root / "owned.whl"
+    owned_wheel.write_bytes(b"preserve")
+    outside_wheel = tmp_path / "outside.whl"
+    outside_wheel.write_bytes(b"wheel")
+    constraints = ROOT / "meta/ci/requirements/downstream.txt"
+    seed_wheels = _seed_wheels(module, tmp_path)
+    outside_output = tmp_path / "commands.sh"
+    invalid = (
+        (
+            owned_wheel,
+            SCRIPT.parent,
+            constraints,
+            seed_wheels,
+            outside_output,
+            "owned downstream root",
+        ),
+        (
+            outside_wheel,
+            SCRIPT.parent,
+            constraints,
+            seed_wheels,
+            outside_wheel,
+            "command output",
+        ),
+        (
+            outside_wheel,
+            SCRIPT.parent,
+            constraints,
+            seed_wheels,
+            SCRIPT.parent / "commands.sh",
+            "scripts root",
+        ),
+    )
+
+    for wheel, scripts, constraint, seeds, command_output, message in invalid:
+        with pytest.raises(ValueError, match=message):
+            module.shell_plan(
+                wheel,
+                work_root,
+                scripts,
+                constraint,
+                seeds,
+                command_output=command_output,
+            )
+    assert owned_wheel.read_bytes() == b"preserve"
+    assert outside_wheel.read_bytes() == b"wheel"
+
+
+def test_downstream_plan_allows_read_only_inputs_to_share_a_tree(tmp_path: Path) -> None:
+    """A constraints file may live beneath the read-only scripts directory."""
+    module = _module()
+    scripts = tmp_path / "support"
+    scripts.mkdir()
+    constraints = scripts / "constraints.txt"
+    constraints.write_text("dependency==1\nmypy==1\npyarrow==1\n", encoding="utf-8")
+    artifact_lock = scripts / "artifacts.lock"
+    artifact_lock.write_text(
+        f"dependency==1 sha256:{'a' * 64}\n"
+        f"mypy==1 sha256:{'b' * 64}\n"
+        f"pyarrow==1 sha256:{'c' * 64}\n",
+        encoding="utf-8",
+    )
+    wheel = tmp_path / "package.whl"
+    wheel.write_bytes(b"wheel")
+    seed_wheels = _seed_wheels(module, tmp_path)
+
+    plan = module.shell_plan(
+        wheel,
+        tmp_path / "work",
+        scripts,
+        constraints,
+        seed_wheels,
+        artifact_lock=artifact_lock,
+        command_output=tmp_path / "commands.sh",
+    )
+
+    hashed = tmp_path / "work" / "hashed-downstream-constraints.txt"
+    assert hashed.as_posix() in plan
+    assert "dependency==1" in hashed.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(("primary_status", "expected_status"), ((0, 23), (7, 7)))
+def test_downstream_cleanup_traps_report_cleanup_only_failures(
+    tmp_path: Path,
+    primary_status: int,
+    expected_status: int,
+) -> None:
+    """Generated and outer traps fail success but preserve an existing failure."""
+    module = _module()
+    wheel = tmp_path / "package.whl"
+    wheel.write_bytes(b"wheel")
+    constraints = ROOT / "meta/ci/requirements/downstream.txt"
+    seed_wheels = _seed_wheels(module, tmp_path)
+    generated = module.shell_plan(
+        wheel,
+        tmp_path / f"work-{primary_status}",
+        SCRIPT.parent,
+        constraints,
+        seed_wheels,
+        command_output=tmp_path / f"commands-{primary_status}.sh",
+    )
+    wrapper = SCRIPT.with_suffix(".sh").read_text(encoding="utf-8")
+    scripts = (
+        (generated, "trap cleanup_downstream EXIT"),
+        (wrapper, "trap cleanup_plan EXIT"),
+    )
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir(exist_ok=True)
+    fake_rm = fake_bin / "rm"
+    required_commands = {
+        command: shutil.which(command) for command in ("bash", "dirname", "mktemp")
+    }
+    assert all(required_commands.values())
+    bash = required_commands["bash"]
+    assert bash is not None
+    fake_rm.write_text("#!/usr/bin/env bash\nexit 23\n", encoding="utf-8")
+    fake_rm.chmod(0o755)
+    temporary_root = tmp_path / "temporary"
+    temporary_root.mkdir(exist_ok=True)
+    tool_directories = sorted(
+        {str(Path(command).parent) for command in required_commands.values() if command is not None}
+    )
+    environment = {
+        "LC_ALL": "C",
+        "PATH": os.pathsep.join((str(fake_bin), *tool_directories)),
+        "TMPDIR": str(temporary_root),
+        "TZ": "UTC",
+    }
+
+    for index, (content, marker) in enumerate(scripts):
+        end = content.index(marker) + len(marker)
+        preamble = content[:end] + f"\nexit {primary_status}\n"
+        preamble_path = tmp_path / f"cleanup-preamble-{primary_status}-{index}.sh"
+        preamble_path.write_text(preamble, encoding="utf-8")
+        completed = subprocess.run(
+            [bash, preamble_path.as_posix()],
+            check=False,
+            cwd=ROOT,
+            env=environment,
+        )
+        assert completed.returncode == expected_status
 
 
 def test_downstream_profiles_cover_every_published_runtime_extra() -> None:

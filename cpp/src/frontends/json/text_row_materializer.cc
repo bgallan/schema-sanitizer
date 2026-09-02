@@ -1,4 +1,6 @@
-// Materializes eligible JSON objects directly in frozen plan order.
+// Materializes eligible JSON objects directly in frozen plan order. The
+// pipeline preserves source offsets and ownership while enforcing plan order
+// and memory bounds.
 
 #include "frontends/json/text_row_materializer.hh"
 
@@ -22,6 +24,8 @@ struct EmitContext {
   bool requires_raw_fallback = false;
 };
 
+/// Emits plan ordered field into the destination while retaining canonical
+/// field order.
 sanitize::Status emit_plan_ordered_field(void *raw_context,
                                          std::string_view key,
                                          std::uint64_t key_hash,
@@ -74,6 +78,7 @@ sanitize::Status emit_plan_ordered_field(void *raw_context,
   return sanitize::Status::OK();
 }
 
+/// Removes leading ASCII whitespace without allocating a replacement string.
 std::string_view trim_leading_json_ws(std::string_view value) noexcept {
   while (!value.empty() && is_ws(static_cast<unsigned char>(value.front()))) {
     value.remove_prefix(1);
@@ -81,6 +86,8 @@ std::string_view trim_leading_json_ws(std::string_view value) noexcept {
   return value;
 }
 
+/// Creates an invalid status that prefixes the parser message with its absolute
+/// byte offset.
 sanitize::Status prefixed_parse_error(std::size_t base_offset,
                                       std::string_view message) {
   return sanitize::Status::Invalid(
@@ -91,6 +98,8 @@ sanitize::Status prefixed_parse_error(std::size_t base_offset,
 
 } // namespace
 
+/// Materializes one JSON object in compiled-plan order and fills absent fields
+/// with nulls.
 sanitize::Status
 append_plan_ordered_json_row(JsonOnDemandDoc *document, FlatRowBatch *batch,
                              PlanOrderedRowScratch *scratch,

@@ -1,4 +1,8 @@
-"""Execute the tutorial notebook code cells against the public API."""
+"""Execute the tutorial notebook code cells against the public API.
+
+The check loads the shipped cells in order and runs them against supported imports and
+example data.
+"""
 
 from __future__ import annotations
 

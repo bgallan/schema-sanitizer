@@ -1,4 +1,8 @@
-"""Owned temporary paths used by remote staging and output publication."""
+"""Owned temporary paths used by remote staging and output publication.
+
+It creates governed temporary files or directories and tracks unlink, release, rollback,
+and finalizer ownership through publication.
+"""
 
 from __future__ import annotations
 
@@ -135,7 +139,7 @@ class StagedPath:
         source_file_by_name: dict[str, str] | None = None,
         storage_lease: TemporaryStorageLease | None = None,
     ) -> None:
-        """Initialize this helper."""
+        """Claim the temporary path identity and bind its storage lease and cleanup finalizer."""
         self.path = path
         self._pid = os.getpid()
         self.is_dir = is_dir
@@ -227,8 +231,8 @@ class StagedPath:
             | int(getattr(os, "O_NOFOLLOW", 0))
             | int(getattr(os, "O_CLOEXEC", 0))
         )
-        # Pass62: never retain an ancestor FD while acquiring a descendant.
-        # Each directory consumes exactly two credits atomically: the opened
+        # Never retain an ancestor FD while acquiring a descendant. Each
+        # directory consumes exactly two credits atomically: the opened
         # directory and the descriptor duplicated by os.scandir(fd).
         pending: list[tuple[Path, PathIdentity, int]] = [(root, expected, 0)]
         while pending:
@@ -350,7 +354,7 @@ class StagedPath:
             return source
         root = source.parent / ".schema-sanitizer-delete"
         try:
-            os.mkdir(root, 0o700)
+            os.mkdir(root, stat.S_IRWXU)
         except FileExistsError:
             pass
         metadata = os.lstat(root)
@@ -360,9 +364,9 @@ class StagedPath:
         if getuid is not None and metadata.st_uid != getuid():
             raise OSError("temporary delete root must be owned by the current user")
         try:
-            os.chmod(root, 0o700, follow_symlinks=False)
+            os.chmod(root, stat.S_IRWXU, follow_symlinks=False)
         except (NotImplementedError, TypeError):
-            os.chmod(root, 0o700)
+            os.chmod(root, stat.S_IRWXU)
         return root / f"artifact-{os.getpid()}-{uuid.uuid4().hex}"
 
     @staticmethod
@@ -452,10 +456,7 @@ class StagedPath:
                     lease=lease,
                     expected_identity=retry_identity,
                 )
-                # Legacy internal callbacks returned ``None`` after accepting
-                # ownership. Only an explicit ``False`` means shutdown rejected
-                # the handoff and the caller must retain its retry handle.
-                if accepted is not False:
+                if accepted:
                     completed = True
                 else:
                     raise RuntimeError(
@@ -513,7 +514,7 @@ class RemoteOutputTarget:
     operation_context: OperationExecutionContext | None = None
 
     def close(self) -> None:
-        """Implement the internal close helper."""
+        """Close and delete the output target unless publication committed."""
         if self.temp is not None:
             self.temp.close()
             self.temp = None
@@ -527,6 +528,7 @@ def create_temp_file_path(
     with acquire_file_descriptor_capability(1, label="temporary_file_create") as capability:
 
         def create() -> int:
+            """Create a governed temporary file descriptor and record its path."""
             fd, path = tempfile.mkstemp(prefix="schema-sanitizer-", suffix=suffix)
             created_path.append(path)
             return fd

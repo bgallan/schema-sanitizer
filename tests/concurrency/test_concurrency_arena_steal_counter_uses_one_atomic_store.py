@@ -1,8 +1,10 @@
-"""Regression coverage for concurrency arena steal counter uses one atomic store."""
+"""Define atomic-publication contracts for arena steal telemetry.
+
+Each accepted steal must publish through one store in both arena and telemetry code, while native
+mixed-lane stealing must aggregate those publications into exact totals.
+"""
 
 from pathlib import Path
-
-from conftest import require_native
 
 from schema_sanitizer.core_impl.native_runtime import native_core
 
@@ -14,7 +16,7 @@ TELEMETRY_CC = ROOT / "cpp/src/internal/runtime/performance_telemetry.cc"
 
 
 def test_arena_steal_counter_uses_one_atomic_store() -> None:
-    """Verify the named concurrency regression contract."""
+    """Verify arena steal counter uses one atomic store."""
     arena = ARENA.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
     slot = arena[arena.index("struct WorkerSlot") : arena.index("explicit State")]
@@ -26,7 +28,7 @@ def test_arena_steal_counter_uses_one_atomic_store() -> None:
 
 
 def test_telemetry_steal_counter_uses_same_single_store_rule() -> None:
-    """Verify the named concurrency regression contract."""
+    """Verify telemetry steal counter uses same single store rule."""
     header = TELEMETRY_H.read_text(encoding="utf-8")
     source = TELEMETRY_CC.read_text(encoding="utf-8")
     method = source[source.index("RecordWorkerTaskStolen") : source.index("RecordWorkerStarted")]
@@ -36,9 +38,8 @@ def test_telemetry_steal_counter_uses_same_single_store_rule() -> None:
     assert ".stolen.load" not in method
 
 
-def test_native_stealing_and_mixed_lanes_remain_exact() -> None:
-    """Verify the named concurrency regression contract."""
-    require_native()
+def test_native_stealing_and_mixed_lanes_remain_exact(require_native: None) -> None:
+    """Verify native stealing and mixed lanes remain exact."""
     stolen, displaced, completed, queued, peak = native_core.operation_task_arena_stealing_probe()
     effective_workers = completed // 2
     assert 2 <= effective_workers <= 4

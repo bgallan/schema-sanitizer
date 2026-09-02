@@ -1,4 +1,6 @@
 // Provides bounded little-endian readers for serialized options payloads.
+// The helpers normalize private planning state without leaking wire or layout
+// details into public APIs.
 
 #pragma once
 
@@ -8,7 +10,7 @@
 
 namespace sanitize::internal::options_io {
 
-// Reads one little-endian uint8_t from a byte cursor.
+/// Reads one little-endian uint8_t from a byte cursor.
 inline bool read_u8(std::string_view in, std::size_t *pos, uint8_t *out) {
   if (!pos || !out || *pos > in.size() || in.size() - *pos < 1) {
     return false;
@@ -18,7 +20,7 @@ inline bool read_u8(std::string_view in, std::size_t *pos, uint8_t *out) {
   return true;
 }
 
-// Reads one little-endian uint32_t from a byte cursor.
+/// Reads one little-endian uint32_t from a byte cursor.
 inline bool read_u32(std::string_view in, std::size_t *pos, uint32_t *out) {
   if (!pos || !out || *pos > in.size() || in.size() - *pos < 4) {
     return false;
@@ -31,7 +33,7 @@ inline bool read_u32(std::string_view in, std::size_t *pos, uint32_t *out) {
   return true;
 }
 
-// Reads a uint32 length-prefixed string from a byte cursor.
+/// Reads a uint32 length-prefixed string from a byte cursor.
 inline bool read_string(std::string_view in, std::size_t *pos,
                         std::string *out) {
   uint32_t n = 0;

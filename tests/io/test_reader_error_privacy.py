@@ -1,4 +1,8 @@
-"""Source and runtime guards for privacy-safe reader diagnostics."""
+"""Source and runtime guards for privacy-safe reader diagnostics.
+
+It requires structural XML and reader diagnostics to retain useful context without
+exposing source element names or payload contents.
+"""
 
 from __future__ import annotations
 

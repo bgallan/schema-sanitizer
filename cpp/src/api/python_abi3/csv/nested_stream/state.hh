@@ -1,9 +1,10 @@
 /*
- * Shared CSV nested-column stream helpers.
+ * Declares shared CSV nested-column stream helpers.
  *
  * These declarations are used by the ABI3 CSV stream wrapper translation units
  * that rewrite nested top-level Arrow columns to JSON UTF-8 columns.
  */
+
 #pragma once
 
 #include "internal/abi/python_abi3/base.hh"

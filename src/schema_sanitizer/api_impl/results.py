@@ -1,4 +1,8 @@
-"""Analytical output conversion and result wrappers."""
+"""Analytical output conversion and result wrappers.
+
+It normalizes analytical targets and converts owned Arrow streams into public result
+wrappers while preserving diagnostics and resource lifetime.
+"""
 
 from __future__ import annotations
 
@@ -106,13 +110,9 @@ def _configurable_external_threads(
 
 def _unconfigurable_external_threads(runtime: Any | None = None) -> ExternalRuntimeConcurrencyLease:
     """Reserve the runtime's observed physical pool or reject unsafe execution."""
-    desired = _external_worker_target()
-    getter = getattr(runtime, "thread_pool_size", None) if runtime is not None else None
-    if callable(getter):
-        try:
-            desired = max(1, int(getter()))
-        except BaseException:
-            desired = _external_worker_target()
+    if runtime is None:
+        raise TypeError("an external runtime is required")
+    desired = max(1, int(runtime.thread_pool_size()))
     lease = acquire_external_runtime_threads(desired, allow_parallel=desired > 1, runtime=runtime)
     if lease.workers != desired or (desired > 1 and not lease.parallel):
         lease.close()
@@ -150,60 +150,24 @@ def _to_pandas(table: Any, *, feature: str, threading_mode: str = "single") -> A
 
 def _reader_row_count_from_pandas(frame: Any) -> int:
     """Return a pandas row count without converting or copying the frame."""
-    index = getattr(frame, "index", None)
-    if index is not None:
-        try:
-            return int(len(index))
-        except Exception:
-            pass
-    try:
-        return int(len(frame))
-    except Exception:
-        return 0
+    return max(0, int(len(frame.index)))
 
 
 def _polars_from_arrow_preserving_chunks(
     polars: Any, value: Any, *, feature: str
 ) -> tuple[Any, str]:
-    """Convert Arrow input without a full-frame rechunk when supported."""
-    from_arrow = getattr(polars, "from_arrow", None)
-    if not callable(from_arrow):
-        raise RuntimeError(f"{feature} could not access polars.from_arrow().")
+    """Convert Arrow input without a full-frame rechunk."""
     try:
-        return from_arrow(value, rechunk=False), "record_batch_reader_to_polars"
-    except TypeError as exc:
-        message = str(exc).lower()
-        unsupported_rechunk = "rechunk" in message and any(
-            marker in message
-            for marker in (
-                "unexpected keyword",
-                "keyword argument",
-                "invalid keyword",
-                "unsupported keyword",
-            )
-        )
-        if not unsupported_rechunk:
-            raise
-        try:
-            return from_arrow(value), "record_batch_reader_to_polars"
-        except Exception as fallback_exc:
-            raise RuntimeError(
-                f"{feature} could not convert the Arrow stream to Polars DataFrame."
-            ) from fallback_exc
+        return polars.from_arrow(value, rechunk=False), "record_batch_reader_to_polars"
+    except Exception as exc:
+        raise RuntimeError(
+            f"{feature} could not convert the Arrow stream to Polars DataFrame."
+        ) from exc
 
 
 def _reader_row_count_from_polars(frame: Any) -> int:
     """Return a Polars row count without materializing Python rows."""
-    try:
-        return max(0, int(frame.height))
-    except Exception:
-        shape = getattr(frame, "shape", None)
-        if shape is None:
-            return 0
-        try:
-            return max(0, int(shape[0]))
-        except Exception:
-            return 0
+    return max(0, int(frame.height))
 
 
 def _reader_batch_count(reader: Any) -> int:
@@ -213,20 +177,19 @@ def _reader_batch_count(reader: Any) -> int:
         try:
             if value is not None:
                 return max(0, int(value))
-        except Exception:
+        # Unsupported advisory counters are intentionally skipped.
+        except Exception as ignored_error:
+            del ignored_error
             continue
     return 0
 
 
 def _read_all_from_reader(reader: Any, *, feature: str) -> Any:
     """Consume a record-batch reader into one table with a stable boundary."""
-    read_all = getattr(reader, "read_all", None)
-    if callable(read_all):
-        try:
-            return read_all()
-        except Exception as exc:
-            raise RuntimeError(f"{feature} could not materialize the Arrow stream.") from exc
-    return _pyarrow_streams.table_from_stream_like(reader, feature=feature)
+    try:
+        return reader.read_all()
+    except Exception as exc:
+        raise RuntimeError(f"{feature} could not materialize the Arrow stream.") from exc
 
 
 def convert_arrow_stream_output(
@@ -251,26 +214,13 @@ def convert_arrow_stream_output(
 
         if target == "pandas":
             ensure_optional_dependency("pandas", extra="pandas", feature=feature)
-            read_pandas = getattr(reader, "read_pandas", None)
-            if not callable(read_pandas):
-                table = _read_all_from_reader(reader, feature=feature)
-                frame = _to_pandas(
-                    table,
-                    feature=feature,
-                    threading_mode=threading_mode,
-                )
-                return AnalyticalOutputConversion(
-                    frame,
-                    table,
-                    "pyarrow_table_fallback_to_pandas",
-                )
             pa = ensure_optional_dependency("pyarrow", extra="pyarrow", feature=feature)
             runtime = _configurable_external_threads(threading_mode, pa)
             try:
                 if runtime.parallel:
                     configured = constrain_external_runtime_worker_pool(pa, runtime.workers)
                     runtime.shrink_to(configured)
-                frame = read_pandas(use_threads=runtime.parallel)
+                frame = reader.read_pandas(use_threads=runtime.parallel)
                 if runtime.parallel:
                     observe_successful_output_runtime_stage("pandas")
             except Exception as exc:
@@ -315,13 +265,8 @@ def convert_arrow_stream_output(
             duckdb = ensure_optional_dependency("duckdb", extra="duckdb", feature=feature)
             resource_owner = None
             try:
-                # DuckDB accepts Arrow RecordBatchReader inputs directly.  Do
-                # not first collect every batch into a Python list: that old
-                # bridge retained the complete analytical result in memory.
-                # pass62 proof anchor: the semantic handoff remains
-                # ``duckdb.from_arrow(reader)``; pass63 routes it through a
-                # dedicated one-thread connection so the external runtime
-                # cannot escape the process thread envelope.
+                # Bind the reader through a dedicated one-thread connection so
+                # the lazy external runtime stays inside the process envelope.
                 relation, resource_owner = _duckdb_from_arrow_serial(duckdb, reader)
                 observe_successful_output_runtime_stage("duckdb")
             except Exception as exc:
@@ -500,6 +445,7 @@ class Result(DiagnosticsAccessMixin):
         self._sync_finalizer_capsule()
 
     def _sync_finalizer_capsule(self) -> None:
+        """Synchronize a result wrapper with its finalizer cleanup capsule."""
         capsule = self._finalizer_capsule
         state = self._finalizer_state
         if capsule is None or state is None:
@@ -514,6 +460,7 @@ class Result(DiagnosticsAccessMixin):
         state.keepalive = getattr(self, "_keepalive", None)
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this result."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -626,8 +573,9 @@ class Result(DiagnosticsAccessMixin):
                 self._finalizer_ticket = 0
                 self._finalizer_capsule = None
                 self._finalizer_state = None
-        except Exception:
-            pass
+        # Destructors cannot raise.
+        except Exception as ignored_error:
+            del ignored_error
 
     def __repr__(self) -> str:
         """Return a compact row and column count representation."""
@@ -650,8 +598,11 @@ class SinkResult(DiagnosticsAccessMixin, ClosableContextManagerMixin):
         self._raw = raw
         self._table: Any | None = None
         self._stream: Stream | None = None
+        self._input_source_route: str | None = None
+        self._parquet_input_route: str | None = None
 
     def _retire_finalizer_slot(self) -> None:
+        """Retire the finalizer escrow slot owned by this sink result."""
         ticket = self._finalizer_ticket
         capsule = self._finalizer_capsule
         if ticket and capsule is not None:
@@ -690,8 +641,9 @@ class SinkResult(DiagnosticsAccessMixin, ClosableContextManagerMixin):
                 self._raw = None
                 self._finalizer_ticket = 0
                 self._finalizer_capsule = None
-        except Exception:
-            pass
+        # Destructors cannot raise.
+        except Exception as ignored_error:
+            del ignored_error
 
     @property
     def table(self):

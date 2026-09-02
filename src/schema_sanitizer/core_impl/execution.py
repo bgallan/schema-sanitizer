@@ -1,4 +1,8 @@
-"""Package-owned ABI3 execution context and process-local lifecycle."""
+"""Own the package ABI3 execution context and its process-local lifecycle.
+
+The context wraps native execution methods, while the module creates, reuses, closes, and resets
+the default process context across shutdown and fork boundaries.
+"""
 
 from __future__ import annotations
 
@@ -20,19 +24,6 @@ from .registry_sinks import (
     _RegistryPathProviderSinkMethods,
     _RegistryPathSourceSinkMethods,
 )
-
-_LAST_SOURCE_ROUTE = "none"
-
-
-def last_sink_source_route() -> str:
-    """Return the route used by the most recent plain native sink call."""
-    return _LAST_SOURCE_ROUTE
-
-
-def _record_sink_source_route(route: str) -> None:
-    """Record the route used by a plain native sink call."""
-    global _LAST_SOURCE_ROUTE
-    _LAST_SOURCE_ROUTE = route
 
 
 class ExecutionContext(
@@ -67,7 +58,6 @@ class ExecutionContext(
         self, sink: str, frontend: str, source: str, payload: Any, options: Any
     ) -> SinkOutput:
         """Prepare options and invoke the source-selected native sink."""
-        _record_sink_source_route(source)
         return self._sink_output(
             sink,
             _native.context_to_sink_from_source(
@@ -295,7 +285,6 @@ class ExecutionContext(
         timestamp_columns: TimestampColumns,
     ) -> SinkOutput:
         """Send multiple local path sources to a native sink."""
-        _record_sink_source_route("path_sources")
         return self._sink_output(
             sink,
             _native.context_to_sink_from_path_sources(
@@ -320,7 +309,6 @@ class ExecutionContext(
         timestamp_columns: TimestampColumns,
     ) -> SinkOutput:
         """Send lazily provided path-source chunks to a native sink."""
-        _record_sink_source_route("path_source_chunk_provider")
         return self._sink_output(
             sink,
             _native.context_to_sink_from_path_source_chunk_provider(
@@ -338,7 +326,6 @@ class ExecutionContext(
         self, sink: str, frontend: str, stream: Any, options: Any = None
     ) -> SinkOutput:
         """Send an Arrow C stream to a native sink."""
-        _record_sink_source_route("arrow")
         return self._sink_output(
             sink,
             _native.context_to_sink_arrow_stream(

@@ -1,4 +1,10 @@
-/* Python ABI3 schema-probe method argument parsing. */
+/*
+ * Implements Python ABI3 schema-probe method argument parsing.
+ *
+ * The boundary packages inferred schemas and registry state while translating
+ * failures into Python exceptions.
+ */
+
 #include "internal/abi/python_abi3/base.hh"
 #include "internal/abi/python_abi3/capsules.hh"
 #include "internal/abi/python_abi3/methods.hh"
@@ -13,12 +19,10 @@
 #include <utility>
 #include <vector>
 
-#include "api/c/schema_sanitizer_c_sink_internal.hh"
 #include "api/python_abi3/path_sources/path_sources.hh"
 #include "api/python_abi3/registry/native_multi_source_stream.hh"
 #include "api/python_abi3/registry/plan/plan.hh"
 #include "api/python_abi3/registry/registry_stream_metadata.hh"
-#include "internal/abi/schema_sanitizer_c_internal.hh"
 #include "internal/planning/options_schema_serialization.hh"
 #include "sanitize/core/diagnostics.hh"
 #include "sanitize/core/logical_schema.hh"
@@ -42,6 +46,7 @@ using schema_probe_detail::registry_probe_path_sources_state_or_raise;
 using schema_probe_detail::schema_probe_or_raise;
 
 // clang-format off
+/// Probes one Python-backed source and returns its inferred logical-schema payload.
 PyObject *py_context_schema_probe_from_source(PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;
   const char *frontend_name = nullptr;
@@ -69,6 +74,7 @@ PyObject *py_context_schema_probe_from_source(PyObject *, PyObject *args) {
                                "context_schema_probe_from_source");
 }
 
+/// Probes one Python-backed source and merges its schema into registry JSON.
 PyObject *py_context_registry_probe_from_source(PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;
   const char *frontend_name = nullptr;
@@ -101,6 +107,7 @@ PyObject *py_context_registry_probe_from_source(PyObject *, PyObject *args) {
       "context_registry_probe_from_source");
 }
 
+/// Builds an encoded multi-path source and returns its inferred logical schema.
 PyObject *py_context_schema_probe_from_paths(PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;
   const char *frontend_name = nullptr;
@@ -134,6 +141,7 @@ PyObject *py_context_schema_probe_from_paths(PyObject *, PyObject *args) {
                                "context_schema_probe_from_paths");
 }
 
+/// Probes an encoded multi-path source and merges its schema into registry JSON.
 PyObject *py_context_registry_probe_from_paths(PyObject *, PyObject *args) {
   PyObject *ctx_obj = nullptr;
   const char *frontend_name = nullptr;
@@ -171,6 +179,7 @@ PyObject *py_context_registry_probe_from_paths(PyObject *, PyObject *args) {
       registry_json, field_name_policy, schema_mode,
       "context_registry_probe_from_paths");
 }
+/// Probes parsed path sources and merges their schemas into registry JSON.
 PyObject *py_context_registry_probe_from_path_sources(PyObject *,
                                                       PyObject *args) {
   PyObject *ctx_obj = nullptr;
@@ -202,6 +211,7 @@ PyObject *py_context_registry_probe_from_path_sources(PyObject *,
       "context_registry_probe_from_path_sources");
 }
 
+/// Probes path sources against an existing compiled registry state.
 PyObject *
 py_context_registry_probe_from_path_sources_registry_state(PyObject *,
                                                            PyObject *args) {
@@ -239,6 +249,7 @@ py_context_registry_probe_from_path_sources_registry_state(PyObject *,
       "context_registry_probe_from_path_sources_registry_state");
 }
 
+/// Best-effort probes path sources and merges every valid schema into registry JSON.
 PyObject *
 py_context_registry_probe_from_path_sources_best_effort(PyObject *,
                                                         PyObject *args) {
@@ -272,6 +283,7 @@ py_context_registry_probe_from_path_sources_best_effort(PyObject *,
       "context_registry_probe_from_path_sources_best_effort", true);
 }
 
+/// Best-effort probes path sources against an existing compiled registry state.
 PyObject *
 py_context_registry_probe_from_path_sources_best_effort_registry_state(
     PyObject *, PyObject *args) {
@@ -310,6 +322,7 @@ py_context_registry_probe_from_path_sources_best_effort_registry_state(
       "context_registry_probe_from_path_sources_best_effort_registry_state",
       true);
 }
+/// Consumes path-source chunks and merges their inferred schemas into registry JSON.
 PyObject *
 py_context_registry_probe_from_path_source_chunk_provider(PyObject *,
                                                           PyObject *args) {
@@ -343,6 +356,7 @@ py_context_registry_probe_from_path_source_chunk_provider(PyObject *,
       skip_invalid_json_sources != 0);
 }
 
+/// Consumes path-source chunks and probes them against compiled registry state.
 PyObject *
 py_context_registry_probe_from_path_source_chunk_provider_registry_state(
     PyObject *, PyObject *args) {

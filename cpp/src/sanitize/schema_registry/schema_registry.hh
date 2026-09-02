@@ -1,4 +1,6 @@
-// Declares native schema-registry merge helpers for incremental pipelines.
+// Declares native schema-registry merging for incremental pipelines.
+// Decoded canonical schemas, durable registry JSON, and drift events are
+// reconciled through one deterministic evolution contract.
 
 #pragma once
 
@@ -28,18 +30,18 @@ struct SchemaRegistryMergeResult {
   std::string detected_at;
 };
 
-// Merges an inferred schema into a registry-backed canonical output schema.
+/// Merges an inferred schema into a registry-backed canonical output schema.
 Result<SchemaRegistryMergeResult>
 merge_schema_registry(const SchemaRegistryMergeInput &input);
 
-// Merges an inferred schema into an already-decoded previous canonical schema.
-// The registry JSON is still carried for durable metadata serialization, but
-// the merge itself does not need to parse it again.
+/// Merges an inferred schema into an already-decoded previous canonical schema.
+/// The registry JSON is still carried for durable metadata serialization, but
+/// the merge itself does not need to parse it again.
 Result<SchemaRegistryMergeResult> merge_schema_registry_with_previous_schema(
     const SchemaRegistryMergeInput &input,
     const LogicalSchema &previous_schema);
 
-// Returns whether a registry JSON document carries a usable canonical schema.
+/// Returns whether a registry JSON document carries a usable canonical schema.
 Result<bool>
 schema_registry_has_canonical_schema(std::string_view registry_json);
 

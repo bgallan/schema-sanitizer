@@ -1,4 +1,6 @@
 // Implements Arrow decimal and integer text formatting helpers.
+// These routines provide deterministic representations shared by the native
+// JSON and CSV output paths.
 
 #include "internal/arrow_text/formatters.hh"
 
@@ -14,11 +16,15 @@
 namespace sanitize::internal::arrow_format {
 namespace {
 
+/// Reports whether a formatted decimal contains only zero digits and a decimal
+/// point.
 bool decimal_digits_are_zero(std::string_view digits) {
   return std::all_of(digits.begin(), digits.end(),
                      [](char c) { return c == '0' || c == '.'; });
 }
 
+/// Multiplies a reversed decimal digit buffer and adds one carry-propagated
+/// byte value.
 void reversed_decimal_multiply_add(std::string &digits, uint32_t multiplier,
                                    uint32_t addend) {
   uint32_t carry = addend;
@@ -34,6 +40,7 @@ void reversed_decimal_multiply_add(std::string &digits, uint32_t multiplier,
   }
 }
 
+/// Converts an arbitrary-width little-endian unsigned integer to decimal text.
 std::string unsigned_little_endian_to_decimal(const uint8_t *bytes,
                                               int32_t byte_width) {
   std::string reversed_digits = "0";
@@ -44,6 +51,8 @@ std::string unsigned_little_endian_to_decimal(const uint8_t *bytes,
   return reversed_digits;
 }
 
+/// Places the decimal point and sign into magnitude digits according to Arrow
+/// scale metadata.
 std::string format_scaled_decimal(std::string digits, int32_t scale,
                                   bool negative) {
   if (scale > 0) {

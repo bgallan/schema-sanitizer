@@ -1,4 +1,8 @@
-"""Contracts for atomic publication of native local outputs."""
+"""Contracts for atomic publication of native local outputs.
+
+It verifies publication occurs only after success, destination contents and modes
+survive failure, and native writers use atomic staging.
+"""
 
 from __future__ import annotations
 
@@ -37,7 +41,7 @@ def test_atomic_local_output_replaces_only_after_success(tmp_path: Path) -> None
 
 
 def test_atomic_local_output_preserves_destination_on_failure(tmp_path: Path) -> None:
-    """A failed staged write removes partial state and preserves valid old data."""
+    """A failed staged write removes partial state and preserves prior valid data."""
     target = tmp_path / "result.csv"
     target.write_bytes(b"stable")
 
@@ -72,11 +76,11 @@ def test_atomic_local_output_preserves_mode_without_fchmod(
 def test_native_writer_wrapper_uses_atomic_staging(tmp_path: Path) -> None:
     """Native writer failure cannot truncate an existing destination."""
     target = tmp_path / "result.jsonl"
-    target.write_bytes(b"valid-old-output")
+    target.write_bytes(b"valid-prior-output")
 
     def failing_writer(_stream: object, path: str) -> None:
         """Write partial bytes and simulate a native failure."""
-        Path(path).write_bytes(b"partial-new-output")
+        Path(path).write_bytes(b"partial-replacement-output")
         raise RuntimeError("native write failed")
 
     with pytest.raises(RuntimeError, match="native write failed"):
@@ -87,5 +91,5 @@ def test_native_writer_wrapper_uses_atomic_staging(tmp_path: Path) -> None:
             output_path=str(target),
         )
 
-    assert target.read_bytes() == b"valid-old-output"
+    assert target.read_bytes() == b"valid-prior-output"
     assert not _temporary_siblings(target)

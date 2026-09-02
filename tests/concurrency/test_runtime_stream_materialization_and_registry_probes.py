@@ -1,4 +1,9 @@
-"""Tests stream and result resource lifecycle contracts."""
+"""Connect registry probes with raw-stream materialization and file output.
+
+Opened registry streams should feed Arrow consumers directly, close their raw owners, preserve the
+existing file-output fallback, release ABI wrappers, decode schemas lazily, and reuse native
+registry state for path sources.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +14,7 @@ import pytest
 
 
 def test_opened_registry_stream_materialization_uses_raw_arrow_stream(monkeypatch) -> None:
-    """Verify source-plan analytical output avoids Python batch iteration."""
+    """Verify opened registry stream materialization uses raw Arrow stream."""
     from schema_sanitizer.api_impl.source_plan import registry as output
     from schema_sanitizer.api_impl.source_plan.registry import OpenedSourcePlanRegistryStream
 
@@ -19,11 +24,11 @@ def test_opened_registry_stream_materialization_uses_raw_arrow_stream(monkeypatc
         closed = 0
 
         def __arrow_c_stream__(self):
-            """Expose a fake Arrow C stream."""
+            """Export the owned Arrow C Stream capsule."""
             return object()
 
         def close(self) -> None:
-            """Close the raw stream."""
+            """Close the resources owned by the raw stream test double."""
             self.closed += 1
 
     class PythonStream:
@@ -32,11 +37,11 @@ def test_opened_registry_stream_materialization_uses_raw_arrow_stream(monkeypatc
         closed = 0
 
         def __iter__(self):
-            """Fail if analytical materialization uses Python batch iteration."""
+            """Iterate over values exposed by the Python stream test double."""
             raise AssertionError("Python batch iteration should not be used")
 
         def close(self) -> None:
-            """Close the Python stream wrapper."""
+            """Close the resources owned by the Python stream test double."""
             self.closed += 1
 
     raw = RawStream()
@@ -67,7 +72,7 @@ def test_opened_registry_stream_materialization_uses_raw_arrow_stream(monkeypatc
 
 
 def test_opened_registry_stream_materialization_closes_raw_stream(monkeypatch) -> None:
-    """Verify raw streams are closed after direct materialization."""
+    """Verify opened registry stream materialization closes raw stream."""
     from schema_sanitizer.api_impl.source_plan import registry as output
     from schema_sanitizer.api_impl.source_plan.registry import OpenedSourcePlanRegistryStream
 
@@ -75,15 +80,15 @@ def test_opened_registry_stream_materialization_closes_raw_stream(monkeypatch) -
         """Raw Arrow stream helper."""
 
         def __init__(self) -> None:
-            """Initialize close counter."""
+            """Initialize the raw stream test double."""
             self.closed = 0
 
         def __arrow_c_stream__(self):
-            """Expose a fake Arrow C stream."""
+            """Export the owned Arrow C Stream capsule."""
             return object()
 
         def close(self) -> None:
-            """Close the raw stream."""
+            """Close the resources owned by the raw stream test double."""
             self.closed += 1
 
     raw = RawStream()
@@ -113,7 +118,7 @@ def test_opened_registry_stream_materialization_closes_raw_stream(monkeypatch) -
 
 
 def test_opened_registry_file_output_uses_raw_stream(monkeypatch, tmp_path: Path) -> None:
-    """Verify source-plan file output transfers raw streams to native file writers."""
+    """Verify opened registry file output uses raw stream."""
     from schema_sanitizer.api_impl.results import Result
     from schema_sanitizer.api_impl.source_plan import registry as output
     from schema_sanitizer.api_impl.source_plan.registry import OpenedSourcePlanRegistryStream
@@ -122,12 +127,12 @@ def test_opened_registry_file_output_uses_raw_stream(monkeypatch, tmp_path: Path
         """Raw stream with close tracking."""
 
         def __init__(self) -> None:
-            """Initialize close counter and diagnostics."""
+            """Initialize the raw stream test double."""
             self.closed = 0
             self.diagnostics = SimpleNamespace()
 
         def close(self) -> None:
-            """Close the raw stream."""
+            """Close the resources owned by the raw stream test double."""
             self.closed += 1
 
     raw = RawStream()
@@ -182,7 +187,7 @@ def test_opened_registry_file_output_keeps_existing_stream_fallback(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Verify existing Python stream wrappers keep the fallback writer path."""
+    """Verify opened registry file output keeps existing stream fallback."""
     from schema_sanitizer.api_impl.source_plan import registry as output
     from schema_sanitizer.api_impl.source_plan.registry import OpenedSourcePlanRegistryStream
 
@@ -190,22 +195,22 @@ def test_opened_registry_file_output_keeps_existing_stream_fallback(
         """Raw stream with close tracking."""
 
         def __init__(self) -> None:
-            """Initialize close counter."""
+            """Initialize the raw stream test double."""
             self.closed = 0
 
         def close(self) -> None:
-            """Close the raw stream."""
+            """Close the resources owned by the raw stream test double."""
             self.closed += 1
 
     class PythonStream:
         """Existing stream wrapper with close tracking."""
 
         def __init__(self) -> None:
-            """Initialize close counter."""
+            """Initialize the Python stream test double."""
             self.closed = 0
 
         def close(self) -> None:
-            """Close the stream wrapper."""
+            """Close the resources owned by the Python stream test double."""
             self.closed += 1
 
     raw = RawStream()
@@ -267,7 +272,7 @@ def test_abi3_sink_output_close_releases_stream_wrappers() -> None:
 
 
 def test_probe_results_decode_pyarrow_schema_lazily(monkeypatch) -> None:
-    """Verify native probe results only decode PyArrow schemas when requested."""
+    """Verify probe results decode PyArrow schema lazily."""
     from schema_sanitizer.core_impl import native_results as native_schema_results
     from schema_sanitizer.core_impl.native_results import (
         RegistryProbeResult,
@@ -307,7 +312,7 @@ def test_probe_results_decode_pyarrow_schema_lazily(monkeypatch) -> None:
 
 
 def test_probe_result_field_names_do_not_decode_pyarrow_schema(monkeypatch) -> None:
-    """Verify native probe field names are available without PyArrow schema decoding."""
+    """Verify probe result field names do not decode PyArrow schema."""
     from schema_sanitizer.core_impl import native_results as native_schema_results
     from schema_sanitizer.core_impl.native_results import (
         RegistryProbeResult,
@@ -360,7 +365,7 @@ def test_probe_result_field_names_do_not_decode_pyarrow_schema(monkeypatch) -> N
 
 
 def test_registry_probe_path_sources_uses_native_registry_state(monkeypatch) -> None:
-    """Verify path-source probes prefer the native-state ABI when available."""
+    """Verify registry probe path sources uses native registry state."""
     from schema_sanitizer.core_impl import execution as execution_context
     from schema_sanitizer.core_impl import probes as probe_dependencies
 
@@ -371,7 +376,7 @@ def test_registry_probe_path_sources_uses_native_registry_state(monkeypatch) -> 
 
         @staticmethod
         def context_registry_probe_from_path_sources_registry_state(*args):
-            """Capture the native-state probe call."""
+            """Record the stateful path probe and return the next registry payload."""
             calls.append(args)
             return {
                 "schema": b"\x00\x00\x00\x00",
@@ -384,11 +389,11 @@ def test_registry_probe_path_sources_uses_native_registry_state(monkeypatch) -> 
 
         @staticmethod
         def context_registry_probe_from_path_sources(*_args):
-            """Fail if the JSON-registry path is used."""
+            """Raise the deliberate failure for the context registry probe from path sources path."""
             raise AssertionError("JSON registry probe should not be used")
 
-    ctx = execution_context.ExecutionContext.__new__(execution_context.ExecutionContext)
-    ctx._capsule = "ctx"
+    monkeypatch.setattr(execution_context, "_native", SimpleNamespace(context_new=lambda: "ctx"))
+    ctx = execution_context.ExecutionContext()
     monkeypatch.setattr(probe_dependencies, "_native", FakeNative)
     monkeypatch.setattr(
         probe_dependencies, "_options_capsule", lambda options: f"prepared:{options}"

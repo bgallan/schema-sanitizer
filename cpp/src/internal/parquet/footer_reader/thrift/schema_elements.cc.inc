@@ -1,5 +1,9 @@
-// Parses Parquet logical types and schema elements from compact Thrift.
+// Parses compact-Thrift schema elements and validates their physical and
+// logical annotations. This fragment is included by the consolidated footer
+// reader inside its private implementation namespace.
 
+/// Reads one compact-Thrift logical-type union and records its recognized
+/// annotation.
 sanitize::Result<LogicalTypeReadInfo> read_logical_type(CompactReader &reader) {
   std::int16_t last_field_id = 0;
   LogicalTypeReadInfo out;
@@ -33,6 +37,8 @@ sanitize::Result<LogicalTypeReadInfo> read_logical_type(CompactReader &reader) {
   }
 }
 
+/// Parses one compact-Thrift SchemaElement and its repetition and logical-type
+/// fields.
 sanitize::Result<SchemaElementInfo> read_schema_element(CompactReader &reader) {
   SchemaElementInfo out;
   std::int16_t last_field_id = 0;
@@ -148,6 +154,7 @@ sanitize::Result<SchemaElementInfo> read_schema_element(CompactReader &reader) {
   }
 }
 
+/// Parses the bounded schema-element list into footer metadata.
 sanitize::Status read_schema_elements(CompactReader &reader, FooterInfo *info) {
   if (!info) {
     return sanitize::Status::Invalid("Parquet footer: internal schema error");

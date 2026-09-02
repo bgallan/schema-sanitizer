@@ -1,4 +1,8 @@
-"""Protect the portable C++ thread and cancellation boundary."""
+"""Protect the portable C++ thread and cancellation boundary.
+
+Nonportable standard-library thread types must remain isolated behind the compatibility layer,
+which must expose both standard and portable routes without leaking layout assumptions.
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,8 @@
-"""Regression coverage for concurrency sources define bounded immutable token handoff."""
+"""Specify the bounded immutable token handoff used by native JSONL sources.
+
+Validated tokens may be reused, budget exhaustion falls back per row, escaped and duplicate keys
+retain single-worker semantics, and syntax errors keep precedence over worker conversion failures.
+"""
 
 from __future__ import annotations
 
@@ -8,12 +12,12 @@ from pathlib import Path
 
 import pytest
 from _support.threading_goldens import assert_logical_files_equivalent, semantic_stats
-from conftest import require_native
 
 import schema_sanitizer as ss
 from schema_sanitizer.api_impl.execution_context import ExecutionContext
 from schema_sanitizer.api_impl.file_conversion.writers import write_jsonl_native_first_stream
 from schema_sanitizer.api_impl.stream_output import write_raw_stream_to_file
+from schema_sanitizer.core_impl.execution_policy import execution_policy
 from schema_sanitizer.core_impl.schema_registry import schema_contract_from_registry_json
 from schema_sanitizer.options_impl.call_options import normalize_call_options
 
@@ -118,10 +122,11 @@ def test_sources_define_bounded_immutable_token_handoff() -> None:
 
 def test_wide_jsonl_reuses_validated_tokens_with_exact_output(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Workers consume the immutable token index instead of the root parser."""
-    require_native()
     memory_limit = 64 * 1024 * 1024
+    requested_policy = execution_policy("multi", memory_limit)
     source = tmp_path / "wide.jsonl"
     _write_rows(source, 2_048)
     contract = _contract(source, tmp_path / "contract.jsonl", memory_limit)
@@ -142,24 +147,36 @@ def test_wide_jsonl_reuses_validated_tokens_with_exact_output(
         contract=contract,
         memory_limit=memory_limit,
     )
-    counters = context.performance_stats()["counters"]
+    performance = context.performance_stats()
+    counters = performance["counters"]
 
     assert semantic_stats(multi_result.stats) == semantic_stats(single_result.stats)
     assert multi_result.schema_registry_json == single_result.schema_registry_json
     assert_logical_files_equivalent(single_output, multi_output)
-    assert counters["jsonl_token_rows_indexed"] == 2_048
-    assert counters["jsonl_token_fields_indexed"] == 2_048 * len(_COLUMNS)
+    if requested_policy.available_cpus == 1:
+        assert requested_policy.fallback_to_one_worker_reason == "cpu_limited"
+        assert performance["effective_workers"] == 1
+        expected_indexed_rows = 0
+    else:
+        assert requested_policy.effective_workers > 1
+        assert performance["effective_workers"] > 1
+        expected_indexed_rows = 2_048
+    assert counters["jsonl_token_rows_indexed"] == expected_indexed_rows
+    assert counters["jsonl_token_fields_indexed"] == expected_indexed_rows * len(_COLUMNS)
     assert counters["jsonl_token_rows_fallback"] == 0
 
 
 def test_token_budget_falls_back_per_row_without_changing_results(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
-    """A full token budget degrades to raw rows, never a partial index."""
-    require_native()
+    """A full token budget degrades per row while serial-only hosts stay exact."""
     # MSVC's allocator/STL overhead is part of the strict global budget.
     oracle_memory_limit = (256 if os.name == "nt" else 128) * 1024 * 1024
     constrained_memory_limit = (63 if os.name == "nt" else 32) * 1024 * 1024
+    constrained_policy = execution_policy("multi", constrained_memory_limit)
+    serial_host = constrained_policy.available_cpus == 1
+    multi_memory_limit = oracle_memory_limit if serial_host else constrained_memory_limit
     source = tmp_path / "budget.jsonl"
     _write_rows(source, 8_192)
     contract = _contract(source, tmp_path / "contract.jsonl", 256 * 1024 * 1024)
@@ -178,12 +195,11 @@ def test_token_budget_falls_back_per_row_without_changing_results(
         multi_output,
         mode="multi",
         contract=contract,
-        memory_limit=constrained_memory_limit,
+        memory_limit=multi_memory_limit,
     )
     stats = context.performance_stats()
     counters = stats["counters"]
 
-    assert stats["effective_workers"] > 1
     single_semantics = semantic_stats(single_result.stats)
     multi_semantics = semantic_stats(multi_result.stats)
     for execution_detail in ("batches", "operation_memory_limit_bytes"):
@@ -192,20 +208,30 @@ def test_token_budget_falls_back_per_row_without_changing_results(
     assert multi_semantics == single_semantics
     assert multi_result.schema_registry_json == single_result.schema_registry_json
     assert_logical_files_equivalent(single_output, multi_output)
-    assert 0 < counters["jsonl_token_rows_indexed"] < 8_192
-    assert counters["jsonl_token_rows_fallback"] > 0
-    assert counters["jsonl_token_rows_indexed"] + counters["jsonl_token_rows_fallback"] == 8_192
-    assert counters["jsonl_token_fields_indexed"] == (
-        counters["jsonl_token_rows_indexed"] * len(_COLUMNS)
-    )
+    if not serial_host:
+        assert constrained_policy.effective_workers > 1
+        assert stats["effective_workers"] > 1
+        assert 0 < counters["jsonl_token_rows_indexed"] < 8_192
+        assert counters["jsonl_token_rows_fallback"] > 0
+        assert counters["jsonl_token_rows_indexed"] + counters["jsonl_token_rows_fallback"] == 8_192
+        assert counters["jsonl_token_fields_indexed"] == (
+            counters["jsonl_token_rows_indexed"] * len(_COLUMNS)
+        )
+    else:
+        assert constrained_policy.fallback_to_one_worker_reason == "cpu_limited"
+        assert stats["effective_workers"] == 1
+        assert counters["jsonl_token_rows_indexed"] == 0
+        assert counters["jsonl_token_fields_indexed"] == 0
+        assert counters["jsonl_token_rows_fallback"] == 0
 
 
 def test_escaped_and_duplicate_keys_keep_single_thread_semantics(
     tmp_path: Path,
+    require_native: None,
 ) -> None:
     """Escaped names and duplicate fields retain canonical lookup behavior."""
-    require_native()
     memory_limit = 64 * 1024 * 1024
+    requested_policy = execution_policy("multi", memory_limit)
     clean = tmp_path / "clean.jsonl"
     _write_rows(clean, 256)
     contract = _contract(clean, tmp_path / "contract.jsonl", memory_limit)
@@ -243,7 +269,16 @@ def test_escaped_and_duplicate_keys_keep_single_thread_semantics(
     assert semantic_stats(multi_result.stats) == semantic_stats(single_result.stats)
     assert multi_result.schema_registry_json == single_result.schema_registry_json
     assert_logical_files_equivalent(single_output, multi_output)
-    assert context.performance_stats()["counters"]["jsonl_token_rows_indexed"] == 256
+    performance = context.performance_stats()
+    if requested_policy.available_cpus == 1:
+        assert requested_policy.fallback_to_one_worker_reason == "cpu_limited"
+        assert performance["effective_workers"] == 1
+        expected_indexed_rows = 0
+    else:
+        assert requested_policy.effective_workers > 1
+        assert performance["effective_workers"] > 1
+        expected_indexed_rows = 256
+    assert performance["counters"]["jsonl_token_rows_indexed"] == expected_indexed_rows
 
 
 @pytest.mark.parametrize(
@@ -254,10 +289,12 @@ def test_escaped_and_duplicate_keys_keep_single_thread_semantics(
     ],
 )
 def test_syntax_error_still_precedes_worker_conversion_failure(
-    tmp_path: Path, bad_row: str, message_fragment: str
+    tmp_path: Path,
+    bad_row: str,
+    message_fragment: str,
+    require_native: None,
 ) -> None:
     """Frontend syntax errors still outrank earlier worker conversion errors."""
-    require_native()
     memory_limit = 64 * 1024 * 1024
     clean = tmp_path / "clean.jsonl"
     _write_rows(clean, 256)

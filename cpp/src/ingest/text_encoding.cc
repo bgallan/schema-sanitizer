@@ -1,10 +1,14 @@
-// Defines the canonical text encoding names accepted by ingestion.
+// Defines the canonical text encoding names accepted by ingestion. It
+// translates user spellings and native enum values at the chunk-source
+// boundary.
 
 #include "ingest/chunk_source_detail.hh"
 
 #include <string_view>
 
 namespace sanitize::internal {
+
+/// Parses a supported encoding spelling into the canonical ingestion enum.
 TextEncoding parse_text_encoding(std::string_view encoding) {
   if (encoding == "utf-8") {
     return TextEncoding::kUtf8;
@@ -24,6 +28,7 @@ TextEncoding parse_text_encoding(std::string_view encoding) {
   return TextEncoding::kUnsupported;
 }
 
+/// Returns the canonical option spelling for a native ingestion encoding.
 std::string_view text_encoding_name(TextEncoding encoding) {
   switch (encoding) {
   case TextEncoding::kLatin1:

@@ -1,4 +1,8 @@
-"""Parquet runtime status, footer diagnostics, and projection audits."""
+"""Parquet runtime status, footer diagnostics, and projection audits.
+
+It exposes direct-read eligibility, footer diagnostics, runtime readiness, and recursive
+projection audits to public status and CI callers.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +16,7 @@ from ...core_impl.native_symbols import (
     PARQUET_STREAM_PREFLIGHT_JSON,
 )
 from ..pyarrow.schema_decision_cache import SchemaDecisionCache
-from .contract_gates.native import (
+from .contract_gates import (
     _native_nested_contract_status_from_summary,
     _native_parquet_writer_contract_status_from_footer_info,
 )
