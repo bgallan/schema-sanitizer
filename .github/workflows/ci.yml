@@ -687,7 +687,7 @@ jobs:
         id: upload-durable-linux-wheel
         if: steps.stage-validation-artifacts.outputs.reused != 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist-wheels-linux-x86_64
           path: retained/linux-x86_64/
@@ -697,7 +697,7 @@ jobs:
           overwrite: true
       - name: Retry the durable Linux wheel-bundle upload
         if: ${{ steps.stage-validation-artifacts.outputs.reused != 'true' && steps.upload-durable-linux-wheel.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist-wheels-linux-x86_64
           path: retained/linux-x86_64/
@@ -709,7 +709,7 @@ jobs:
         id: upload-durable-macos-arm64-wheel
         if: steps.stage-validation-artifacts.outputs.reused != 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist-wheels-macos-arm64
           path: retained/macos-arm64/
@@ -719,7 +719,7 @@ jobs:
           overwrite: true
       - name: Retry the durable macOS ARM64 wheel-bundle upload
         if: ${{ steps.stage-validation-artifacts.outputs.reused != 'true' && steps.upload-durable-macos-arm64-wheel.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist-wheels-macos-arm64
           path: retained/macos-arm64/
@@ -731,7 +731,7 @@ jobs:
         id: upload-durable-macos-x86-64-wheel
         if: steps.stage-validation-artifacts.outputs.reused != 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist-wheels-macos-x86_64
           path: retained/macos-x86_64/
@@ -741,7 +741,7 @@ jobs:
           overwrite: true
       - name: Retry the durable macOS x86-64 wheel-bundle upload
         if: ${{ steps.stage-validation-artifacts.outputs.reused != 'true' && steps.upload-durable-macos-x86-64-wheel.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist-wheels-macos-x86_64
           path: retained/macos-x86_64/
@@ -753,7 +753,7 @@ jobs:
         id: upload-durable-windows-wheel
         if: steps.stage-validation-artifacts.outputs.reused != 'true'
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist-wheels-windows-amd64
           path: retained/windows-amd64/
@@ -763,7 +763,7 @@ jobs:
           overwrite: true
       - name: Retry the durable Windows wheel-bundle upload
         if: ${{ steps.stage-validation-artifacts.outputs.reused != 'true' && steps.upload-durable-windows-wheel.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: dist-wheels-windows-amd64
           path: retained/windows-amd64/
@@ -774,7 +774,7 @@ jobs:
       - name: Upload the only publishable release set
         id: upload-release-distributions
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: release-distributions
           path: release/
@@ -784,7 +784,7 @@ jobs:
           overwrite: true
       - name: Retry the publishable release-set upload after a transport failure
         if: ${{ always() && steps.upload-release-distributions.outcome == 'failure' }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: release-distributions
           path: release/
