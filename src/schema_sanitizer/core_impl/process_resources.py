@@ -1904,6 +1904,54 @@ _ABSOLUTE_MAX_PROJECT_THREADS = 512
 _ABSOLUTE_MAX_OPEN_FILES = 16_384
 _CONSERVATIVE_THREAD_STACK_BYTES = 8 * 1024 * 1024
 _MIN_THREAD_MEMORY_RESERVE_BYTES = 256 * 1024 * 1024
+_LINUX_MEMINFO_MAX_BYTES = 16 * 1024
+
+
+def _parse_linux_mem_available_bytes(payload: bytes) -> int | None:
+    """Parse one bounded Linux meminfo payload for reclaim-aware memory."""
+    if len(payload) > _LINUX_MEMINFO_MAX_BYTES:
+        return None
+    for line in payload.splitlines():
+        fields = line.split()
+        if not fields or fields[0] != b"MemAvailable:":
+            continue
+        if len(fields) != 3 or fields[2] != b"kB":
+            return None
+        kibibytes_text = fields[1]
+        if not kibibytes_text.isdigit() or len(kibibytes_text) > 19:
+            return None
+        kibibytes = int(kibibytes_text, 10)
+        if kibibytes > ((1 << 62) - 1) // 1024:
+            return None
+        return kibibytes * 1024
+    return None
+
+
+def _linux_mem_available_bytes() -> int | None:
+    """Read Linux reclaim-aware available memory from the fixed procfs source."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        with open("/proc/meminfo", "rb") as stream:
+            payload = stream.read(_LINUX_MEMINFO_MAX_BYTES + 1)
+    except OSError:
+        return None
+    return _parse_linux_mem_available_bytes(payload)
+
+
+def _host_available_memory_bytes() -> int | None:
+    """Return reclaim-aware host memory, retaining the portable sysconf fallback."""
+    linux_available = _linux_mem_available_bytes()
+    if linux_available is not None:
+        return linux_available
+    try:
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+        pages = int(os.sysconf("SC_AVPHYS_PAGES"))
+        if page_size > 0 and pages >= 0 and pages <= (1 << 50) // page_size:
+            return page_size * pages
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
 
 
 def _thread_stack_reservation_bytes() -> int:
@@ -2011,14 +2059,7 @@ def _effective_memory_headroom_bytes() -> int | None:
     if cgroup_headroom.state is CgroupValueState.UNKNOWN:
         return 0
 
-    host_available: int | None = None
-    try:
-        page_size = int(os.sysconf("SC_PAGE_SIZE"))
-        pages = int(os.sysconf("SC_AVPHYS_PAGES"))
-        if page_size > 0 and pages >= 0 and pages <= (1 << 50) // page_size:
-            host_available = page_size * pages
-    except (AttributeError, OSError, ValueError):
-        pass
+    host_available = _host_available_memory_bytes()
     cgroup_value = (
         cgroup_headroom.value if cgroup_headroom.state is CgroupValueState.VALUE else None
     )

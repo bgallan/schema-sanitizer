@@ -16,6 +16,7 @@ from ..core_impl.uris import content_type_for_uri
 from .transport import (
     MAX_CONTROL_RESPONSE_BYTES,
     MAX_ERROR_RESPONSE_BYTES,
+    closing_response_payload,
     read_bounded_response_bytes,
     read_bounded_response_text,
 )
@@ -47,38 +48,41 @@ async def _status(session: Any, upload_url: str, *, total_bytes: int) -> int:
                 maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
                 stage="remote_control_response",
             )
-            return gcs_resumable_next_offset(
-                response.status,
-                response.headers,
-                body,
-                operation="status",
-                total_bytes=total_bytes,
-            )
+            with closing_response_payload(body):
+                return gcs_resumable_next_offset(
+                    response.status,
+                    response.headers,
+                    body,
+                    operation="status",
+                    total_bytes=total_bytes,
+                )
         if response.status in {200, 201}:
             body = await read_bounded_response_bytes(
                 response,
                 maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
                 stage="remote_control_response",
             )
-            return gcs_resumable_next_offset(
-                response.status,
-                response.headers,
-                body,
-                operation="status",
-                total_bytes=total_bytes,
-            )
+            with closing_response_payload(body):
+                return gcs_resumable_next_offset(
+                    response.status,
+                    response.headers,
+                    body,
+                    operation="status",
+                    total_bytes=total_bytes,
+                )
         error_body = await read_bounded_response_text(
             response,
             maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
             stage="remote_error_response",
         )
-        return gcs_resumable_next_offset(
-            response.status,
-            response.headers,
-            error_body,
-            operation="status",
-            total_bytes=total_bytes,
-        )
+        with closing_response_payload(error_body):
+            return gcs_resumable_next_offset(
+                response.status,
+                response.headers,
+                error_body,
+                operation="status",
+                total_bytes=total_bytes,
+            )
 
 
 async def _send_range(
@@ -104,29 +108,31 @@ async def _send_range(
                 maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
                 stage="remote_control_response",
             )
-            return gcs_resumable_next_offset(
-                response.status,
-                response.headers,
-                body,
-                operation="chunk",
-                total_bytes=total_bytes,
-                start=start,
-                end=end,
-            )
+            with closing_response_payload(body):
+                return gcs_resumable_next_offset(
+                    response.status,
+                    response.headers,
+                    body,
+                    operation="chunk",
+                    total_bytes=total_bytes,
+                    start=start,
+                    end=end,
+                )
         error_body = await read_bounded_response_text(
             response,
             maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
             stage="remote_error_response",
         )
-        return gcs_resumable_next_offset(
-            response.status,
-            response.headers,
-            error_body,
-            operation="chunk",
-            total_bytes=total_bytes,
-            start=start,
-            end=end,
-        )
+        with closing_response_payload(error_body):
+            return gcs_resumable_next_offset(
+                response.status,
+                response.headers,
+                error_body,
+                operation="chunk",
+                total_bytes=total_bytes,
+                start=start,
+                end=end,
+            )
 
 
 async def _send_with_reconciliation(
@@ -181,11 +187,13 @@ async def _abort(session: Any, upload_url: str) -> None:
     """Best-effort cancel one incomplete GCS resumable session."""
     try:
         async with session.delete(upload_url) as response:
-            await read_bounded_response_bytes(
+            body = await read_bounded_response_bytes(
                 response,
                 maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
                 stage="remote_control_response",
             )
+            with closing_response_payload(body):
+                pass
     except Exception:
         return
 
@@ -224,29 +232,31 @@ async def upload_gcs_resumable_file(
             data=b"",
         ) as response:
             if response.status in {200, 201}:
-                await read_bounded_response_bytes(
+                control_body = await read_bounded_response_bytes(
                     response,
                     maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
                     stage="remote_control_response",
                 )
-                location = response.headers.get("Location")
-                if isinstance(location, str) and location:
-                    return location
-                raise RuntimeError("GCS resumable initiation returned no session location")
-            body = await read_bounded_response_text(
+                with closing_response_payload(control_body):
+                    location = response.headers.get("Location")
+                    if isinstance(location, str) and location:
+                        return location
+                    raise RuntimeError("GCS resumable initiation returned no session location")
+            error_body = await read_bounded_response_text(
                 response,
                 maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
                 stage="remote_error_response",
             )
-            if response.status == 429 or 500 <= response.status <= 599:
-                raise _TransientGcsUploadError(
-                    "GCS resumable initiation failed: "
-                    f"status={response.status}, body={body[:1000]!r}"
+            with closing_response_payload(error_body):
+                if response.status == 429 or 500 <= response.status <= 599:
+                    raise _TransientGcsUploadError(
+                        "GCS resumable initiation failed: "
+                        f"status={response.status}, body={error_body[:1000]!r}"
+                    )
+                raise RuntimeError(
+                    f"GCS resumable initiation failed for {uri!r}: "
+                    f"status={response.status}, body={error_body[:1000]!r}"
                 )
-            raise RuntimeError(
-                f"GCS resumable initiation failed for {uri!r}: "
-                f"status={response.status}, body={body[:1000]!r}"
-            )
 
     retries = memory_budget(memory_limit_bytes).async_retries
     source = Path(local_path)

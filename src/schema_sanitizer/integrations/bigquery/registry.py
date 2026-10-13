@@ -11,10 +11,6 @@ from typing import Any
 
 from ...core_impl.generated_metadata import INGESTION_TIMESTAMP_COLUMN, SCHEMA_REGISTRY_COLUMN
 from ...core_impl.hive_uris import uri_path_segments
-from ...core_impl.schema_registry import (
-    new_schema_registry,
-    schema_contract_from_registry_json,
-)
 from .client import fetch_one_cell
 from .external_table import hive_partition_columns_from_namespace
 from .log import LOGGER
@@ -27,6 +23,20 @@ from .namespace_ops import (
 from .sidecar import fetch_sidecar_last_ingested_partition, update_registry_sidecar_table
 from .sql import normalize_bq_type, quote_bq_identifier_component, quote_bq_string
 from .table_ref import BigQueryTableRef, maybe_parse_table_ref
+
+
+def _new_schema_registry(*, field_name_policy: str) -> dict[str, Any]:
+    """Create native registry state without initializing the runtime during import."""
+    from ...core_impl.schema_registry import new_schema_registry
+
+    return new_schema_registry(field_name_policy=field_name_policy)
+
+
+def _schema_contract_from_registry_json(registry_json: str) -> Any:
+    """Parse a native registry contract only when an operation needs it."""
+    from ...core_impl.schema_registry import schema_contract_from_registry_json
+
+    return schema_contract_from_registry_json(registry_json)
 
 
 def registry_order_sql(partition_columns: tuple[tuple[str, str], ...]) -> str:
@@ -162,7 +172,7 @@ def decode_registry_value(
                 partition_key,
             )
             return None
-        return new_schema_registry(field_name_policy=field_name_policy)
+        return _new_schema_registry(field_name_policy=field_name_policy)
 
     try:
         registry = json.loads(str(raw))
@@ -176,7 +186,7 @@ def decode_registry_value(
             )
             return None
         LOGGER.warning("Latest schema registry is not valid JSON. Starting with an empty registry.")
-        return new_schema_registry(field_name_policy=field_name_policy)
+        return _new_schema_registry(field_name_policy=field_name_policy)
 
     if isinstance(registry, dict):
         return registry
@@ -189,13 +199,13 @@ def decode_registry_value(
         )
         return None
     LOGGER.warning("Latest schema registry JSON is not an object. Starting with an empty registry.")
-    return new_schema_registry(field_name_policy=field_name_policy)
+    return _new_schema_registry(field_name_policy=field_name_policy)
 
 
 def registry_has_canonical_schema(registry: dict[str, Any]) -> bool:
     """Return whether the native registry parser finds a usable canonical schema."""
     registry_json = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return schema_contract_from_registry_json(registry_json) is not None
+    return _schema_contract_from_registry_json(registry_json) is not None
 
 
 def fetch_latest_schema_registry(
@@ -261,7 +271,7 @@ def fetch_latest_schema_registry(
             table_ref.display_name,
             exc,
         )
-        return new_schema_registry(field_name_policy=field_name_policy)
+        return _new_schema_registry(field_name_policy=field_name_policy)
 
     registry = decode_registry_value(
         raw,
@@ -311,7 +321,7 @@ def has_schema_warm_up_range(args: Any) -> bool:
 
 def new_schema_registry_from_namespace(args: Any) -> dict[str, Any]:
     """Create an empty registry document using the namespace field policy."""
-    return new_schema_registry(field_name_policy=getattr(args, "field_name_policy", "lower_snake"))
+    return _new_schema_registry(field_name_policy=getattr(args, "field_name_policy", "lower_snake"))
 
 
 def prepare_existing_schema_registry_from_namespace(

@@ -385,9 +385,13 @@ def prepare_output_target(
             threading_mode=threading_mode,
             operation_context=operation_context,
         )
-    temp = create_temp_file_path(suffix=suffix_from_uri(raw, default=".tmp"))
+    # File sinks publish atomically by replacing their destination path.  Own a
+    # private parent directory so that legitimate leaf replacement does not
+    # invalidate the staging identity retained for accounting and cleanup.
+    temp = create_temp_directory_path()
+    local_path = Path(temp.path) / f"output{suffix_from_uri(raw, default='.tmp')}"
     return RemoteOutputTarget(
-        local_path=temp.path,
+        local_path=os.fspath(local_path),
         remote_uri=raw,
         temp=temp,
         memory_limit_bytes=memory_limit_bytes,

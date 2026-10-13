@@ -11,26 +11,9 @@ from collections.abc import Callable, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass
 from time import perf_counter, process_time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from ..api_impl.file_conversion.converters import to_parquet
-from ..api_impl.partition_resources import borrowed_partition_resources
-from ..core_impl.memory_budget import normalize_memory_limit
-from ..core_impl.probes import options_for_schema_probe
-from ..core_impl.schema_registry import (
-    _normalize_registry_json,
-    native_registry_state_context,
-    native_registry_state_from_json,
-)
-from ..input_impl.directory_inputs import discovered_directory_input_context
-from ..options_impl.call_options import (
-    FILE_CONVERSION_HELPER_KEYS,
-    call_options_from_locals,
-    normalize_call_options_or_none,
-    unwrap_options,
-)
 from .observability import estimate_cpu_io_wall_time
-from .partition_lookahead import PartitionSourceLookahead
 from .types import PartitionRunPlan, PartitionRunResult, SchemaRegistryState
 
 ToParquetKwargsFactory = Callable[[PartitionRunPlan], Mapping[str, Any]]
@@ -40,6 +23,48 @@ AfterPartitionCallback = Callable[
     None,
 ]
 
+if TYPE_CHECKING:
+    from ..api_impl.file_conversion.converters import to_parquet
+    from ..core_impl.schema_registry import (
+        native_registry_state_context,
+        native_registry_state_from_json,
+    )
+    from ..input_impl.directory_inputs import discovered_directory_input_context
+    from .partition_lookahead import PartitionSourceLookahead
+else:
+
+    def to_parquet(*args: Any, **kwargs: Any) -> Any:
+        """Load the converter only when partition execution starts."""
+        from ..api_impl.file_conversion.converters import to_parquet as implementation
+
+        return implementation(*args, **kwargs)
+
+    def native_registry_state_from_json(*args: Any, **kwargs: Any) -> Any:
+        """Load native registry compilation only when an operation needs it."""
+        from ..core_impl.schema_registry import native_registry_state_from_json as implementation
+
+        return implementation(*args, **kwargs)
+
+    def native_registry_state_context(*args: Any, **kwargs: Any) -> Any:
+        """Load native registry binding only when partition execution starts."""
+        from ..core_impl.schema_registry import native_registry_state_context as implementation
+
+        return implementation(*args, **kwargs)
+
+    def discovered_directory_input_context(*args: Any, **kwargs: Any) -> Any:
+        """Load discovered-input binding only when partition execution starts."""
+        from ..input_impl.directory_inputs import (
+            discovered_directory_input_context as implementation,
+        )
+
+        return implementation(*args, **kwargs)
+
+    def PartitionSourceLookahead(*args: Any, **kwargs: Any) -> Any:  # noqa: N802
+        """Load speculative source preparation only when a run may use it."""
+        from .partition_lookahead import PartitionSourceLookahead as implementation
+
+        return implementation(*args, **kwargs)
+
 
 def _resolved_converter_kwargs(
     values: Mapping[str, Any],
@@ -47,6 +72,8 @@ def _resolved_converter_kwargs(
     fixed_memory_limit_bytes: int | None = None,
 ) -> dict[str, Any]:
     """Resolve one operation memory budget once before related pipeline work."""
+    from ..core_impl.memory_budget import normalize_memory_limit
+
     resolved = dict(values)
     resolved["memory_limit_bytes"] = (
         normalize_memory_limit(resolved.get("memory_limit_bytes"))
@@ -74,6 +101,8 @@ class PartitionPipelineResult:
         final_native_registry_state: Any | None = None,
     ) -> None:
         """Create a pipeline result with JSON registry state as the source of truth."""
+        from ..core_impl.schema_registry import _normalize_registry_json
+
         registry_json = (
             _normalize_registry_json(final_schema_registry)
             if final_schema_registry_json is None
@@ -159,6 +188,14 @@ def _compile_native_registry_state(
     kwargs: Mapping[str, Any],
 ) -> Any | None:
     """Compile durable registry JSON into native state for one converter option set."""
+    from ..core_impl.probes import options_for_schema_probe
+    from ..options_impl.call_options import (
+        FILE_CONVERSION_HELPER_KEYS,
+        call_options_from_locals,
+        normalize_call_options_or_none,
+        unwrap_options,
+    )
+
     options = call_options_from_locals(dict(kwargs), FILE_CONVERSION_HELPER_KEYS)
     call_options = normalize_call_options_or_none(**options_for_schema_probe(options))
     try:
@@ -180,6 +217,8 @@ def run_partitioned_to_parquet(
     result_retention: str = "full",
 ) -> PartitionPipelineResult:
     """Write every planned partition while carrying canonical registry JSON forward."""
+    from ..core_impl.schema_registry import _normalize_registry_json
+
     return run_partitioned_to_parquet_registry_json(
         plans,
         initial_schema_registry_json=_normalize_registry_json(initial_schema_registry),
@@ -207,6 +246,10 @@ def run_partitioned_to_parquet_registry_json(
     timing/audit records, and ``streaming`` relies on ``after_partition`` and
     stores no per-partition history.
     """
+    from ..api_impl.partition_resources import borrowed_partition_resources
+    from ..core_impl.memory_budget import normalize_memory_limit
+    from ..core_impl.schema_registry import _normalize_registry_json
+
     retention_mode = _normalize_result_retention(result_retention)
     if initial_schema_registry_state is None:
         current_schema_registry_json = _normalize_registry_json(initial_schema_registry_json)

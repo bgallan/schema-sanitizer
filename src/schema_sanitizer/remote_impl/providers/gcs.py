@@ -33,6 +33,7 @@ from ..gcs_resumable import upload_gcs_resumable_file
 from ..io_footprint import open_remote_local_file
 from ..transport import (
     MAX_ERROR_RESPONSE_BYTES,
+    closing_response_payload,
     open_aiohttp_session,
     read_bounded_response_bytes,
     read_bounded_response_text,
@@ -90,16 +91,17 @@ async def _request_list_page(
             maximum_bytes=maximum_bytes,
             stage="remote_control_response",
         )
-        if response.status == 200:
-            return json.loads(body)
-        message = f"{context}: status={response.status}, body={body[:1000]!r}"
-        if response.status in {401, 403}:
-            raise PermissionError(message)
-        if response.status == 429 or 500 <= response.status <= 599:
-            raise _TransientGcsError(
-                response.status, message, headers=getattr(response, "headers", None)
-            )
-        raise RuntimeError(message)
+        with closing_response_payload(body):
+            if response.status == 200:
+                return json.loads(body)
+            message = f"{context}: status={response.status}, body={body[:1000]!r}"
+            if response.status in {401, 403}:
+                raise PermissionError(message)
+            if response.status == 429 or 500 <= response.status <= 599:
+                raise _TransientGcsError(
+                    response.status, message, headers=getattr(response, "headers", None)
+                )
+            raise RuntimeError(message)
 
 
 def access_token() -> str:
@@ -195,34 +197,38 @@ async def file_metadata(
                     maximum_bytes=memory_budget(memory_limit_bytes).metadata_bytes,
                     stage="remote_control_response",
                 )
-                payload = json.loads(body)
-                return remote_file_from_metadata(
-                    ref.bucket,
-                    payload,
-                    display_name=Path(ref.object_name).name,
-                    uri=uri,
-                )
+                with closing_response_payload(body):
+                    payload = json.loads(body)
+                    return remote_file_from_metadata(
+                        ref.bucket,
+                        payload,
+                        display_name=Path(ref.object_name).name,
+                        uri=uri,
+                    )
             if response.status == 404:
-                await read_bounded_response_text(
+                body = await read_bounded_response_text(
                     response,
                     maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
                     stage="remote_error_response",
                 )
+                with closing_response_payload(body):
+                    pass
                 return None
             body = await read_bounded_response_text(
                 response,
                 maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
                 stage="remote_error_response",
             )
-            if response.status in {401, 403}:
-                raise PermissionError(
-                    "GCS returned a permission error while checking source object. "
+            with closing_response_payload(body):
+                if response.status in {401, 403}:
+                    raise PermissionError(
+                        "GCS returned a permission error while checking source object. "
+                        f"status={response.status}, uri={uri!r}, body={body[:1000]!r}"
+                    )
+                raise RuntimeError(
+                    "Unexpected GCS response while checking source object. "
                     f"status={response.status}, uri={uri!r}, body={body[:1000]!r}"
                 )
-            raise RuntimeError(
-                "Unexpected GCS response while checking source object. "
-                f"status={response.status}, uri={uri!r}, body={body[:1000]!r}"
-            )
 
 
 async def download_file_with_session(
@@ -306,7 +312,9 @@ async def upload_file(
                 headers=request_headers_for_media,
                 data=file_handle,
             ) as response:
-                await read_response_bytes(response, uri=uri)
+                body = await read_response_bytes(response, uri=uri)
+                with closing_response_payload(body):
+                    pass
 
 
 async def delete_file(
@@ -325,26 +333,29 @@ async def delete_file(
     ) as session:
         async with session.delete(url, params=params) as response:
             if response.status in {200, 204, 404}:
-                await read_bounded_response_text(
+                body = await read_bounded_response_text(
                     response,
                     maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
                     stage="remote_control_response",
                 )
+                with closing_response_payload(body):
+                    pass
                 return
             body = await read_bounded_response_text(
                 response,
                 maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
                 stage="remote_error_response",
             )
-            if response.status in {401, 403}:
-                raise PermissionError(
-                    "GCS returned a permission error while deleting an object. "
+            with closing_response_payload(body):
+                if response.status in {401, 403}:
+                    raise PermissionError(
+                        "GCS returned a permission error while deleting an object. "
+                        f"status={response.status}, uri={uri!r}, body={body[:1000]!r}"
+                    )
+                raise RuntimeError(
+                    "Unexpected GCS response while deleting an object. "
                     f"status={response.status}, uri={uri!r}, body={body[:1000]!r}"
                 )
-            raise RuntimeError(
-                "Unexpected GCS response while deleting an object. "
-                f"status={response.status}, uri={uri!r}, body={body[:1000]!r}"
-            )
 
 
 async def list_directory(

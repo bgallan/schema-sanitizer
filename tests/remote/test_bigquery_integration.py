@@ -249,6 +249,7 @@ def test_bigquery_registry_sidecar_partition_queries() -> None:
         BigQueryTableRef,
         latest_schema_registry_query,
         partition_key_from_uri,
+        registry_has_canonical_schema,
         sidecar_table_ddl,
         sidecar_upsert_query,
     )
@@ -287,6 +288,7 @@ def test_bigquery_registry_sidecar_partition_queries() -> None:
     assert "MERGE `project.dataset.events_registry_state` AS target" in upsert
     assert "'project.dataset.events_ext'" in upsert
     assert "'year=2026/month=07/date=2026-07-05/hour=08'" in upsert
+    assert not registry_has_canonical_schema({})
 
 
 def test_bigquery_registry_sidecar_fetch_fast_path_and_missing_fallback(caplog) -> None:
