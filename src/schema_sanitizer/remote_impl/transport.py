@@ -7,6 +7,8 @@ bounded reader consumption for provider adapters.
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -27,6 +29,7 @@ from ..core_impl.memory_budget import (
     current_operation_memory_ledger,
     memory_budget,
 )
+from ..core_impl.safe_errors import add_bounded_note
 from ..core_impl.temporary_storage import StreamingStorageReservation
 from ..core_impl.uris import content_type_for_uri
 from ..errors import SchemaSanitizerResourceError
@@ -38,6 +41,18 @@ from .provider_session_pool import current_provider_session_pool
 TRANSFER_CHUNK_BYTES = 1024 * 1024
 MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
 MAX_ERROR_RESPONSE_BYTES = 64 * 1024
+_BOUNDED_BYTES_COPIES = 2
+_BOUNDED_BYTES_FIXED_OVERHEAD = 256
+
+
+def _bounded_bytes_reservation(maximum_bytes: int) -> int:
+    """Return the precharge for a limit plus its overflow sentinel byte."""
+    return (maximum_bytes + 1) * _BOUNDED_BYTES_COPIES + _BOUNDED_BYTES_FIXED_OVERHEAD
+
+
+def _bounded_bytes_capacity(available_bytes: int) -> int:
+    """Return the greatest payload limit whose precharge fits available bytes."""
+    return ((available_bytes - _BOUNDED_BYTES_FIXED_OVERHEAD) // _BOUNDED_BYTES_COPIES) - 1
 
 
 class _BudgetedBytes(bytes):
@@ -166,6 +181,27 @@ class _BudgetedText(str):
             pass
 
 
+@contextmanager
+def closing_response_payload(payload: bytes | str) -> Iterator[bytes | str]:
+    """Release a consumed lease-backed response without masking its primary failure."""
+    try:
+        yield payload
+    except BaseException as primary:
+        close = getattr(payload, "close", None)
+        if callable(close):
+            try:
+                close()
+            except BaseException as cleanup_error:
+                add_bounded_note(
+                    primary, "HTTP response payload cleanup also failed", cleanup_error
+                )
+        raise
+    else:
+        close = getattr(payload, "close", None)
+        if callable(close):
+            close()
+
+
 class _HttpStatusError(RuntimeError):
     """Carry one HTTP status while preserving the public RuntimeError surface."""
 
@@ -228,7 +264,7 @@ async def read_bounded_async_reader_bytes(
     if type(maximum_bytes) is not int or maximum_bytes <= 0:
         raise ValueError("maximum_bytes must be a positive exact integer")
     limit = maximum_bytes
-    lease = acquire_operation_memory((limit + 1) * 2 + 256, stage=stage)
+    lease = acquire_operation_memory(_bounded_bytes_reservation(limit), stage=stage)
     try:
         payload = await reader(limit + 1)
         if len(payload) > limit:
@@ -301,7 +337,7 @@ async def read_bounded_response_bytes(
     limit = max(1, int(maximum_bytes))
     # A bytes subclass is created to retain the lease after returning. Reserve
     # both the provider payload and that immutable retained copy up front.
-    lease = acquire_operation_memory((limit + 1) * 2 + 256, stage=stage)
+    lease = acquire_operation_memory(_bounded_bytes_reservation(limit), stage=stage)
     payload_size = 0
     try:
         content = response.content
@@ -408,7 +444,13 @@ async def read_response_bytes(response: Any, *, uri: str) -> bytes:
             )
         snapshot = ledger.snapshot()
         available = max(1, snapshot.limit_bytes - snapshot.reserved_bytes)
-        safe_payload_bytes = max(1, (available - 256) // 2)
+        # Preserve the 1 MiB ceiling used without a ledger, while reducing it
+        # when the operation has less headroom. If even one byte cannot fit,
+        # the one-byte fallback lets the ledger raise its normal resource error.
+        safe_payload_bytes = min(
+            MAX_CONTROL_RESPONSE_BYTES,
+            max(1, _bounded_bytes_capacity(available)),
+        )
         return await read_bounded_response_bytes(
             response,
             maximum_bytes=safe_payload_bytes,
@@ -419,7 +461,8 @@ async def read_response_bytes(response: Any, *, uri: str) -> bytes:
         maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
         stage="remote_error_response",
     )
-    raise RuntimeError(f"HTTP {response.status} for {uri}: {body[:1000]!r}")
+    with closing_response_payload(body):
+        raise RuntimeError(f"HTTP {response.status} for {uri}: {body[:1000]!r}")
 
 
 async def write_response_to_file(
@@ -436,11 +479,12 @@ async def write_response_to_file(
             maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
             stage="remote_error_response",
         )
-        raise _HttpStatusError(
-            response.status,
-            f"HTTP download failed for {uri!r}: {response.status} {body[:1000]!r}",
-            headers=getattr(response, "headers", None),
-        )
+        with closing_response_payload(body):
+            raise _HttpStatusError(
+                response.status,
+                f"HTTP download failed for {uri!r}: {response.status} {body[:1000]!r}",
+                headers=getattr(response, "headers", None),
+            )
     await write_async_reader_to_file(
         response.content.read,
         local_path,
@@ -617,21 +661,25 @@ async def upload_http_file(
                     allow_redirects=False,
                 ) as response:
                     if response.status not in {200, 201, 202, 204}:
-                        body = await read_bounded_response_text(
+                        error_body = await read_bounded_response_text(
                             response,
                             maximum_bytes=MAX_ERROR_RESPONSE_BYTES,
                             stage="remote_error_response",
                         )
-                        raise _HttpStatusError(
-                            response.status,
-                            f"HTTP upload failed for {uri!r}: {response.status} {body[:1000]!r}",
-                            headers=getattr(response, "headers", None),
-                        )
-                    await read_bounded_response_bytes(
+                        with closing_response_payload(error_body):
+                            raise _HttpStatusError(
+                                response.status,
+                                f"HTTP upload failed for {uri!r}: "
+                                f"{response.status} {error_body[:1000]!r}",
+                                headers=getattr(response, "headers", None),
+                            )
+                    response_body = await read_bounded_response_bytes(
                         response,
                         maximum_bytes=MAX_CONTROL_RESPONSE_BYTES,
                         stage="remote_control_response",
                     )
+                    with closing_response_payload(response_body):
+                        pass
 
         await retry_async(
             request,

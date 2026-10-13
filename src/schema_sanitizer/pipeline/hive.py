@@ -18,7 +18,6 @@ from ..core_impl.hive_uris import (
     render_uri_for_partition,
     uri_path_segments,
 )
-from ..input_impl.selection import input_format_extensions
 from .types import PartitionRunPlan
 
 
@@ -96,6 +95,8 @@ def _iter_partition_points(
 
 def _source_file_extensions(config: HiveRangeConfig) -> tuple[str, ...]:
     """Return source extensions accepted by this plan."""
+    from ..input_impl.selection import input_format_extensions
+
     valid_extensions = input_format_extensions(config.input_format)
     if not config.source_file_extension:
         return valid_extensions
