@@ -235,7 +235,7 @@ def _is_public_windows_runtime_digest(root: Path, filename: str, item: dict[str,
         return False
     runtimes = payload.get("wheel_runtime_dlls")
     return (
-        payload.get("format") == "schema-sanitizer-windows-toolchain-v1"
+        payload.get("format") == "schema-sanitizer-windows-toolchain-v2"
         and isinstance(runtimes, dict)
         and runtimes.get(match.group("member")) == match.group("digest")
     )

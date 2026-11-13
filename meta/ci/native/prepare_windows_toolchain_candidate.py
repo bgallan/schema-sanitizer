@@ -23,9 +23,7 @@ from typing import Any
 from meta.ci.native import certify_windows_toolchain as certification
 from meta.ci.quality.run_bounded_command import run_bounded
 
-ROOT = certification.PROJECT_CONFIGURATION.parent
 POLICY_RELATIVE = Path("meta/ci/native/windows-release-toolchain.json")
-TEST_RELATIVE = Path("tests/quality/test_ci_helper_layout.py")
 _VERSION = re.compile(r"[0-9]+(?:\.[0-9]+){3}")
 _RUNTIME = re.compile(
     r"schema_sanitizer\.libs/(?P<stem>msvcp140(?:_1|_atomic_wait)?)"
@@ -142,35 +140,23 @@ def prepare_candidate(build: Path, redist: Path, output: Path) -> bool:
     """Validate observed inputs and write a candidate patch without applying it."""
     policy = certification._load_policy(certification.WINDOWS_TOOLCHAIN)
     observed_version = _compiler_version(build)
-    reviewed_version = policy["compiler_version"]
-    if observed_version.split(".")[:2] != reviewed_version.split(".")[:2]:
+    reviewed_versions = policy["compiler_versions"]
+    if observed_version.split(".")[:2] != reviewed_versions[0].split(".")[:2]:
         raise AssertionError(f"MSVC feature version changed: {observed_version!r}; review manually")
     candidate = dict(policy)
-    candidate["compiler_version"] = observed_version
+    candidate["compiler_versions"] = sorted(
+        set(reviewed_versions) | {observed_version},
+        key=lambda version: tuple(map(int, version.split("."))),
+    )
     source_runtimes = _runtime_inventory(policy, redist)
     candidate_text = _canonical_json(candidate)
     previous_text = certification.WINDOWS_TOOLCHAIN.read_text(encoding="utf-8")
-
-    tests_path = ROOT / TEST_RELATIVE
-    previous_tests = tests_path.read_text(encoding="utf-8")
-    fixture_assignment = f'f"{{prefix}}COMPILER_VERSION": "{reviewed_version}"'
-    fixture_rejection = f'("COMPILER_VERSION", "{reviewed_version}", "19.45.0")'
-    if (
-        previous_tests.count(fixture_assignment) != 1
-        or previous_tests.count(fixture_rejection) != 1
-    ):
-        raise AssertionError("Windows certification fixtures need a manual update")
-    candidate_tests = previous_tests.replace(
-        fixture_assignment, fixture_assignment.replace(reviewed_version, observed_version)
-    ).replace(fixture_rejection, fixture_rejection.replace(reviewed_version, observed_version))
 
     output.mkdir(parents=True, exist_ok=True)
     candidate_policy = output / "windows-release-toolchain.json"
     candidate_policy.write_text(candidate_text, encoding="utf-8")
     certification.certify_windows_toolchain(build, policy_path=candidate_policy, direct_build=True)
-    patch = _diff(POLICY_RELATIVE, previous_text, candidate_text) + _diff(
-        TEST_RELATIVE, previous_tests, candidate_tests
-    )
+    patch = _diff(POLICY_RELATIVE, previous_text, candidate_text)
     (output / "windows-toolchain.patch").write_text(patch, encoding="utf-8")
     changed = bool(patch)
     (output / "observed.json").write_text(

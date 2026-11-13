@@ -55,7 +55,9 @@ def _cmake_assignment(key: str, value: str) -> str:
     return f"set({key} {encoded})"
 
 
-def _windows_toolchain_tree(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
+def _windows_toolchain_tree(
+    tmp_path: Path, compiler_version: str = "19.44.35229.0"
+) -> tuple[Path, dict[str, Path]]:
     """Create one valid Visual Studio cache and generated compiler metadata pair."""
     build_root = tmp_path / "build"
     binary = build_root / "cp311-abi3-win_amd64"
@@ -87,7 +89,7 @@ def _windows_toolchain_tree(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
             f"{prefix}COMPILER_ARCHITECTURE_ID": "x64",
             f"{prefix}COMPILER_ID": "MSVC",
             f"{prefix}COMPILER_LOADED": "1",
-            f"{prefix}COMPILER_VERSION": "19.44.35229.0",
+            f"{prefix}COMPILER_VERSION": compiler_version,
             f"{prefix}COMPILER_WORKS": "TRUE",
             f"{prefix}PLATFORM_ID": "Windows",
             f"{prefix}SIZEOF_DATA_PTR": "8",
@@ -497,15 +499,36 @@ def test_retired_source_zip_pipeline_stays_absent() -> None:
     assert not any(path.name in retired for path in CI_ROOT.rglob("*"))
 
 
+@pytest.mark.parametrize("compiler_version", ["19.44.35229.0", "19.44.35230.0"])
 def test_windows_toolchain_certificate_accepts_visual_studio_generated_metadata(
     tmp_path: Path,
+    compiler_version: str,
 ) -> None:
     """A valid VS tree needs no C or CXX compiler entries in CMakeCache."""
     helper = _load_ci_helper("native/certify_windows_toolchain.py")
-    build_root, paths = _windows_toolchain_tree(tmp_path)
+    build_root, paths = _windows_toolchain_tree(tmp_path, compiler_version)
 
     assert "CMAKE_C_COMPILER:" not in paths["cache"].read_text(encoding="utf-8")
     assert helper.certify_windows_toolchain(build_root) == paths["cache"].parent
+    assert (
+        helper._certificate_payload(
+            helper._load_policy(helper.WINDOWS_TOOLCHAIN), "4.3.4", paths["cache"].parent
+        )["compiler"]["version"]
+        == compiler_version
+    )
+
+
+def test_windows_toolchain_certificate_rejects_mixed_reviewed_compilers(tmp_path: Path) -> None:
+    """C and C++ must select the same revision even when both are reviewed."""
+    helper = _load_ci_helper("native/certify_windows_toolchain.py")
+    build_root, paths = _windows_toolchain_tree(tmp_path)
+    cxx = paths["CXX"]
+    cxx.write_text(
+        cxx.read_text(encoding="utf-8").replace("19.44.35229.0", "19.44.35230.0"),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError, match="C and CXX compiler versions differ"):
+        helper.certify_windows_toolchain(build_root)
 
 
 def test_windows_toolchain_certificate_supports_direct_sanitizer_builds(
@@ -543,20 +566,14 @@ def test_windows_toolchain_drift_prepares_a_certifiable_review_patch(
     from meta.ci.native import prepare_windows_toolchain_candidate as candidate
 
     policy = json.loads(candidate.certification.WINDOWS_TOOLCHAIN.read_text(encoding="utf-8"))
-    reviewed_version = policy["compiler_version"]
-    version_parts = reviewed_version.split(".")
+    reviewed_versions = policy["compiler_versions"]
+    version_parts = reviewed_versions[-1].split(".")
     version_parts[2] = str(int(version_parts[2]) + 1)
     observed_version = ".".join(version_parts)
     reviewed = tmp_path / "reviewed.json"
     reviewed.write_text(candidate._canonical_json(policy), encoding="utf-8")
     monkeypatch.setattr(candidate.certification, "WINDOWS_TOOLCHAIN", reviewed)
-    _root, paths = _windows_toolchain_tree(tmp_path)
-    for language in ("C", "CXX"):
-        metadata = paths[language]
-        metadata.write_text(
-            metadata.read_text(encoding="utf-8").replace(reviewed_version, observed_version),
-            encoding="utf-8",
-        )
+    _root, paths = _windows_toolchain_tree(tmp_path, observed_version)
     redist = tmp_path / "redist"
     redist.mkdir()
     for stem in (
@@ -571,12 +588,12 @@ def test_windows_toolchain_drift_prepares_a_certifiable_review_patch(
     output = tmp_path / "candidate"
     assert candidate.prepare_candidate(paths["cache"].parent, redist, output)
     proposed = json.loads((output / "windows-release-toolchain.json").read_text())
-    assert proposed["compiler_version"] == observed_version
+    assert proposed["compiler_versions"] == [*reviewed_versions, observed_version]
     assert proposed["wheel_runtime_dlls"] == policy["wheel_runtime_dlls"]
-    assert json.loads(reviewed.read_text())["compiler_version"] == reviewed_version
+    assert json.loads(reviewed.read_text())["compiler_versions"] == reviewed_versions
     patch = (output / "windows-toolchain.patch").read_text()
-    assert f'+  "compiler_version": "{observed_version}"' in patch
-    assert "tests/quality/test_ci_helper_layout.py" in patch
+    assert f'+    "{observed_version}"' in patch
+    assert "tests/quality/test_ci_helper_layout.py" not in patch
     subprocess.run(
         ["git", "apply", "--check", str(output / "windows-toolchain.patch")],
         cwd=ROOT,
@@ -687,6 +704,7 @@ def test_windows_toolchain_certificate_rejects_cache_mismatches(
         ("COMPILER", WINDOWS_COMPILER, "C:/unreviewed/cl.exe"),
         ("COMPILER_ID", "MSVC", "Clang"),
         ("COMPILER_VERSION", "19.44.35229.0", "19.45.0"),
+        ("COMPILER_VERSION", "19.44.35229.0", "19.44.35231.0"),
         ("PLATFORM_ID", "Windows", "Linux"),
         ("COMPILER_ARCHITECTURE_ID", "x64", "ARM64"),
         ("COMPILER_LOADED", "1", "0"),
@@ -1055,13 +1073,32 @@ def test_platform_wheel_certificate_rejects_binary_and_run_tampering(tmp_path: P
         helper.build_certificate(malformed, **options)
 
 
+@pytest.mark.parametrize("compiler_version", ["19.44.35229.0", "19.44.35230.0"])
+def test_windows_sanitizer_evidence_accepts_each_reviewed_compiler(
+    tmp_path: Path, compiler_version: str
+) -> None:
+    """Sanitizer evidence retains the actual reviewed compiler revision."""
+    helper = _load_ci_helper("sanitizers/certify_sanitizer_run.py")
+    path = tmp_path / helper.WINDOWS_TOOLCHAIN_FILENAME
+    path.write_text(
+        helper._canonical_json(helper._windows_toolchain_payload(compiler_version)),
+        encoding="utf-8",
+    )
+    assert helper._windows_toolchain_evidence(tmp_path, runner_os="Windows", runner_arch="X64")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["compiler"]["version"] = "19.44.35231.0"
+    path.write_text(helper._canonical_json(payload), encoding="utf-8")
+    with pytest.raises(AssertionError, match="not reviewed"):
+        helper._windows_toolchain_evidence(tmp_path, runner_os="Windows", runner_arch="X64")
+
+
 def test_sanitizer_certificates_require_exact_matrix_and_watchdog_bytes(tmp_path: Path) -> None:
     """The gate consumes five run certificates and authenticates native watchdogs."""
     helper = _load_ci_helper("sanitizers/certify_sanitizer_run.py")
     for sanitizer, mode, runner_os, runner_arch in sorted(helper.EXPECTED_RUNS):
         if runner_os == "Windows":
             (tmp_path / helper.WINDOWS_TOOLCHAIN_FILENAME).write_text(
-                helper._canonical_json(helper._windows_toolchain_payload()),
+                helper._canonical_json(helper._windows_toolchain_payload("19.44.35229.0")),
                 encoding="utf-8",
             )
         for filename, raw in helper._watchdog_specs(
