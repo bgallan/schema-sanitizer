@@ -36,10 +36,9 @@ def _fail_first_release_for(monkeypatch: pytest.MonkeyPatch, target: object) -> 
 def test_prepared_finalizer_pre_root_survives_publish_lock_contention() -> None:
     """Verify prepared finalizer pre root survives publish lock contention."""
     from schema_sanitizer.core_impl import finalizer_cleanup as module
+    from schema_sanitizer.core_impl import finalizer_escrow as escrow_module
 
     escrow = module._PREPARED_FINALIZER_ESCROW
-    baseline_active = escrow.active_count()
-    baseline_published = escrow.published_count()
     calls = 0
 
     def cleanup(_capsule: object) -> None:
@@ -58,14 +57,15 @@ def test_prepared_finalizer_pre_root_survives_publish_lock_contention() -> None:
         # wrapper exposure and can therefore make a durable allocation-free handoff.
         assert module.defer_prepared_finalizer_cleanup(capsule)
         assert capsule.ticket == 0
-        assert escrow.active_count() == baseline_active + 1
-        assert escrow.published_count() == baseline_published
+        assert escrow._ticket_slots[ticket] == slot
+        assert escrow._slots[slot] is capsule._authority
+        assert escrow._states[slot] == escrow_module._RESERVED
     finally:
         lock.release()
 
     module.drain_finalizer_cleanup()
     assert calls == 1
-    assert escrow.active_count() <= baseline_active
+    assert ticket not in escrow._ticket_slots
 
 
 def test_prepared_cancel_failure_transfers_ack_without_primary_replay(

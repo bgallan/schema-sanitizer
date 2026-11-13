@@ -19,6 +19,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
@@ -864,15 +865,29 @@ def test_external_actions_are_pinned_to_immutable_commits() -> None:
     external_refs = [ref for ref in refs if not ref.startswith("./")]
     assert external_refs
     assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", ref) for ref in external_refs)
-    assert set(external_refs) == {
-        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-        "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-        "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0",
-        "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
-        "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
-        "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3",
-        "pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086",
+    documented_pins = [
+        (name, sha, version)
+        for _path, definition in definitions
+        for name, sha, version in re.findall(
+            r"^[ \t]*(?:-[ \t]+)?uses:[ \t]*([^@\s#]+)@([0-9a-f]{40})[ \t]+#[ \t]+(v[0-9][^\s#]*)[ \t]*$",
+            definition,
+            re.MULTILINE,
+        )
+    ]
+    assert len(documented_pins) == len(external_refs)
+    pins_by_action: dict[str, set[tuple[str, str]]] = {}
+    for name, sha, version in documented_pins:
+        pins_by_action.setdefault(name, set()).add((sha, version))
+    assert set(pins_by_action) == {
+        "actions/checkout",
+        "actions/cache",
+        "actions/setup-python",
+        "actions/upload-artifact",
+        "actions/download-artifact",
+        "actions/github-script",
+        "pypa/gh-action-pypi-publish",
     }
+    assert all(len(pins) == 1 for pins in pins_by_action.values())
 
     checkout_steps = [
         step
@@ -910,13 +925,27 @@ def test_workflows_normalize_cross_platform_python_process_state() -> None:
 
 def test_action_pins_have_automated_review_and_semantic_security_gates() -> None:
     """Immutable Actions remain maintainable and workflow-aware tooling blocks drift."""
-    dependabot = (ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
+    dependabot = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))
     precommit = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
     hook_lock = (ROOT / "meta/ci/requirements/pre-commit-hooks.txt").read_text(encoding="utf-8")
 
-    assert "package-ecosystem: github-actions" in dependabot
-    assert "interval: weekly" in dependabot
-    assert re.search(r'^      time: "07:00"$', dependabot, re.MULTILINE)
+    assert dependabot["version"] == 2
+    assert len(dependabot["updates"]) == 1
+    action_updates = dependabot["updates"][0]
+    assert action_updates["package-ecosystem"] == "github-actions"
+    assert action_updates["directories"] == ["/", "/.github/actions/*"]
+    assert action_updates["schedule"] == {
+        "interval": "weekly",
+        "day": "monday",
+        "time": "07:00",
+        "timezone": "Europe/Madrid",
+    }
+    assert action_updates["open-pull-requests-limit"] == 2
+    assert action_updates["cooldown"] == {"default-days": 7}
+    assert action_updates["groups"] == {
+        "action-pins": {"patterns": ["*"], "group-by": "dependency-name"}
+    }
+    assert all((path / "action.yml").is_file() for path in ACTIONS.iterdir())
     assert "id: actionlint" in precommit
     assert "actionlint-py==1.7.12.24" in hook_lock
     assert "id: zizmor" in precommit
@@ -1513,7 +1542,7 @@ def test_windows_wheel_uses_one_certified_v143_toolchain_and_runtime() -> None:
     )
     assert "if: runner.os == 'Windows'" in python_cache
     assert "continue-on-error: true" in python_cache
-    assert "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9" in python_cache
+    assert "uses: actions/cache@" in python_cache
     assert "restore-keys:" not in python_cache
     for component in (
         "${{ runner.os }}",
@@ -1984,7 +2013,7 @@ def test_runner_network_and_toolchain_inputs_are_bounded_and_exact() -> None:
     assert "meta/ci/requirements/*.txt" not in ci
     assert ".github/actions/*/action.yml" not in ci
     assert ci.count("uses: ./.github/actions/restore-pip-cache") == 10
-    assert "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9" in cache
+    assert "uses: actions/cache@" in cache
     assert "continue-on-error: true" in cache
     assert "restore-keys:" not in cache
     assert 'cache_root = workspace / ".work" / "pip-cache"' in cache
