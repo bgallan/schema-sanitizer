@@ -867,11 +867,11 @@ def test_external_actions_are_pinned_to_immutable_commits() -> None:
     assert set(external_refs) == {
         "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
         "actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9",
-        "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
-        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+        "actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0",
+        "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9",
+        "actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333",
         "actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3",
-        "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33",
+        "pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086",
     }
 
     checkout_steps = [

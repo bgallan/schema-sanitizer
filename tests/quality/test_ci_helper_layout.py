@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import struct
 import subprocess
 import sys
@@ -584,6 +585,39 @@ def test_windows_toolchain_drift_prepares_a_certifiable_review_patch(
     observed = json.loads((output / "observed.json").read_text())
     assert observed["drift"] is True
     assert observed["redist_dlls"]["msvcp140.dll"] == hashlib.sha256(b"msvcp140").hexdigest()
+
+
+def test_windows_toolchain_probe_keeps_generator_and_instance_arguments_intact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Git Bash receives a script with both space-containing CMake values quoted."""
+    from types import SimpleNamespace
+
+    from meta.ci.native import prepare_windows_toolchain_candidate as candidate
+
+    binary_directory = tmp_path / "cmake-bin"
+    binary_directory.mkdir()
+    (binary_directory / "cmake.exe").write_bytes(b"MZ")
+    monkeypatch.setattr(candidate.importlib.metadata, "version", lambda _name: "4.3.4")
+    monkeypatch.setattr(
+        candidate.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(CMAKE_BIN_DIR=str(binary_directory)),
+    )
+    observed = []
+
+    def capture(command: list[str], *, timeout_seconds: int, label: str) -> None:
+        """Inspect the generated Bash script before its temporary tree is removed."""
+        assert command[0] == "bash"
+        assert timeout_seconds == 180
+        assert label == "windows-toolchain-cmake-probe"
+        observed.extend(shlex.split(Path(command[1]).read_text(encoding="utf-8").splitlines()[-1]))
+
+    monkeypatch.setattr(candidate, "run_bounded", capture)
+    policy = candidate.certification._load_policy(candidate.certification.WINDOWS_TOOLCHAIN)
+    candidate._probe_cmake(tmp_path / "probe", policy)
+    assert observed[observed.index("-G") + 1] == "Visual Studio 17 2022"
+    assert observed[-1] == ("-DCMAKE_GENERATOR_INSTANCE:INTERNAL=" + policy["generator_instance"])
 
 
 @pytest.mark.parametrize(

@@ -465,7 +465,7 @@ runs:
     - name: Upload platform sanitizer evidence
       id: upload-platform-sanitizer-evidence
       continue-on-error: true
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
       with:
         name: sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-${{ inputs.sanitizer
           }}
@@ -476,7 +476,7 @@ runs:
         overwrite: true
     - name: Retry platform sanitizer evidence upload
       if: ${{ always() && steps.upload-platform-sanitizer-evidence.outcome == 'failure' }}
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
       with:
         name: sanitizer-certificate-${{ runner.os }}-${{ runner.arch }}-${{ inputs.sanitizer
           }}
