@@ -15,6 +15,7 @@ import importlib.metadata
 import json
 import platform
 import re
+import shlex
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -60,21 +61,27 @@ def _probe_cmake(build_root: Path, policy: dict[str, Any]) -> Path:
         '"${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}" CACHE INTERNAL "" FORCE)\n',
         encoding="utf-8",
     )
+    command = [
+        cmake.as_posix(),
+        "-S",
+        source.as_posix(),
+        "-B",
+        build.as_posix(),
+        "-G",
+        policy["generator"],
+        "-A",
+        f"x64,version={policy['sdk_version']}",
+        "-T",
+        policy["toolset"],
+        f"-DCMAKE_GENERATOR_INSTANCE:INTERNAL={policy['generator_instance']}",
+    ]
+    configure = build_root / "configure.sh"
+    configure.write_text(
+        "#!/usr/bin/env bash\nset -euo pipefail\n" + shlex.join(command) + "\n",
+        encoding="utf-8",
+    )
     run_bounded(
-        [
-            str(cmake),
-            "-S",
-            str(source),
-            "-B",
-            str(build),
-            "-G",
-            policy["generator"],
-            "-A",
-            f"x64,version={policy['sdk_version']}",
-            "-T",
-            policy["toolset"],
-            f"-DCMAKE_GENERATOR_INSTANCE:INTERNAL={policy['generator_instance']}",
-        ],
+        ["bash", configure.as_posix()],
         timeout_seconds=180,
         label="windows-toolchain-cmake-probe",
     )
