@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from importlib import import_module
 from typing import Any
 
-from ..core_impl.process_resources import open_governed_file
 from ..core_impl.uris import local_path_from_file_uri, looks_like_file_uri, looks_like_remote_uri
 
 
@@ -32,6 +31,7 @@ def read_parquet_schema(uri: str) -> Any:
     """Read a Parquet schema after staging remote URIs locally."""
     pq = import_module("pyarrow.parquet")
 
+    from ..core_impl.process_resources import open_governed_file
     from ..remote_impl.staging import stage_remote_single_file
 
     if looks_like_file_uri(uri):

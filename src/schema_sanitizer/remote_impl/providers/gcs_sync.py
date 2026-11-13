@@ -76,16 +76,16 @@ def file_metadata(uri: str, *, memory_limit_bytes: int | None = None) -> RemoteF
 
     def request() -> RemoteFile | None:
         """Perform one metadata request."""
-        result = request_bytes(
+        with request_bytes(
             "GET",
             url,
             headers=headers,
             timeout=budget.async_timeout_seconds,
             max_response_bytes=budget.metadata_bytes,
-        )
-        if result.status == 404:
-            return None
-        payload = _json_result(result, context=f"GCS metadata failed for {uri!r}")
+        ) as result:
+            if result.status == 404:
+                return None
+            payload = _json_result(result, context=f"GCS metadata failed for {uri!r}")
         return remote_file_from_metadata(
             ref.bucket,
             payload,
@@ -162,19 +162,19 @@ def upload_file(
 
     def request() -> None:
         """Replay the completed local spool from byte zero."""
-        result = upload_file_request(
+        with upload_file_request(
             "POST",
             url,
             local_path,
             headers=media_headers,
             timeout=budget.async_timeout_seconds,
-        )
-        if result.status not in {200, 201}:
-            raise SyncHttpStatusError(
-                result.status,
-                f"GCS media upload failed for {uri!r}: "
-                f"status={result.status}, body={result.body[:1000]!r}",
-            )
+        ) as result:
+            if result.status not in {200, 201}:
+                raise SyncHttpStatusError(
+                    result.status,
+                    f"GCS media upload failed for {uri!r}: "
+                    f"status={result.status}, body={result.body[:1000]!r}",
+                )
 
     retry_sync(
         request,
@@ -193,14 +193,14 @@ def _list_page(
     maximum_bytes: int,
 ) -> dict[str, Any]:
     """Fetch and decode one GCS listing page."""
-    result = request_bytes(
+    with request_bytes(
         "GET",
         request_json_url(url, params),
         headers=headers,
         timeout=timeout,
         max_response_bytes=maximum_bytes,
-    )
-    return _json_result(result, context=context)
+    ) as result:
+        return _json_result(result, context=context)
 
 
 def list_directory(

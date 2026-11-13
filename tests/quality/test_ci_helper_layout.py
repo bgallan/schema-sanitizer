@@ -7,11 +7,13 @@ directories and rejects obsolete flat-script locations.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import struct
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -84,7 +86,7 @@ def _windows_toolchain_tree(tmp_path: Path) -> tuple[Path, dict[str, Path]]:
             f"{prefix}COMPILER_ARCHITECTURE_ID": "x64",
             f"{prefix}COMPILER_ID": "MSVC",
             f"{prefix}COMPILER_LOADED": "1",
-            f"{prefix}COMPILER_VERSION": "19.44.35228.0",
+            f"{prefix}COMPILER_VERSION": "19.44.35229.0",
             f"{prefix}COMPILER_WORKS": "TRUE",
             f"{prefix}PLATFORM_ID": "Windows",
             f"{prefix}SIZEOF_DATA_PTR": "8",
@@ -533,6 +535,57 @@ def test_windows_toolchain_certificate_supports_direct_sanitizer_builds(
     )
 
 
+def test_windows_toolchain_drift_prepares_a_certifiable_review_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A compiler patch yields a reviewable diff while DLL hashes remain pinned."""
+    from meta.ci.native import prepare_windows_toolchain_candidate as candidate
+
+    policy = json.loads(candidate.certification.WINDOWS_TOOLCHAIN.read_text(encoding="utf-8"))
+    reviewed_version = policy["compiler_version"]
+    version_parts = reviewed_version.split(".")
+    version_parts[2] = str(int(version_parts[2]) + 1)
+    observed_version = ".".join(version_parts)
+    reviewed = tmp_path / "reviewed.json"
+    reviewed.write_text(candidate._canonical_json(policy), encoding="utf-8")
+    monkeypatch.setattr(candidate.certification, "WINDOWS_TOOLCHAIN", reviewed)
+    _root, paths = _windows_toolchain_tree(tmp_path)
+    for language in ("C", "CXX"):
+        metadata = paths[language]
+        metadata.write_text(
+            metadata.read_text(encoding="utf-8").replace(reviewed_version, observed_version),
+            encoding="utf-8",
+        )
+    redist = tmp_path / "redist"
+    redist.mkdir()
+    for stem in (
+        "msvcp140",
+        "msvcp140_1",
+        "msvcp140_atomic_wait",
+        "vcruntime140",
+        "vcruntime140_1",
+    ):
+        (redist / f"{stem}.dll").write_bytes(stem.encode("ascii"))
+
+    output = tmp_path / "candidate"
+    assert candidate.prepare_candidate(paths["cache"].parent, redist, output)
+    proposed = json.loads((output / "windows-release-toolchain.json").read_text())
+    assert proposed["compiler_version"] == observed_version
+    assert proposed["wheel_runtime_dlls"] == policy["wheel_runtime_dlls"]
+    assert json.loads(reviewed.read_text())["compiler_version"] == reviewed_version
+    patch = (output / "windows-toolchain.patch").read_text()
+    assert f'+  "compiler_version": "{observed_version}"' in patch
+    assert "tests/quality/test_ci_helper_layout.py" in patch
+    subprocess.run(
+        ["git", "apply", "--check", str(output / "windows-toolchain.patch")],
+        cwd=ROOT,
+        check=True,
+    )
+    observed = json.loads((output / "observed.json").read_text())
+    assert observed["drift"] is True
+    assert observed["redist_dlls"]["msvcp140.dll"] == hashlib.sha256(b"msvcp140").hexdigest()
+
+
 @pytest.mark.parametrize(
     ("entry", "replacement"),
     (
@@ -599,7 +652,7 @@ def test_windows_toolchain_certificate_rejects_cache_mismatches(
     (
         ("COMPILER", WINDOWS_COMPILER, "C:/unreviewed/cl.exe"),
         ("COMPILER_ID", "MSVC", "Clang"),
-        ("COMPILER_VERSION", "19.44.35228.0", "19.45.0"),
+        ("COMPILER_VERSION", "19.44.35229.0", "19.45.0"),
         ("PLATFORM_ID", "Windows", "Linux"),
         ("COMPILER_ARCHITECTURE_ID", "x64", "ARM64"),
         ("COMPILER_LOADED", "1", "0"),

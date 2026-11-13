@@ -111,6 +111,31 @@ class SyncHttpResult:
     headers: Mapping[str, str]
     body: bytes
 
+    def close(self) -> None:
+        """Release any operation-memory lease retained by the response body."""
+        close = getattr(self.body, "close", None)
+        if callable(close):
+            close()
+
+    def __enter__(self) -> "SyncHttpResult":
+        """Retain response ownership for one explicit consumer scope."""
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        _traceback: object | None,
+    ) -> None:
+        """Release the body without replacing a primary consumer failure."""
+        if exc is None:
+            self.close()
+            return
+        try:
+            self.close()
+        except BaseException as cleanup_error:
+            add_bounded_note(exc, "HTTP response body cleanup also failed", cleanup_error)
+
 
 def retryable_http_error(exc: Exception) -> bool:
     """Return whether a blocking HTTP operation may be retried safely."""
@@ -299,8 +324,10 @@ def request_bytes(
             location = result_headers.get("Location") or result_headers.get("location")
             if not location:
                 return SyncHttpResult(status, result_headers, payload)
-            if redirect >= _MAX_REDIRECTS:
-                raise RuntimeError(f"too many HTTP redirects for {url!r}")
+            redirect_result = SyncHttpResult(status, result_headers, payload)
+            with redirect_result:
+                if redirect >= _MAX_REDIRECTS:
+                    raise RuntimeError(f"too many HTTP redirects for {url!r}")
             current = urljoin(current, location)
             if status == 303:
                 method, body = "GET", None
@@ -336,10 +363,11 @@ def download_to_file(
                 maximum_bytes=_MAX_ERROR_RESPONSE_BYTES,
                 stage="remote_error_response",
             )
-            raise SyncHttpStatusError(
-                response.status,
-                f"HTTP download failed for {url!r}: {response.status} {body[:1000]!r}",
-            )
+            with SyncHttpResult(response.status, {}, body):
+                raise SyncHttpStatusError(
+                    response.status,
+                    f"HTTP download failed for {url!r}: {response.status} {body[:1000]!r}",
+                )
         raw_length = response.getheader("Content-Length")
         expected_length = int(raw_length) if raw_length and raw_length.isdigit() else None
         written = write_sync_reader_to_file(
@@ -398,27 +426,29 @@ def http_file_metadata(
 
     def request() -> RemoteFile | None:
         """Perform one retryable HEAD request."""
-        result = request_bytes(
+        with request_bytes(
             "HEAD",
             uri,
             timeout=budget.async_timeout_seconds,
             allow_redirects=True,
-        )
-        if result.status in {200, 204}:
-            raw_size = result.headers.get("Content-Length") or result.headers.get("content-length")
-            size = int(raw_size) if raw_size is not None else None
-            return RemoteFile(uri, Path(urlsplit(uri).path).name, size)
-        if result.status == 404:
-            return None
-        if result.status in {401, 403}:
-            raise PermissionError(
-                f"HTTP returned a permission error while checking source object: {uri!r}"
+        ) as result:
+            if result.status in {200, 204}:
+                raw_size = result.headers.get("Content-Length") or result.headers.get(
+                    "content-length"
+                )
+                size = int(raw_size) if raw_size is not None else None
+                return RemoteFile(uri, Path(urlsplit(uri).path).name, size)
+            if result.status == 404:
+                return None
+            if result.status in {401, 403}:
+                raise PermissionError(
+                    f"HTTP returned a permission error while checking source object: {uri!r}"
+                )
+            raise SyncHttpStatusError(
+                result.status,
+                f"Unexpected HTTP response while checking source object: "
+                f"status={result.status}, uri={uri!r}",
             )
-        raise SyncHttpStatusError(
-            result.status,
-            f"Unexpected HTTP response while checking source object: "
-            f"status={result.status}, uri={uri!r}",
-        )
 
     return retry_sync(
         request,
@@ -461,18 +491,18 @@ def upload_http_file(
 
     def request() -> None:
         """Reopen and upload the complete spool for each attempt."""
-        result = upload_file_request(
+        with upload_file_request(
             "PUT",
             uri,
             local_path,
             headers=headers,
             timeout=budget.async_timeout_seconds,
-        )
-        if result.status not in {200, 201, 202, 204}:
-            raise SyncHttpStatusError(
-                result.status,
-                f"HTTP upload failed for {uri!r}: {result.status} {result.body[:1000]!r}",
-            )
+        ) as result:
+            if result.status not in {200, 201, 202, 204}:
+                raise SyncHttpStatusError(
+                    result.status,
+                    f"HTTP upload failed for {uri!r}: {result.status} {result.body[:1000]!r}",
+                )
 
     retry_sync(
         request,

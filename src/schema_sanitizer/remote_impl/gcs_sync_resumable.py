@@ -44,14 +44,14 @@ def _status(
     """Return the next byte offset durably accepted by GCS."""
     headers = dict(auth_headers)
     headers.update({"Content-Length": "0", "Content-Range": f"bytes */{total_bytes}"})
-    result = request_bytes("PUT", upload_url, headers=headers, body=b"", timeout=timeout)
-    return gcs_resumable_next_offset(
-        result.status,
-        result.headers,
-        result.body,
-        operation="status",
-        total_bytes=total_bytes,
-    )
+    with request_bytes("PUT", upload_url, headers=headers, body=b"", timeout=timeout) as result:
+        return gcs_resumable_next_offset(
+            result.status,
+            result.headers,
+            result.body,
+            operation="status",
+            total_bytes=total_bytes,
+        )
 
 
 def _send_range(
@@ -73,16 +73,16 @@ def _send_range(
             "Content-Range": f"bytes {start}-{end}/{total_bytes}",
         }
     )
-    result = request_bytes("PUT", upload_url, headers=headers, body=payload, timeout=timeout)
-    return gcs_resumable_next_offset(
-        result.status,
-        result.headers,
-        result.body,
-        operation="chunk",
-        total_bytes=total_bytes,
-        start=start,
-        end=end,
-    )
+    with request_bytes("PUT", upload_url, headers=headers, body=payload, timeout=timeout) as result:
+        return gcs_resumable_next_offset(
+            result.status,
+            result.headers,
+            result.body,
+            operation="chunk",
+            total_bytes=total_bytes,
+            start=start,
+            end=end,
+        )
 
 
 def _send_with_reconciliation(
@@ -164,28 +164,28 @@ def upload_gcs_resumable_file(
 
     def initiate() -> str:
         """Create one resumable upload session."""
-        result = request_bytes(
+        with request_bytes(
             "POST",
             url,
             headers=headers,
             body=b"",
             timeout=budget.async_timeout_seconds,
-        )
-        if result.status in {200, 201}:
-            location = result.headers.get("Location") or result.headers.get("location")
-            if location:
-                return location
-            raise RuntimeError("GCS resumable initiation returned no session location")
-        if result.status == 429 or 500 <= result.status <= 599:
-            raise _TransientGcsUploadError(
-                "GCS resumable initiation failed: "
-                f"status={result.status}, body={result.body[:1000]!r}"
+        ) as result:
+            if result.status in {200, 201}:
+                location = result.headers.get("Location") or result.headers.get("location")
+                if location:
+                    return location
+                raise RuntimeError("GCS resumable initiation returned no session location")
+            if result.status == 429 or 500 <= result.status <= 599:
+                raise _TransientGcsUploadError(
+                    "GCS resumable initiation failed: "
+                    f"status={result.status}, body={result.body[:1000]!r}"
+                )
+            raise SyncHttpStatusError(
+                result.status,
+                f"GCS resumable initiation failed for {uri!r}: "
+                f"status={result.status}, body={result.body[:1000]!r}",
             )
-        raise SyncHttpStatusError(
-            result.status,
-            f"GCS resumable initiation failed for {uri!r}: "
-            f"status={result.status}, body={result.body[:1000]!r}",
-        )
 
     source = Path(local_path)
     initial_stat = source.stat()
@@ -224,12 +224,13 @@ def upload_gcs_resumable_file(
                 release_upload_payload(payload)
     except BaseException:
         try:
-            request_bytes(
+            with request_bytes(
                 "DELETE",
                 upload_url,
                 headers=auth_headers,
                 timeout=budget.async_timeout_seconds,
-            )
+            ):
+                pass
         # Cancellation cleanup cannot mask the upload failure.
         except Exception as ignored_error:
             del ignored_error

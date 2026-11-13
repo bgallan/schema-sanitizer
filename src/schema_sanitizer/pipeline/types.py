@@ -11,8 +11,6 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
-from ..core_impl.schema_registry import _normalize_registry_json
-
 if TYPE_CHECKING:
     from ..sources.models import SourceManifest
     from .modified_time import UtcWindow
@@ -34,6 +32,8 @@ class SchemaRegistryState:
         native_registry_state: Any | None = None,
     ) -> None:
         """Create a pipeline registry state from mapping or JSON input."""
+        from ..core_impl.schema_registry import _normalize_registry_json
+
         registry_json = (
             _normalize_registry_json(schema_registry)
             if schema_registry_json is None

@@ -72,6 +72,14 @@ The `api_impl`, `core_impl`, `input_impl`, `options_impl`, `remote_impl`, and
 `adapters` packages are internal. Their names, signatures, and file layout may
 change without notice.
 
+Importing `PartitionRunPlan`, `PartitionRunResult`, and `SchemaRegistryState`,
+together with the discovery, warm-up, partition-execution, and BigQuery entry
+points intended for DAG definition, does not initialize the native runtime.
+Process managers may therefore parse application modules in a parent and start
+runtime-backed work in the child. Forking after such work has started remains
+unsupported and fails closed; use `spawn`, `forkserver`, or a fresh executable
+in that case.
+
 `threading_mode` is also internal. The public concurrency control is the
 `multi_threading` boolean. The only public resource control is
 `memory_limit_bytes`; queues, packets, workers, staging, and per-stage limits are

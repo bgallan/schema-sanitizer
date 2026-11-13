@@ -40,6 +40,7 @@ class DirectoryDownloadTuning:
 
     concurrency: int
     window: int
+    request_window: int
     retries: int
 
 
@@ -50,9 +51,14 @@ def directory_download_tuning(
     """Derive remote download controls from the shared execution policy."""
     budget = memory_budget(memory_limit_bytes)
     policy = execution_policy(threading_mode, memory_limit_bytes)
+    request_window = max(
+        1,
+        policy.async_prefetch_files // max(1, policy.remote_chunk_prefetch),
+    )
     return DirectoryDownloadTuning(
         concurrency=policy.async_concurrency,
         window=policy.async_prefetch_files,
+        request_window=request_window,
         retries=budget.async_retries,
     )
 
@@ -81,11 +87,7 @@ class RemoteDirectoryDownloadSession:
         self._memory_limit_bytes = memory_limit_bytes
         self._threading_mode = threading_mode
         self._tuning = directory_download_tuning(memory_limit_bytes, threading_mode)
-        policy = execution_policy(threading_mode, memory_limit_bytes)
-        self._request_window = max(
-            1,
-            self._tuning.window // max(1, policy.remote_chunk_prefetch),
-        )
+        self._request_window = self._tuning.request_window
         self._context: DownloadContext | None = None
         self._semaphore: asyncio.Semaphore | None = None
 

@@ -35,6 +35,7 @@ from ...core_impl.resource_lifecycle import (
     _close_suppressing_errors,
 )
 from ...remote_impl.io_coordinator import RemoteIoCoordinator
+from ...remote_impl.io_footprint import RemoteIoFootprint
 from ...remote_impl.session_lifecycle import (
     SharedDownloadSessionCloser,
     enter_shared_download_session,
@@ -155,6 +156,17 @@ class RemoteChunkPrefetchIterator:
         budget = memory_budget(manifest.memory_limit_bytes)
         self._remote_timeout_seconds = budget.async_timeout_seconds
         self._io_chunk_bytes = max(1, budget.io_chunk_bytes)
+        # Use the canonical budget ceiling rather than another pressure-sensitive
+        # execution-policy snapshot. Runtime policies may reduce this capacity,
+        # but cannot make a directory stage open more local files than this bound.
+        request_window = max(
+            1,
+            budget.async_prefetch_files // max(1, budget.remote_chunk_prefetch),
+        )
+        self._stage_local_file_capacity = max(
+            1,
+            min(budget.async_concurrency, request_window),
+        )
         self._coordinator: RemoteIoCoordinator | None = None
         self._owns_coordinator = False
         self._download_session: Any | None = None
@@ -462,10 +474,17 @@ class RemoteChunkPrefetchIterator:
             return ownership.publish(staged)
 
         try:
+            stage_weight = self._stage_permit_weight(start)
             future = coordinator.submit(
                 stage,
-                permit_weight=self._stage_permit_weight(start),
+                permit_weight=stage_weight,
                 permit_label="remote_chunk_staging",
+                footprint=RemoteIoFootprint(
+                    remote_weight=stage_weight,
+                    # Provider-session pools already own transport descriptors.
+                    network_fds=0,
+                    local_file_fds=self._stage_local_file_descriptors(start),
+                ),
             )
         except BaseException as exc:
             if storage_lease is not None:
@@ -518,6 +537,17 @@ class RemoteChunkPrefetchIterator:
             return 1
         desired = 1 + (size_bytes - 1) // self._io_chunk_bytes
         return max(1, min(self._policy.async_concurrency, desired))
+
+    def _stage_local_file_descriptors(self, start: int) -> int:
+        """Bound destination files opened concurrently by one lazy chunk."""
+        capacity = max(1, int(getattr(self, "_stage_local_file_capacity", 1)))
+        next_chunk_start = getattr(self._manifest, "next_chunk_start", None)
+        if not callable(next_chunk_start):
+            # Some internal test doubles model only lifecycle behavior. Real
+            # remote manifests always expose their deterministic chunk boundary.
+            return capacity
+        chunk_file_count = max(1, int(next_chunk_start(start)) - start)
+        return min(capacity, chunk_file_count)
 
     def _fill_prefetch_window(self) -> None:
         """Queue work through per-item claim/work/commit transactions."""
