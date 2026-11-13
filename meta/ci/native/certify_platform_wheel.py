@@ -300,7 +300,7 @@ def _windows_runtime_policy() -> tuple[dict[str, str], str]:
     if serialized != _canonical_json(payload):
         raise AssertionError("Windows toolchain policy is not canonical JSON")
     runtimes = payload.get("wheel_runtime_dlls")
-    if payload.get("format") != "schema-sanitizer-windows-toolchain-v1" or not isinstance(
+    if payload.get("format") != "schema-sanitizer-windows-toolchain-v2" or not isinstance(
         runtimes, dict
     ):
         raise AssertionError("Windows toolchain policy has an invalid format")

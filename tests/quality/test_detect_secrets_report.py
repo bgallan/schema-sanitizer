@@ -323,7 +323,7 @@ def test_advisory_digest_exclusion_rejects_a_stale_input_fingerprint(tmp_path: P
             "schema_sanitizer.libs/msvcp140-" + "12" * 16 + ".dll",
             PUBLIC_DIGEST,
             "Hex High Entropy String",
-            "schema-sanitizer-windows-toolchain-v2",
+            "schema-sanitizer-windows-toolchain-v3",
         ),
     ],
 )

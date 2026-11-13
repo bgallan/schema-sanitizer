@@ -395,7 +395,7 @@ def _watchdog_evidence(
     return evidence
 
 
-def _windows_toolchain_payload() -> dict[str, Any]:
+def _windows_toolchain_payload(compiler_version: str) -> dict[str, Any]:
     """Return the exact Windows sanitizer toolchain certificate payload."""
     _regular_file(WINDOWS_TOOLCHAIN_POLICY, "Windows toolchain policy")
     _regular_file(PROJECT_CONFIGURATION, "project configuration")
@@ -403,6 +403,13 @@ def _windows_toolchain_payload() -> dict[str, Any]:
     policy = json.loads(policy_serialized)
     if not isinstance(policy, dict) or policy_serialized != _canonical_json(policy):
         raise AssertionError("Windows toolchain policy is not canonical JSON")
+    reviewed_versions = policy.get("compiler_versions")
+    if (
+        policy.get("format") != "schema-sanitizer-windows-toolchain-v2"
+        or not isinstance(reviewed_versions, list)
+        or compiler_version not in reviewed_versions
+    ):
+        raise AssertionError("Windows sanitizer compiler version is not reviewed")
     try:
         cmake_spec = tomllib.loads(PROJECT_CONFIGURATION.read_text(encoding="utf-8"))["tool"][
             "scikit-build"
@@ -421,7 +428,7 @@ def _windows_toolchain_payload() -> dict[str, Any]:
     return {
         "build_directory": ".work/build/platform-sanitizer",
         "cmake_version": cmake_spec.removeprefix("=="),
-        "compiler": {"path": compiler, "version": policy["compiler_version"]},
+        "compiler": {"path": compiler, "version": compiler_version},
         "format": WINDOWS_TOOLCHAIN_FORMAT,
         "generator": policy["generator"],
         "generator_instance": policy["generator_instance"],
@@ -444,7 +451,11 @@ def _windows_toolchain_evidence(
     payload = json.loads(serialized)
     if not isinstance(payload, Mapping) or serialized != _canonical_json(payload):
         raise AssertionError("Windows toolchain certificate is not canonical JSON")
-    if payload != _windows_toolchain_payload():
+    compiler = payload.get("compiler")
+    compiler_version = compiler.get("version") if isinstance(compiler, Mapping) else None
+    if not isinstance(compiler_version, str) or payload != _windows_toolchain_payload(
+        compiler_version
+    ):
         raise AssertionError("Windows toolchain certificate policy mismatch")
     return [
         {

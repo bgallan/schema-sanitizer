@@ -21,9 +21,9 @@ from typing import Any
 
 WINDOWS_TOOLCHAIN = Path(__file__).with_name("windows-release-toolchain.json")
 PROJECT_CONFIGURATION = Path(__file__).resolve().parents[3] / "pyproject.toml"
-_POLICY_FORMAT = "schema-sanitizer-windows-toolchain-v1"
+_POLICY_FORMAT = "schema-sanitizer-windows-toolchain-v2"
 _POLICY_KEYS = {
-    "compiler_version",
+    "compiler_versions",
     "format",
     "generator",
     "generator_instance",
@@ -78,9 +78,22 @@ def _load_policy(path: Path) -> dict[str, Any]:
         raise AssertionError("Windows toolchain policy is not canonical JSON")
     if set(payload) != _POLICY_KEYS or payload.get("format") != _POLICY_FORMAT:
         raise AssertionError("Windows toolchain policy has an invalid schema")
-    scalar_keys = _POLICY_KEYS - {"wheel_runtime_dlls"}
+    scalar_keys = _POLICY_KEYS - {"compiler_versions", "wheel_runtime_dlls"}
     if any(not isinstance(payload[key], str) or not payload[key] for key in scalar_keys):
         raise AssertionError("Windows toolchain policy contains an invalid scalar")
+    versions = payload["compiler_versions"]
+    if (
+        not isinstance(versions, list)
+        or not versions
+        or any(
+            not isinstance(version, str) or re.fullmatch(r"[0-9]+(?:\.[0-9]+){3}", version) is None
+            for version in versions
+        )
+        or versions
+        != sorted(set(versions), key=lambda version: tuple(map(int, version.split("."))))
+        or len({tuple(version.split(".")[:2]) for version in versions}) != 1
+    ):
+        raise AssertionError("Windows toolchain policy has invalid compiler versions")
     runtimes = payload["wheel_runtime_dlls"]
     if not isinstance(runtimes, dict) or not runtimes:
         raise AssertionError("Windows toolchain policy has no runtime inventory")
@@ -193,7 +206,9 @@ def _metadata_values(path: Path, language: str) -> dict[str, str]:
     return values
 
 
-def _expected_metadata(language: str, policy: dict[str, Any]) -> dict[str, str]:
+def _expected_metadata(
+    language: str, policy: dict[str, Any], compiler_version: str
+) -> dict[str, str]:
     """Build the exact reviewed metadata values for one language."""
     prefix = f"CMAKE_{language}_"
     compiler = (
@@ -206,7 +221,7 @@ def _expected_metadata(language: str, policy: dict[str, Any]) -> dict[str, str]:
         f"{prefix}COMPILER_ARCHITECTURE_ID": "x64",
         f"{prefix}COMPILER_ID": "MSVC",
         f"{prefix}COMPILER_LOADED": "1",
-        f"{prefix}COMPILER_VERSION": policy["compiler_version"],
+        f"{prefix}COMPILER_VERSION": compiler_version,
         f"{prefix}COMPILER_WORKS": "TRUE",
         f"{prefix}PLATFORM_ID": "Windows",
         f"{prefix}SIZEOF_DATA_PTR": "8",
@@ -217,6 +232,10 @@ def _certificate_payload(
     policy: dict[str, Any], cmake_version: str, build_directory: Path
 ) -> dict[str, Any]:
     """Describe the exact certified compiler selection in portable JSON."""
+    metadata = build_directory / "CMakeFiles" / cmake_version / "CMakeCCompiler.cmake"
+    compiler_version = _metadata_values(metadata, "C")["CMAKE_C_COMPILER_VERSION"]
+    if compiler_version not in policy["compiler_versions"]:
+        raise AssertionError("Windows toolchain certificate has an unreviewed compiler version")
     compiler = (
         f"{policy['generator_instance']}/VC/Tools/MSVC/{policy['vc_tools_version']}"
         "/bin/Hostx64/x64/cl.exe"
@@ -224,7 +243,7 @@ def _certificate_payload(
     return {
         "build_directory": build_directory.as_posix(),
         "cmake_version": cmake_version,
-        "compiler": {"path": compiler, "version": policy["compiler_version"]},
+        "compiler": {"path": compiler, "version": compiler_version},
         "format": _CERTIFICATE_FORMAT,
         "generator": policy["generator"],
         "generator_instance": policy["generator_instance"],
@@ -290,10 +309,19 @@ def certify_windows_toolchain(
         raise AssertionError(
             f"generated CMake metadata version mismatch: {metadata_version!r} != {cmake_version!r}"
         )
+    selected_version: str | None = None
     for language, metadata in compiler_files.items():
         _require_tree_file(metadata, build_root, f"generated {language} compiler metadata")
         values = _metadata_values(metadata, language)
-        expected_metadata = _expected_metadata(language, policy)
+        compiler_version = values[f"CMAKE_{language}_COMPILER_VERSION"]
+        if compiler_version not in policy["compiler_versions"]:
+            raise AssertionError(
+                f"CMAKE_{language}_COMPILER_VERSION is not reviewed: {compiler_version}"
+            )
+        if selected_version is not None and compiler_version != selected_version:
+            raise AssertionError("Windows C and CXX compiler versions differ")
+        selected_version = compiler_version
+        expected_metadata = _expected_metadata(language, policy, compiler_version)
         if values != expected_metadata:
             mismatches = {
                 key: (values.get(key), expected_value)
