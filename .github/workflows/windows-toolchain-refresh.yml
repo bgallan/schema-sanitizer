@@ -1,0 +1,53 @@
+---
+name: Windows toolchain refresh candidate
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: 29 6 * * 1
+permissions:
+  contents: read
+concurrency:
+  group: windows-toolchain-refresh
+  cancel-in-progress: false
+jobs:
+  candidate:
+    name: measure reviewed Windows toolchain and prepare a patch
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: 3.11.9
+      - name: Install the hash-locked CMake probe
+        shell: bash
+        run: |-
+          set -euo pipefail
+          export PIP_DISABLE_PIP_VERSION_CHECK=1
+          export PIP_NO_INPUT=1
+          export PIP_RETRIES=3
+          export PIP_TIMEOUT=30
+          export PYTHONHASHSEED=0
+          export PYTHONUTF8=1
+          python meta/ci/quality/ensure_pinned_pip.py
+          python -m meta.ci.quality.install_locked_requirements \
+            --lock meta/ci/requirements/build-tools.txt --packages cmake
+      - name: Measure the selected compiler and bundled redistributables
+        shell: bash
+        run: |-
+          set -euo pipefail
+          python -m meta.ci.native.prepare_windows_toolchain_candidate
+          if [[ -s .work/windows-toolchain-candidate/windows-toolchain.patch ]]; then
+            git apply --check .work/windows-toolchain-candidate/windows-toolchain.patch
+          fi
+      - name: Upload the reviewable toolchain candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: windows-toolchain-candidate
+          path: .work/windows-toolchain-candidate/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 6
+          overwrite: true

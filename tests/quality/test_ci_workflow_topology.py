@@ -395,14 +395,27 @@ def test_only_trusted_maintenance_and_publish_are_manual() -> None:
         "ci.yml",
         "dependency-advisory-refresh.yml",
         "publish.yml",
+        "windows-toolchain-refresh.yml",
     }
     assert dispatched == {
         "artifact-cleanup.yml",
         "dependency-advisory-refresh.yml",
         "publish.yml",
+        "windows-toolchain-refresh.yml",
     }
-    assert scheduled == {"dependency-advisory-refresh.yml"}
+    assert scheduled == {
+        "dependency-advisory-refresh.yml",
+        "windows-toolchain-refresh.yml",
+    }
     assert "    inputs:" not in _workflow_preamble(contents["dependency-advisory-refresh.yml"])
+    candidate = contents["windows-toolchain-refresh.yml"]
+    assert "    inputs:" not in _workflow_preamble(candidate)
+    assert "  pull_request:" not in _workflow_preamble(candidate)
+    assert "  pull_request_target:" not in _workflow_preamble(candidate)
+    assert "permissions:\n  contents: read" in candidate
+    assert "persist-credentials: false" in candidate
+    assert "git apply --check" in candidate
+    assert "actions/upload-artifact@" in candidate
     assert "      source_run_id:" in _workflow_preamble(contents["artifact-cleanup.yml"])
     assert "    inputs:" in _workflow_preamble(contents["publish.yml"])
 
