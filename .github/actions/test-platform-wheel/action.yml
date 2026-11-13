@@ -54,7 +54,7 @@ runs:
     - name: Download the candidate certified platform wheel
       id: download-platform-wheel
       continue-on-error: true
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
       with:
         name: candidate-wheels-${{ inputs.platform-name }}
         path: wheelhouse
@@ -69,7 +69,7 @@ runs:
       id: retry-platform-wheel-download
       if: ${{ always() && steps.download-platform-wheel.outcome == 'failure' && steps.reset-platform-wheel-download.outcome == 'success' }}
       continue-on-error: true
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
       with:
         name: candidate-wheels-${{ inputs.platform-name }}
         path: wheelhouse
@@ -84,7 +84,7 @@ runs:
       id: download-retained-platform-wheel
       if: ${{ always() && inputs.producer-result == 'success' && steps.download-platform-wheel.outcome == 'failure' && steps.retry-platform-wheel-download.outcome == 'failure' && steps.reset-before-retained-platform-wheel.outcome == 'success' }}
       continue-on-error: true
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
       with:
         name: dist-wheels-${{ inputs.platform-name }}
         path: wheelhouse
@@ -99,7 +99,7 @@ runs:
       id: retry-retained-platform-wheel-download
       if: ${{ always() && steps.download-retained-platform-wheel.outcome == 'failure' && steps.reset-retained-platform-wheel-download.outcome == 'success' }}
       continue-on-error: true
-      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
       with:
         name: dist-wheels-${{ inputs.platform-name }}
         path: wheelhouse
@@ -463,7 +463,7 @@ runs:
       if: ${{ always() && steps.platform-wheel-availability.outputs.available == 'true' }}
       id: upload-platform-test-evidence
       continue-on-error: true
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
       with:
         name: platform-test-evidence-${{ inputs.platform-name }}-${{ inputs.shard
           }}
@@ -474,7 +474,7 @@ runs:
         overwrite: true
     - name: Retry the exact platform-test evidence upload
       if: ${{ always() && steps.platform-wheel-availability.outputs.available == 'true' && steps.upload-platform-test-evidence.outcome == 'failure' }}
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
       with:
         name: platform-test-evidence-${{ inputs.platform-name }}-${{ inputs.shard
           }}

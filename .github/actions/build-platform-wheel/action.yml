@@ -35,7 +35,7 @@ runs:
             exit 2
             ;;
         esac
-    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+    - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
       with:
         # Use one exact patch on all four platforms. Test shards use it too.
         python-version: 3.11.9
@@ -353,7 +353,7 @@ runs:
         meta/ci/native/check_no_libarrow_linkage.sh "${EXT_PATH}"
     - name: Set up CPython 3.12 for stable-ABI functional coverage
       if: inputs.artifact == 'linux'
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
       with:
         python-version: 3.12.11
     - name: Exercise the ABI3 wheel on CPython 3.12
@@ -370,7 +370,7 @@ runs:
         python -I meta/ci/release/downstream_smoke.py
     - name: Set up CPython 3.13 for stable-ABI functional coverage
       if: inputs.artifact == 'linux'
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
       with:
         python-version: 3.13.15
     - name: Exercise the ABI3 wheel on CPython 3.13
@@ -386,7 +386,7 @@ runs:
         python -m pip install --no-deps --only-binary=:all: wheelhouse/*.whl
         python -I meta/ci/release/downstream_smoke.py
     - name: Set up the newest supported Python
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
       with:
         python-version: 3.14.7
     - name: Verify the ABI3 wheel on Python 3.14
@@ -413,7 +413,7 @@ runs:
         python -I meta/ci/release/downstream_smoke.py
     - name: Set up the next CPython release candidate
       if: inputs.artifact == 'linux'
-      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
       with:
         python-version: 3.15.0-rc.1
     - name: Probe the ABI3 wheel on CPython 3.15 RC
@@ -430,7 +430,7 @@ runs:
     - name: Upload the certified platform wheel
       id: upload-certified-platform-wheel
       continue-on-error: true
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
       with:
         name: candidate-wheels-${{ inputs.platform-name }}
         path: |-
@@ -442,7 +442,7 @@ runs:
         overwrite: true
     - name: Retry certified platform wheel upload
       if: ${{ always() && steps.upload-certified-platform-wheel.outcome == 'failure' }}
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
       with:
         name: candidate-wheels-${{ inputs.platform-name }}
         path: |-

@@ -114,7 +114,7 @@ runs:
     - name: Upload the native coverage certificate
       id: upload-native-coverage-certificate
       continue-on-error: true
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
       with:
         name: native-coverage-certificate
         path: coverage-native/native-coverage-certificate.json
@@ -124,7 +124,7 @@ runs:
         overwrite: true
     - name: Retry the native coverage certificate upload
       if: ${{ always() && steps.upload-native-coverage-certificate.outcome == 'failure' }}
-      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
       with:
         name: native-coverage-certificate
         path: coverage-native/native-coverage-certificate.json
